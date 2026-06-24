@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // publish-html.mjs — upload a standalone HTML file to an encrypted artifact Worker
-// Node 20+ required (top-level await, globalThis.crypto Web Crypto API)
+// Node 22+ required (Wrangler 4.x tooling requires Node 22+; CI uses Node 24)
 
 import { readFileSync, unlinkSync } from 'node:fs';
 import { basename } from 'node:path';

@@ -49,7 +49,7 @@ flowchart LR
 
 ## Prerequisites
 
-- [Node.js 20+](https://nodejs.org/)
+- [Node.js 22+](https://nodejs.org/) (Node 24 is used in CI)
 - [Wrangler CLI](https://developers.cloudflare.com/workers/wrangler/install-and-update/) authenticated with your Cloudflare account
 - A Cloudflare account with Workers, R2, and D1 enabled
 

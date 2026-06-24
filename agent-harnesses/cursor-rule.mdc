@@ -1,0 +1,45 @@
+---
+description: Publish standalone HTML files as shareable encrypted URLs using html-artifact-publisher
+globs: ["*.html"]
+alwaysApply: false
+---
+
+# Publishing HTML artifacts
+
+When the user asks to publish, share, or upload an HTML file, use the publisher script.
+
+## Required environment variables
+
+- `HTML_PUBLISHER_URL` — Worker base URL (e.g. `https://artifacts.example.com`)
+- `HTML_PUBLISHER_TOKEN` — API bearer token
+
+If either is missing, tell the user what to export and stop.
+
+## Steps
+
+1. Confirm the file starts with `<!doctype html` or `<html`.
+2. Run:
+   ```bash
+   node scripts/publish-html.mjs --json --title "<title>" <file.html>
+   ```
+3. Capture `viewerUrl` from the JSON output — it includes the `#fragment` decryption key.
+4. Return `viewerUrl` to the user.
+5. Surface any non-empty `warningMessages` from JSON output.
+
+## Key rules
+
+- **Never strip the `#fragment`** from `viewerUrl`. It is the AES-256-GCM key; without it the artifact is permanently unreadable.
+- **`--delete-local`** only for files the agent generated in the current session when the user explicitly asks for cleanup. Never for user-owned source files.
+- If upload fails, leave the file untouched and report the raw error.
+- The `deleteToken` in the response allows early deletion. Share it with the user if they might need to revoke access before expiry.
+
+## TTL options
+
+`--ttl 1h | 6h | 24h | 7d | 30d | never` (default: `7d`)
+
+## Delete
+
+```bash
+curl -X DELETE $HTML_PUBLISHER_URL/api/pages/<id> \
+  -H "X-Delete-Token: <deleteToken>"
+```

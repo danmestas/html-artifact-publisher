@@ -1,0 +1,56 @@
+{
+  "name": "html-artifact-publisher",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-06-23",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "observability": {
+    "enabled": true
+  },
+
+  "routes": [
+    {
+      "pattern": "example.com",
+      "custom_domain": true
+    }
+  ],
+
+  "r2_buckets": [
+    {
+      "binding": "PAGES",
+      "bucket_name": "html-artifact-publisher-pages",
+      // Replace with real bucket name after `wrangler r2 bucket create html-artifact-publisher-pages`
+      "preview_bucket_name": "html-artifact-publisher-pages-dev"
+    }
+  ],
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "html-artifact-publisher",
+      // Replace with real database_id after `wrangler d1 create html-artifact-publisher`
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+
+  // BEARER_TOKEN is a secret — set it with: wrangler secret put BEARER_TOKEN
+  // It is NOT declared in vars; `wrangler types` will include it from the stub.
+
+  "vars": {
+    "PUBLIC_BASE_URL": "https://example.com",
+    // Maximum TTL in seconds (30 days)
+    "MAX_TTL_SECONDS": "2592000",
+    // Default TTL when not specified (7 days)
+    "DEFAULT_TTL_SECONDS": "604800",
+    // Maximum payload size in bytes (10 MB)
+    "MAX_PAYLOAD_BYTES": "10485760"
+  },
+
+  "triggers": {
+    "crons": [
+      // Run expired-page cleanup every hour
+      "0 * * * *"
+    ]
+  }
+}

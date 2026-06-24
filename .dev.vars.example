@@ -1,0 +1,2 @@
+# Copy to .dev.vars for local development. Do not commit real secrets.
+BEARER_TOKEN=local-dev-token-change-me

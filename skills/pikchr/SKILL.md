@@ -1,6 +1,6 @@
 ---
 name: pikchr
-description: Load before drawing any diagram for an artifact page (architecture, data flow, sequence, state machine, boundary or before/after figure). Pikchr is the default diagram language - use it unless the user asks for another. The page holds the Pikchr source in <pre class="pikchr"> and the viewer renders it (light and dark SVG, page font) with Pikchr's wasm, which it only loads for pages that have a diagram. Covers the language including arcs and splines, the house style, polishing in Pikchr Studio through a #z= link, checking with render.mjs, and the pitfalls. Use with artifact-diagrams (what to draw) and artifact-design (the page around it).
+description: Load before drawing any diagram for an artifact page (architecture, data flow, sequence, state machine, boundary or before/after figure). Pikchr is the default diagram language - use it unless the user asks for another. The page holds the Pikchr source in <pre class="pikchr"> and the viewer renders it (light and dark SVG, page font) with Pikchr's wasm, which it only loads for pages that have a diagram. Covers the language including its curves (rounded elbows, arcs, splines, rounded regions), the house style, polishing in Pikchr Studio through a #z= link, checking with render.mjs, and the pitfalls. Use with artifact-diagrams (what to draw) and artifact-design (the page around it).
 ---
 
 # Pikchr diagrams for artifacts
@@ -132,39 +132,50 @@ D: box "D" at (3, -1)            # absolute position: fine on a grid, and what S
 Full reference: https://pikchr.org/home/doc/trunk/doc/userman.md and the grammar at
 https://pikchr.org/home/doc/trunk/doc/grammar.md.
 
-### Curves: arcs and splines
+### Curves
 
-Straight and orthogonal lines are the default. Reach for a curve when it says something a
-straight line can't, and in more complex diagrams use them deliberately:
+Straight and orthogonal lines are the default. Use a curve when its shape means something,
+and in larger diagrams use each kind for its own job. Pikchr has four:
 
-- **`arc`** for a return or a loop: a retry back to an earlier state, a feedback path, a
-  self-transition. `arc -> from Running.s to Queued.s cw` bows below the row (`cw` turns
-  clockwise from start to end; without it the arc turns counter-clockwise, so add or drop
-  `cw` to flip the bow). Pikchr draws an arc as one quadratic Bézier with a fixed,
-  quarter-turn bow; `rad` does not change it. For a flatter or deeper curve, use a spline
-  through a point you choose. An arc with no endpoints is a quarter circle in the current
-  direction.
-- **`spline`** for a path that must go around something: it runs through the points you
-  give (`from`, each `then`, `to`) and smooths every corner into a Bézier curve.
-  `spline -> from A.n up 0.35 then right until even with C.n then down 0.35 to C.n`
-  bows over a box instead of crossing it. Give the first and last legs the direction the
-  line should leave and enter the boxes (here `up` and `down`), or the ends kink.
-- **Labels on curves** go where the curve has room, not on the line: inside an arc's bow
-  (`at (A.s.x + B.s.x)/2, A.s.y - 0.32`), or just outside a spline's flat run. `aligned`
-  text follows only straight segments, so don't use it on curves.
-- Style a secondary or exceptional path (cancel, timeout, fallback) as `dashed` in
-  `$muted`, and keep the main path solid in `$ink`. That way the reader sees the normal
-  flow first.
-- Don't curve a line just to look softer. If every edge curves, none of them stands out.
+| Curve | Write it as | Shape | Use it for |
+|---|---|---|---|
+| Rounded elbows | `rad` on a multi-segment `line`/`arrow`: `arrow from Db.e right until even with Out.s then up to Out.s rad 0.15` | straight runs, each corner rounded with that radius | orthogonal routing in flowcharts and architecture diagrams; the default way to bend a connector |
+| Arc | `arc -> from A to B [cw]` | one quadratic Bézier with a fixed quarter-turn bow | returns, retries and self-loops (`from Box.ne - (0.25,0) to Box.nw + (0.25,0)` loops over a box) |
+| Spline | `spline -> from P then to Q then to R` | smooth curve through the *midpoints* of the segments; `Q` is a control point the curve bends toward but doesn't touch | free-form detours around other shapes, flows that should read as organic |
+| Rounded closed path | `line from P ... then ... close rad 0.2` | a polygon with rounded corners, fillable | soft regions and groupings that aren't boxes (an L-shaped zone, a "blob" behind several objects) |
 
-`skills/pikchr/examples/state-machine.pikchr` shows both: a retry arc under the row, and a
-dashed cancel spline over it.
+Details that matter:
+
+- **Arcs:** `cw` bows clockwise from start to end; without it the arc bows the other way
+  (`ccw` is the default). The bow is fixed: `rad` and `radius` don't change it, and an arc
+  takes exactly two points ("arc geometry error" otherwise). For a flatter or deeper
+  curve, use a spline with one control point placed where you want the bulge.
+- **Splines:** because the curve passes through segment midpoints, put control points
+  beyond where you want the curve to reach. Give the first and last legs the direction
+  the line should leave and enter its boxes (`from A.n up 0.35 then ... then down 0.35 to
+  C.n`), or the ends meet the boxes at an angle. `rad` on a spline makes its corners
+  tighter (smaller value means sharper).
+- **Rounded elbows:** keep one radius per diagram (0.1–0.2), the same feel as `boxrad`.
+  The radius shrinks automatically on short segments.
+- **True circular arcs** appear only in box corners (`boxrad`/`rad` on a box) and cylinder
+  ends; there is no free-standing circular-arc object.
+- **Labels on curves** go where the curve leaves room, never on the line: inside an arc's
+  bow, beside a vertical run, or above a spline's flat stretch. `aligned` text follows
+  only straight segments; don't use it on curves.
+- **Style by meaning, not looks:** the main path is solid `$ink`; exceptional paths
+  (cancel, timeout, refresh, fallback) are `dashed` `$muted`. If every edge curves, none
+  stands out.
+
+Examples in `skills/pikchr/examples/`: `state-machine.pikchr` (a retry arc under the row,
+a cancel spline over it) and `routes.pikchr` (a rounded-elbow miss path, a refresh
+self-loop arc, and a rounded closed region).
 
 ## House style
 
 What separates a clean Pikchr figure from a default one. The examples in
 `skills/pikchr/examples/` (`publish-flow.pikchr`, a flow with a boundary;
-`state-machine.pikchr`, states with an arc and a spline) follow every rule here. Start
+`state-machine.pikchr`, states with an arc and a spline; `routes.pikchr`, rounded elbows,
+a self-loop and a rounded region) follow every rule here. Start
 from them.
 
 **Set the defaults once, at the top.**
@@ -214,7 +225,8 @@ anchors of what it contains (`wid Repo.e.x - API.w.x + 0.3`), and place it with 
 edge, and put its own label inside a corner in `small italic $muted`.
 
 **One reading direction; no crossings.** Main flow left to right; a secondary path drops
-down. Route around shapes with `then` segments instead of crossing them. If two lines
+down. Route around shapes with `then` segments (rounded with `rad`) instead of crossing
+them. If two lines
 must cross, move a box.
 
 **Keep it narrow.** The natural width shows in `--check` (`ok: 827×344 px`). Under about

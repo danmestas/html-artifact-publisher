@@ -10,7 +10,7 @@ import { fontsUsed } from '../public/fonts.js';
 const render = (args, input) => spawnSync(process.execPath, ['skills/pikchr/render.mjs', ...args], { input, encoding: 'utf8' });
 
 test('the skill examples render', () => {
-  for (const f of ['publish-flow', 'state-machine']) {
+  for (const f of ['publish-flow', 'state-machine', 'routes']) {
     const r = render([`skills/pikchr/examples/${f}.pikchr`, '--check']);
     assert.equal(r.status, 0, r.stderr);
   }

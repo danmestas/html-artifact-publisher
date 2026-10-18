@@ -1,18 +1,16 @@
 #!/usr/bin/env node
-// publish-html.mjs — publish and update encrypted HTML artifacts.
+// publish-html.mjs — publish and update HTML artifacts.
 // Node 22+ required (Wrangler 4.x tooling requires Node 22+; CI uses Node 24)
 //
-// An artifact is a Fossil repository (built with the same wasm the viewer
-// runs, public/fossil.wasm.gz), encrypted here before upload. Every publish
-// or update is a check-in, so the artifact keeps its full history.
+// Every artifact is a Fossil repository on the server; every publish or
+// update is a check-in, so the artifact keeps its full history and can be
+// cloned with fossil.
 
 import { readFileSync, readdirSync, statSync, unlinkSync, writeFileSync, mkdirSync } from 'node:fs';
 import { basename, dirname, join, relative, sep } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { userInfo } from 'node:os';
-import { loadFossil } from '../public/lib/fossil.js';
-import { newKey, parseFragment, fragment } from '../public/lib/vault.js';
-import { Artifact, ConflictError, createArtifact } from '../public/lib/client.js';
+import { Artifact, ConflictError, createArtifact, listArtifacts, parseFragment } from '../public/client.js';
 
 const HELP = `
 Usage:
@@ -41,12 +39,13 @@ A URL may end in @<check-in> to read that version.
 
 Environment variables:
   HTML_PUBLISHER_URL    Base URL of the publisher Worker (publish, list)
-  HTML_PUBLISHER_TOKEN  Bearer token for the Worker API (publish, list; optional elsewhere)
+  HTML_PUBLISHER_TOKEN  Owner bearer token (publish, list)
 
 Links:
-  https://<your-domain>/v/<id>#<key>               read link: share this
-  https://<your-domain>/v/<id>#<key>.<writeToken>  edit link: keep this; it can update and delete
-  The key lives only in the URL fragment — the server never sees it.
+  https://<your-domain>/v/<id>#<readToken>    read link: share this
+  https://<your-domain>/v/<id>#<writeToken>   edit link: keep this; it can update and delete
+  https://editor:<writeToken>@<your-domain>/r/<id>   fossil clone URL
+  Tokens travel in the URL fragment, which browsers do not send to servers or put in Referer.
 `;
 
 // ---------------------------------------------------------------------------
@@ -106,15 +105,15 @@ function parseTtl(raw) {
   return m[2] === 'h' ? n * 3_600 : n * 86_400;
 }
 
-/** Parse an artifact link into its origin, id and fragment parts. */
+/** Parse an artifact link into its origin, id, token and check-in. */
 function parseLink(raw) {
   let url;
   try { url = new URL(raw); } catch { die(`not a URL: ${raw}`); }
   const m = /^\/v\/([A-Za-z0-9_-]{1,64})$/.exec(url.pathname);
-  if (!m) die(`not an artifact link (expected /v/<id>#<key>): ${raw}`);
+  if (!m) die(`not an artifact link (expected /v/<id>#<token>): ${raw}`);
   let parts;
   try { parts = parseFragment(url.hash); } catch (e) { die(e.message); }
-  return { base: url.origin, id: m[1], ...parts };
+  return { base: url.origin, id: m[1], ...parts, art: new Artifact(url.origin, m[1], parts.token) };
 }
 
 /** Read a file or directory into { path: bytes }, with warnings for external URLs. */
@@ -157,8 +156,6 @@ function readInput(path) {
   return { files, warnings };
 }
 
-const fossil = await loadFossil(readFileSync(new URL('../public/fossil.wasm.gz', import.meta.url)));
-
 // ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
@@ -172,27 +169,24 @@ async function publish() {
   const sourceName = basename(filePath);
   const title = flagValue('--title') ?? sourceName;
 
-  fossil.create(title, user);
-  const checkin = fossil.commit(files, flagValue('--message') ?? `Publish ${sourceName}`, user);
-  const key = newKey();
-  const result = await createArtifact(base, token, key, fossil, {
+  const result = await createArtifact(base, token, {
     title,
-    sourceName,
+    files,
+    user,
+    message: flagValue('--message') ?? `Publish ${sourceName}`,
     ttlSeconds: parseTtl(flagValue('--ttl') ?? '7d'),
     slug: flagValue('--slug'),
   });
-
-  const viewerUrl = result.viewerUrl + fragment({ key });
-  const editUrl = result.viewerUrl + fragment({ key, write: result.writeToken });
   output({
     id: result.id,
-    viewerUrl,
-    editUrl,
-    checkin: checkin.uuid,
+    viewerUrl: result.viewerUrl,
+    editUrl: result.editUrl,
+    cloneUrl: result.cloneUrl,
+    checkin: result.tip,
     expiresAt: result.expiresAt ?? null,
     warnings: warnings.length,
     warningMessages: warnings,
-  }, viewerUrl);
+  }, result.viewerUrl);
 
   if (hasFlag('--delete-local') && !statSync(filePath).isDirectory()) {
     try {
@@ -208,69 +202,53 @@ async function update() {
   const [rawUrl, filePath] = positional;
   if (!rawUrl || !filePath) die('usage: update <edit-url> <file.html | dir>');
   const link = parseLink(rawUrl);
-  if (!link.write && !process.env.HTML_PUBLISHER_TOKEN) {
-    die('this is a read link; updating needs the edit link (…#<key>.<writeToken>) or HTML_PUBLISHER_TOKEN');
-  }
   const { files, warnings } = readInput(filePath);
-  const art = await Artifact.open(link.base, link.id, link.key, link.write, fossil,
-    { bearer: process.env.HTML_PUBLISHER_TOKEN });
-
-  const forks = fossil.leaves();
-  if (forks.length > 1 && !jsonOnly) {
-    console.warn(`Warning: the artifact has ${forks.length} leaves (concurrent edits); committing on the latest.`);
-  }
-  let checkin;
+  const { tip, role } = await link.art.info();
+  if (role !== 'write') die('this is a read link; updating needs the edit link');
+  let result;
   try {
-    checkin = fossil.commit(files, flagValue('--message') ?? `Update ${basename(filePath)}`, user);
-  } catch (e) {
-    die(e.message);
-  }
-  try {
-    await art.save({ title: flagValue('--title') });
+    result = await link.art.publish(tip, files, flagValue('--message') ?? `Update ${basename(filePath)}`, {
+      title: flagValue('--title'), user,
+    });
   } catch (e) {
     if (e instanceof ConflictError) die(`${e.message}. Nothing was saved.`, 3);
-    throw e;
+    die(e.message);
   }
-  const viewerUrl = `${link.base}/v/${link.id}${fragment({ key: link.key })}`;
-  output({ id: art.id, viewerUrl, checkin: checkin.uuid, warnings: warnings.length, warningMessages: warnings }, viewerUrl);
+  const viewerUrl = `${link.base}/v/${link.id}`;
+  output({ id: link.id, viewerUrl, checkin: result.tip, warnings: warnings.length, warningMessages: warnings }, viewerUrl);
 }
 
 async function read() {
   const [rawUrl] = positional;
   if (!rawUrl) die('usage: read <url> [--out <dir>]');
   const link = parseLink(rawUrl);
-  await Artifact.open(link.base, link.id, link.key, '', fossil);
-  const names = fossil.files(link.at);
+  const { files, missing } = await link.art.bundle(link.at);
+  const names = Object.keys(files);
   const out = flagValue('--out');
   if (!out) {
     const entry = names.includes('index.html') ? 'index.html' : names.find(n => /\.html?$/i.test(n));
-    process.stdout.write(fossil.read(entry, link.at));
+    process.stdout.write(files[entry]);
     return;
   }
   for (const name of names) {
     const dest = join(out, ...name.split('/'));
     mkdirSync(dirname(dest), { recursive: true });
-    writeFileSync(dest, fossil.read(name, link.at));
+    writeFileSync(dest, files[name]);
   }
   if (!jsonOnly) console.log(`Wrote ${names.length} file(s) to ${out}`);
+  if (missing?.length) console.warn(`Warning: missing from this version: ${missing.join(', ')}`);
 }
 
 async function history() {
   const [rawUrl] = positional;
   if (!rawUrl) die('usage: history <url>');
-  const link = parseLink(rawUrl);
-  await Artifact.open(link.base, link.id, link.key, '', fossil);
-  const timeline = fossil.timeline();
+  const { timeline } = await parseLink(rawUrl).art.info();
   if (jsonOnly) return console.log(JSON.stringify(timeline));
   for (const c of timeline) console.log(`${c.uuid.slice(0, 12)}  ${c.time}  ${c.user.padEnd(10)}  ${c.comment}`);
 }
 
 async function list() {
-  const res = await fetch(`${env('HTML_PUBLISHER_URL')}/api/artifacts`, {
-    headers: { Authorization: `Bearer ${env('HTML_PUBLISHER_TOKEN')}` },
-  });
-  if (!res.ok) die(`list failed with HTTP ${res.status}`);
-  const { artifacts } = await res.json();
+  const { artifacts } = await listArtifacts(env('HTML_PUBLISHER_URL'), env('HTML_PUBLISHER_TOKEN'));
   if (jsonOnly) return console.log(JSON.stringify(artifacts));
   for (const a of artifacts) console.log(`${a.id}  ${a.updatedAt}  ${a.title}`);
 }
@@ -279,11 +257,7 @@ async function remove() {
   const [rawUrl] = positional;
   if (!rawUrl) die('usage: delete <edit-url>');
   const link = parseLink(rawUrl);
-  const headers = {};
-  if (link.write) headers['X-Write-Token'] = link.write;
-  if (process.env.HTML_PUBLISHER_TOKEN) headers.Authorization = `Bearer ${process.env.HTML_PUBLISHER_TOKEN}`;
-  const res = await fetch(`${link.base}/a/${link.id}`, { method: 'DELETE', headers });
-  if (res.status !== 204) die(`delete failed with HTTP ${res.status}`);
+  await link.art.remove();
   if (!jsonOnly) console.log(`Deleted ${link.id}`);
 }
 
@@ -321,6 +295,7 @@ function output(result, viewerUrl) {
     console.log(JSON.stringify(result, null, 2));
     console.log(`\nPublished: ${viewerUrl}`);
     if (result.editUrl) console.log(`   Edit link (keep private): ${result.editUrl}`);
+    if (result.cloneUrl) console.log(`   Clone (keep private):     fossil clone ${result.cloneUrl}`);
     if (result.expiresAt) console.log(`   Expires:   ${new Date(result.expiresAt).toLocaleString()}`);
   }
   // Clipboard — best-effort; the upload already succeeded

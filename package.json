@@ -8,8 +8,11 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
+    "build:wasm": "sh fossil/build.sh",
     "types": "wrangler types --env-file .dev.vars.example",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --test-concurrency=1 test/*.test.mjs",
+    "test:go": "cd fossil && go vet ./... && go test ./..."
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

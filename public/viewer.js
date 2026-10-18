@@ -1,11 +1,9 @@
-// viewer.js — opens /v/<id>#<key>[.<write>][@<check-in>]: fetches the
-// encrypted repository, decrypts it, and renders the chosen check-in (trunk
-// tip by default) in the sandboxed iframe. The page inside gets a small
-// `window.artifact` API over postMessage; the key never enters the iframe.
+// viewer.js — opens /v/<id>#<token>[@<check-in>]: loads the chosen check-in
+// (trunk tip by default) from the artifact's Fossil repository and renders it
+// in the sandboxed iframe. The page inside gets a small `window.artifact` API
+// over postMessage; the access token never enters the iframe.
 
-import { loadFossil } from './lib/fossil.js';
-import { parseFragment, fragment } from './lib/vault.js';
-import { Artifact, ConflictError } from './lib/client.js';
+import { Artifact, ConflictError, parseFragment, fragment } from './client.js';
 
 const $ = id => document.getElementById(id);
 const NONCE = document.querySelector('meta[name="artifact-nonce"]')?.content ?? '';
@@ -13,8 +11,10 @@ const WATCH_MS = 60_000;
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
-let art = null;      // the open Artifact
-let link = null;     // { key, write, at } from the fragment
+let art = null;      // the Artifact API client
+let link = null;     // { token, at } from the fragment
+let info = null;     // { title, role, tip, timeline } as last loaded
+let shown = null;    // { checkin, files } being shown
 let frameUrl = '';   // blob: URL of the rendered page, revoked on the next render
 
 function fail(message) {
@@ -90,12 +90,11 @@ const RUNTIME = `(function(){
 // load this page's blob: URLs. So the other files of the check-in are inlined:
 // scripts and stylesheets become inline tags, everything else a data: URL.
 function render() {
-  const f = art.fossil;
-  const names = f.files(link.at);
+  const names = Object.keys(shown.files);
   const entry = names.includes('index.html') ? 'index.html' : names.find(n => /\.html?$/i.test(n));
   if (!entry) throw new Error('this version has no .html file to show');
 
-  const bytes = name => f.read(name, link.at);
+  const bytes = name => shown.files[name];
   const text = name => dec.decode(bytes(name));
   const inRepo = (ref, from) => {
     const path = resolvePath(ref, from);
@@ -154,7 +153,7 @@ function render() {
     frame.style.display = 'block';
   };
   frame.src = frameUrl;
-  document.title = doc.title || 'Artifact';
+  document.title = doc.title || info.title || 'Artifact';
   renderHistory();
 }
 
@@ -163,16 +162,13 @@ function render() {
 function renderHistory() {
   const list = $('historyList');
   list.replaceChildren();
-  let current = '';
-  try { current = art.fossil.tip(link.at).uuid; } catch { /* unknown check-in */ }
-  const tip = art.fossil.tip('').uuid;
-  for (const c of art.fossil.timeline()) {
+  for (const c of info.timeline) {
     const a = document.createElement('a');
-    a.href = fragment({ key: link.key, write: link.write, at: c.uuid === tip ? '' : c.uuid.slice(0, 16) });
-    a.setAttribute('aria-current', String(c.uuid === current));
+    a.href = fragment({ token: link.token, at: c.uuid === info.tip ? '' : c.uuid.slice(0, 16) });
+    a.setAttribute('aria-current', String(c.uuid === shown.checkin));
     a.textContent = c.comment || '(no comment)';
     const meta = document.createElement('small');
-    meta.textContent = `${new Date(c.time).toLocaleString()} · ${c.user} · ${c.uuid.slice(0, 10)}${c.uuid === tip ? ' · latest' : ''}`;
+    meta.textContent = `${new Date(c.time).toLocaleString()} · ${c.user} · ${c.uuid.slice(0, 10)}${c.uuid === info.tip ? ' · latest' : ''}`;
     a.append(meta);
     const li = document.createElement('li');
     li.append(a);
@@ -186,50 +182,34 @@ $('historyClose').addEventListener('click', () => { $('history').hidden = true; 
 
 // ─── The page's window.artifact API ──────────────────────────────────────────
 
-const toBytes = v => (v instanceof Uint8Array ? v : enc.encode(String(v)));
-
-/** Run `change` on the newest version and save it, retrying after a lost race. */
-async function saveWith(change, opts = {}, retries = 3) {
-  for (let i = 0; ; i++) {
-    change();
-    try {
-      return await art.save(opts);
-    } catch (e) {
-      if (!(e instanceof ConflictError) || i >= retries) throw e;
-      await art.reload();
-    }
-  }
-}
-
 const ops = {
-  canWrite: () => art.canWrite(),
-  files: () => art.fossil.files(link.at),
-  read: path => dec.decode(art.fossil.read(path, link.at)),
-  history: () => art.fossil.timeline(),
+  canWrite: () => info.role === 'write',
+  files: () => Object.keys(shown.files),
+  read: path => {
+    if (!(path in shown.files)) throw new Error(`${path} is not in this version`);
+    return dec.decode(shown.files[path]);
+  },
+  history: () => info.timeline,
 
-  // A new check-in. Unlike data.set this refuses to retry after a conflict:
-  // re-applying it would silently overwrite whatever the other writer saved.
+  // A new check-in on top of the latest version. It refuses when someone else
+  // published since this page loaded, rather than overwrite their work; the
+  // viewer then knows the new tip, so calling again builds on it.
   async publish(files, message) {
-    const changed = Object.fromEntries(Object.entries(files ?? {}).map(([k, v]) => [k, toBytes(v)]));
     try {
-      art.fossil.commit(changed, String(message || 'Edited in the page'), 'web');
-      await art.save();
+      const r = await art.publish(info.tip, files ?? {}, String(message || 'Edited in the page'));
+      await reload(false);
+      return { uuid: r.tip };
     } catch (e) {
-      if (e instanceof ConflictError) await art.reload();
+      if (e instanceof ConflictError) await reload(false);
       throw e;
     }
-    renderHistory();
-    return { uuid: art.fossil.tip('').uuid };
   },
 
-  // Page data: unversioned files holding JSON, last writer wins per name.
-  dataGet(name) {
-    try { return JSON.parse(dec.decode(art.fossil.uvRead('data/' + name))); } catch { return null; }
-  },
-  dataList: () => art.fossil.uvList().filter(f => f.name.startsWith('data/')).map(f => f.name.slice(5)),
+  // Page data: small JSON values outside the history, last writer wins per name.
+  dataGet: name => art.dataGet(name),
+  dataList: () => art.dataList(),
   async dataSet(name, value) {
-    const bytes = enc.encode(JSON.stringify(value));
-    await saveWith(() => art.fossil.uvWrite('data/' + name, bytes));
+    await art.dataSet(name, value);
     return true;
   },
 };
@@ -247,45 +227,51 @@ addEventListener('message', async e => {
 
 // ─── Watching for new versions ───────────────────────────────────────────────
 
-let lastSeen = '';
 async function watch() {
   if (document.visibilityState !== 'visible' || !art) return;
   try {
-    if ((await art.changed()) && art.etag !== lastSeen) $('banner').hidden = false;
+    if ((await art.tip()) !== info.tip) $('banner').hidden = false;
   } catch { /* offline: try again next time */ }
 }
 setInterval(watch, WATCH_MS);
-$('bannerShow').addEventListener('click', async () => {
+$('bannerShow').addEventListener('click', () => {
   $('banner').hidden = true;
-  await art.reload();
-  lastSeen = art.etag;
-  render();
+  reload(true).catch(e => fail(e.message));
 });
 
 // ─── Start ───────────────────────────────────────────────────────────────────
 
+/** Load the timeline, and with `show` the check-in the link names. */
+async function reload(show) {
+  info = await art.info();
+  if (show) {
+    shown = await art.bundle(link.at);
+    if (shown.missing?.length) console.warn('missing from this version:', shown.missing.join(', '));
+    render();
+  } else {
+    renderHistory();
+  }
+}
+
 async function main() {
   const m = /^\/v\/([A-Za-z0-9_-]{1,64})$/.exec(location.pathname);
-  if (!m || !NONCE) return fail('Open an artifact link: /v/<id>#<key>');
+  if (!m || !NONCE) return fail('Open an artifact link: /v/<id>#<token>');
   try {
     link = parseFragment(location.hash);
   } catch (e) {
     return fail(e.message);
   }
-  const wasm = fetch('/fossil.wasm.gz').then(r => r.arrayBuffer());
-  const fossil = await loadFossil(await wasm);
-  art = await Artifact.open(location.origin, m[1], link.key, link.write, fossil);
-  lastSeen = art.etag;
-  render();
+  art = new Artifact(location.origin, m[1], link.token);
+  await reload(true);
 }
 
 addEventListener('hashchange', () => {
   try {
     const next = parseFragment(location.hash);
-    if (art && next.key.join() === link.key.join()) {
+    if (art && next.token === link.token) {
       link = next;
       $('history').hidden = true;
-      render();
+      reload(true).catch(e => fail(e.message));
     } else {
       location.reload();
     }
@@ -294,4 +280,4 @@ addEventListener('hashchange', () => {
   }
 });
 
-main().catch(e => fail(String(e.message ?? e)));
+main().catch(e => fail(e.status === 404 ? 'This artifact does not exist, has expired, or the link is wrong.' : String(e.message ?? e)));

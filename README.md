@@ -1,403 +1,239 @@
 # html-artifact-publisher
 
-A Cloudflare Worker that lets you publish standalone HTML files as shareable, encrypted URLs. The HTML payload is encrypted before upload; the decryption key lives only in the URL fragment, while titles, source names, slugs, timestamps, and hashes remain plaintext metadata.
+A Cloudflare Worker that publishes HTML pages as private, versioned links. Every artifact is a [Fossil](https://fossil-scm.org) repository held by its own SQLite-backed Durable Object: each publish or update is a check-in, a page can have several files, pages can save their own edits and data, and the whole artifact can be cloned with `fossil clone`.
 
 ```
-you run  →  encrypt locally  →  upload blob  →  get https://your.domain/v/abc123#<key>
-                                                                              ↑
-                                          key never leaves the browser ───────┘
+you run  →  publish-html.mjs page.html  →  https://<host>/v/<id>#<readToken>      share this
+                                           https://<host>/v/<id>#<writeToken>     keep this: it can update
+                                           https://editor:<writeToken>@<host>/r/<id>   fossil clone
 ```
 
-## Why encrypted by default
-
-Artifacts often contain work-in-progress content, agent outputs, or data you don't want indexed, cached, or visible to the hosting provider. Encrypting before upload means:
-
-- **Payload stays opaque.** R2 stores `iv || AES-256-GCM-ciphertext`. The Worker cannot read the HTML content even if compromised; only uploader-provided metadata remains plaintext.
-- **Key is transport-opaque.** URL fragments are not sent to servers in HTTP requests. The key travels only browser-side.
-- **No key rotation complexity.** Each artifact gets its own fresh 256-bit key. Revocation is deletion.
-- **Share by copy.** The URL *is* the access credential. Shorten the URL and you shorten the key; both become unusable.
-
-The tradeoff: if you lose the URL you lose the key. There is no recovery. That is intentional.
+The design, the spike that proved it and the alternatives that were set aside are written up in [the design document](https://claude.ai/artifact/Bf1cJt7wSt7iV9QAn2mst1).
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    cli["publish-html.mjs\nencrypts locally"]
-    worker["Cloudflare Worker"]
-    r2["R2 Bucket\niv + ciphertext"]
-    d1["D1 Database\nmetadata"]
-    browser["Browser"]
-    iframe["sandboxed iframe\ndecrypted HTML"]
+    cli["publish-html.mjs"]
+    fossilc["fossil clone / push"]
+    browser["Viewer\n(sandboxed iframe)"]
+    worker["Worker\nroutes + access"]
+    registry["Registry DO\nids, slugs, titles"]
+    repo["Repo DO, one per artifact\ngo-libfossil (wasm) + SQLite"]
+    notify["notify\n(optional)"]
 
-    cli -- "POST /api/pages\nBearer token" --> worker
-    worker -- "store blob" --> r2
-    worker -- "store metadata" --> d1
-    browser -- "GET /v/:id shell" --> worker
-    browser -- "GET /blob/:id" --> worker
-    worker -- "read blob" --> r2
-    browser -- "decrypt + render\nfragment key" --> iframe
+    cli -- "HTTP API" --> worker
+    fossilc -- "POST /r/:id" --> worker
+    browser -- "GET /v/:id, API" --> worker
+    worker --> registry
+    worker --> repo
+    worker -- "X-Wake" --> notify
 ```
 
-**R2** holds the raw encrypted blobs. Blob format is `iv[12 bytes] || AES-GCM-ciphertext`.
+**The Repo object** holds one Fossil repository in its own SQLite database: Fossil's real tables (`blob`, `event`, `mlink`, `leaf` and the rest), plus one row naming the artifact and the hashes of its two tokens. [go-libfossil](https://github.com/danmestas/go-libfossil), compiled to WebAssembly with TinyGo (`fossil/`, about 0.9 MB gzipped), runs inside the object and reaches that database through `dosql`, a small `database/sql` driver over the object's synchronous `ctx.storage.sql`. Each request is one call into go-libfossil inside one SQLite transaction, so it either completes or leaves nothing behind.
 
-**D1** holds metadata: title, source name, SHA-256 of the ciphertext (integrity), expiry, and a SHA-256 of the delete token. It does not store plaintext HTML content or decryption keys.
+**The Registry object** maps ids and slugs to artifacts and lists them for the owner. It holds no content.
 
-**Worker** orchestrates uploads, serves the viewer shell and raw blobs, and runs a cron to delete expired pages every hour.
+**The Worker** routes requests and serves the viewer. It never parses Fossil itself.
 
-**Viewer shell** is a thin HTML page with inline JavaScript. It fetches the blob, reads the key from `location.hash`, decrypts with WebCrypto, and renders the result inside a sandboxed `<iframe>`. The server is not involved in decryption.
+**The viewer** (`public/viewer.html`, `viewer.js`) loads the chosen check-in through the API and renders it inside a sandboxed iframe with a per-response CSP nonce. It has a History panel, notices when a newer version is published, and gives the page the `window.artifact` API below. The access token never enters the iframe.
+
+### Access
+
+| Who | How | Can |
+|-----|-----|-----|
+| Owner | `Authorization: Bearer <BEARER_TOKEN>` | Everything, including create and list |
+| Read link | token after `#`, sent as `Authorization: Token <t>` | Read every version and the page data; `fossil clone` as `viewer` |
+| Edit link | token after `#` | Also publish versions, save page data, delete; `fossil push` as `editor` |
+| Anyone else | | Nothing: unknown and forbidden both answer 404, and anonymous clones are refused |
+
+Tokens live in the URL fragment, which browsers send neither to servers nor in `Referer`. A link may end in `@<check-in>` (a hash prefix, tag or branch) to show that version. Content is not encrypted: anyone with access to the Cloudflare account can read it, as with any hosted service.
+
+### Cost
+
+On the Workers Paid plan ($5/month) a modest deployment stays inside the included usage: 1M Durable Object requests, 400k GB-s, 25B rows read, 50M rows written and 5 GB stored per month. 1,000 artifacts of about 1 MB with 100k views and 5k updates a month fit with room to spare. The design document has the details.
 
 ## Prerequisites
 
-- [Node.js 22+](https://nodejs.org/) (Node 24 is used in CI)
-- [Wrangler CLI](https://developers.cloudflare.com/workers/wrangler/install-and-update/) authenticated with your Cloudflare account
-- A Cloudflare account with Workers, R2, and D1 enabled
+- [Node.js 22+](https://nodejs.org/) (CI uses Node 24)
+- [Go 1.26+](https://go.dev/dl/) and [TinyGo 0.43+](https://tinygo.org/getting-started/install/) to build the Fossil engine (set `GO_COMPILER=go` to build with standard Go instead: larger, no TinyGo needed)
+- A Cloudflare account on the Workers Paid plan
 
 ## Quick start
 
-The short path from clone to first published artifact. The [full setup guide](#cloudflare-setup) below has the details.
-
 ```bash
-# 1. Install
 npm install
+npm run build:wasm                 # fossil/ → src/fossil.wasm
+npm run deploy:prod                # secrets from Doppler (see Deploying)
 
-# 2. Create Cloudflare resources (run once)
-wrangler r2 bucket create html-artifact-publisher-pages
-wrangler d1 create html-artifact-publisher    # copy the database_id into wrangler.jsonc
-wrangler d1 migrations apply html-artifact-publisher
-
-# 3. Set the secret bearer token
-wrangler secret put BEARER_TOKEN              # paste a strong random token when prompted
-
-# 4. Deploy
-npm run deploy
-
-# 5. Publish your first artifact
-export HTML_PUBLISHER_URL=https://<your-worker-domain>
+export HTML_PUBLISHER_URL=https://html-artifact-publisher.<your-subdomain>.workers.dev
 export HTML_PUBLISHER_TOKEN=<your-bearer-token>
 node scripts/publish-html.mjs --title "My first artifact" my-page.html
-# → prints viewerUrl with #fragment key and copies it to clipboard
 ```
 
-The `viewerUrl` is the complete share link. Send it to anyone — no account, no login, no server-side decryption required to view it.
+## Deploying
 
-## Cloudflare setup
+Merging a pull request into `main` deploys it. `.github/workflows/ci.yml` runs on every pull request and push: typecheck, Go unit tests, the TinyGo build and the end-to-end tests. On a push to `main` its `deploy` job deploys the very build that passed, then checks `/healthz`.
 
-All commands run from the repo root. Replace placeholders like `<your-domain>` with your actual values.
+Secrets live in [Doppler](https://www.doppler.com). The deploy job reads them with `doppler run` and uploads the Worker's own secrets with the deploy itself (`wrangler deploy --secrets-file`), so a new version never runs without them. One-time setup:
 
-### 1. Install dependencies
+1. In Doppler, create the project `html-artifact-publisher` with a `prd` config holding:
+   - `CLOUDFLARE_API_TOKEN`: a Cloudflare API token from the **Edit Cloudflare Workers** template
+   - `CLOUDFLARE_ACCOUNT_ID`
+   - `BEARER_TOKEN`: the owner token, e.g. `openssl rand -hex 32`
+   - `NOTIFY_API_KEY` (optional)
+2. Create a Doppler service token for that config, and add it to the GitHub repository as the secret `DOPPLER_TOKEN` (until it exists, merges skip the deploy with a warning), under an environment named `production` (or as a repository secret). Environment protection rules, if you add any, gate every deploy.
+3. For a custom domain, add a `routes` entry to `wrangler.jsonc`; otherwise the Worker is served on `workers.dev`.
 
-```bash
-npm install
-```
+To deploy by hand with the same secrets: `npm run build:wasm && npm run deploy:prod`.
 
-### 2. Create the R2 bucket
-
-```bash
-wrangler r2 bucket create html-artifact-publisher-pages
-# For local dev preview (optional):
-wrangler r2 bucket create html-artifact-publisher-pages-dev
-```
-
-### 3. Create the D1 database
-
-```bash
-wrangler d1 create html-artifact-publisher
-```
-
-Copy the `database_id` from the output and update `wrangler.jsonc`:
-
-```jsonc
-"d1_databases": [
-  {
-    "binding": "DB",
-    "database_name": "html-artifact-publisher",
-    "database_id": "<paste-your-database-id-here>",
-    "migrations_dir": "migrations"
-  }
-]
-```
-
-### 4. Update the public base URL
-
-In `wrangler.jsonc`, set `PUBLIC_BASE_URL` to your Worker's domain:
-
-```jsonc
-"vars": {
-  "PUBLIC_BASE_URL": "https://<your-domain>"
-}
-```
-
-Also update the `routes` block if you are using a custom domain:
-
-```jsonc
-"routes": [
-  { "pattern": "<your-domain>", "custom_domain": true }
-]
-```
-
-### 5. Run database migrations
-
-```bash
-# Remote (production):
-wrangler d1 migrations apply html-artifact-publisher
-
-# Local dev only:
-wrangler d1 migrations apply html-artifact-publisher --local
-```
-
-### 6. Set the bearer token secret
-
-Generate a strong token (e.g. `openssl rand -hex 32`) and set it as a Worker secret:
-
-```bash
-wrangler secret put BEARER_TOKEN
-# Paste your token when prompted. It is stored encrypted in Cloudflare — never in wrangler.jsonc.
-```
-
-### 7. Deploy
-
-```bash
-npm run deploy
-```
-
-Confirm the deployment with:
-
-```bash
-curl https://<your-domain>/healthz
-# → {"status":"ok","ts":...}
-```
+The Durable Object classes are created by the `v1` migration in `wrangler.jsonc` on the first deploy.
 
 ## Local development
 
-Copy the example env file and set a local token:
-
 ```bash
-cp .dev.vars.example .dev.vars
-# Edit .dev.vars: set BEARER_TOKEN to any local test value
+cp .dev.vars.example .dev.vars     # set BEARER_TOKEN to any local value
+npm run build:wasm
+npm run dev                        # http://localhost:8787
+
+npm run test:go                    # driver and size-limit unit tests
+npm test                           # end-to-end: API, access, fossil clone/push, CLI
 ```
 
-Start the dev server (uses local R2 and D1 by default via Wrangler's local miniflare runtime):
-
-```bash
-npm run dev
-```
-
-The Worker runs at `http://localhost:8787`. Point `HTML_PUBLISHER_URL` at it for local publishing:
-
-```bash
-HTML_PUBLISHER_URL=http://localhost:8787 \
-HTML_PUBLISHER_TOKEN=your-local-token \
-  node scripts/publish-html.mjs my-artifact.html
-```
+The end-to-end tests start their own `wrangler dev` with fresh state, and build `fossil/cmd/fsclient`, a minimal native Fossil client, for the clone and push tests.
 
 ## CLI usage
 
 ```bash
-node scripts/publish-html.mjs [options] <file.html>
+node scripts/publish-html.mjs [publish] [options] <file.html | dir>
+node scripts/publish-html.mjs update <edit-url> <file.html | dir> [--message <text>] [--title <text>]
+node scripts/publish-html.mjs read <url>[@<check-in>] [--out <dir>]
+node scripts/publish-html.mjs history <url>
+node scripts/publish-html.mjs list
+node scripts/publish-html.mjs delete <edit-url>
 ```
 
-**Options:**
+A single file is stored as `index.html`; a directory is stored as-is and needs an `index.html` (or another `.html` file). Updating adds and changes files; files missing from the directory are kept from the previous version.
 
 | Flag | Description | Default |
 |------|-------------|---------|
 | `--title <text>` | Display title | filename |
 | `--ttl <duration>` | `1h`, `6h`, `24h`, `7d`, `30d`, `never` | `7d` |
-| `--slug <slug>` | Vanity slug `[a-z0-9-]{1,64}` — appears in URL instead of random ID | — |
-| `--delete-local` | Delete the local HTML file after confirmed upload | off |
-| `--json` | Machine-readable JSON on stdout; no human output | off |
-| `--copy` | Copy viewerUrl to clipboard even when `--json` is set | off |
-| `--no-clipboard` | Suppress clipboard in any mode | off |
+| `--slug <slug>` | Vanity slug `[a-z0-9-]{1,64}` in the URL instead of the id | — |
+| `--message <text>` | Check-in comment | `Publish <name>` / `Update <name>` |
+| `--delete-local` | Delete the local HTML file after upload | off |
+| `--json` | Machine-readable JSON only | off |
+| `--copy` / `--no-clipboard` | Force or suppress copying the read link | copy unless `--json` |
 
-**Required environment variables:**
+`HTML_PUBLISHER_URL` and `HTML_PUBLISHER_TOKEN` are needed for `publish` and `list`; the other commands take everything from the link.
 
-```bash
-export HTML_PUBLISHER_URL=https://<your-domain>
-export HTML_PUBLISHER_TOKEN=<your-bearer-token>
-```
+`update` exits with code `3` when someone published after it read the tip: nothing was saved, and running it again builds on the newer version. It exits `1` with "nothing changed" when every file matches the tip.
 
-### Examples
-
-```bash
-# Basic publish — prints result + copies URL to clipboard
-node scripts/publish-html.mjs report.html
-
-# With a title, 30-day TTL, and vanity slug
-node scripts/publish-html.mjs --title "Q2 Results" --ttl 30d --slug q2-results report.html
-
-# Never expires
-node scripts/publish-html.mjs --ttl never permanent.html
-
-# Clean up the local file once it's safely uploaded
-node scripts/publish-html.mjs --delete-local artifact.html
-
-# Machine-readable JSON for piping into other tools
-node scripts/publish-html.mjs --json artifact.html | jq .viewerUrl
-
-# JSON but also copy to clipboard (URL on stderr note, JSON clean on stdout)
-node scripts/publish-html.mjs --json --copy artifact.html
-```
-
-### Human output
-
-```
-{
-  "id": "abc123XYZ_def",
-  "viewerUrl": "https://your.domain/v/abc123XYZ_def#<base64url-key>",
-  "blobUrl":   "https://your.domain/blob/abc123XYZ_def",
-  "expiresAt": "2026-07-31T00:00:00.000Z",
-  "deleteToken": "deadbeef...",
-  "warnings": 0,
-  "warningMessages": []
-}
-
-Published: https://your.domain/v/abc123XYZ_def#<base64url-key>
-   Expires:   7/31/2026, 12:00:00 AM
-   Copied to clipboard
-```
-
-### JSON output (`--json`)
+### Output (`--json`)
 
 ```json
 {
   "id": "abc123XYZ_def",
-  "viewerUrl": "https://your.domain/v/abc123XYZ_def#<base64url-key>",
-  "blobUrl": "https://your.domain/blob/abc123XYZ_def",
+  "viewerUrl": "https://<host>/v/abc123XYZ_def#<readToken>",
+  "editUrl": "https://<host>/v/abc123XYZ_def#<writeToken>",
+  "cloneUrl": "https://editor:<writeToken>@<host>/r/abc123XYZ_def",
+  "checkin": "7d20a3563c541938…",
   "expiresAt": "2026-07-31T00:00:00.000Z",
-  "deleteToken": "deadbeef...",
   "warnings": 0,
   "warningMessages": []
 }
 ```
 
-Clipboard behavior by mode:
+Share `viewerUrl`. Keep `editUrl` and `cloneUrl` private.
 
-| Mode | Clipboard |
-|------|-----------|
-| Human (default) | Best-effort copy of `viewerUrl`; prints `Copied to clipboard` or `Clipboard unavailable` |
-| `--json` | Silent, no clipboard |
-| `--json --copy` | Best-effort copy; `# clipboard: copied` or `# clipboard: unavailable` on stderr; stdout stays clean JSON |
-| `--no-clipboard` | Clipboard suppressed in all modes |
-
-Clipboard uses `pbcopy` on macOS, `clip` on Windows, and tries `wl-copy` → `xclip` → `xsel` on Linux. Failure is non-fatal.
-
-> **The `#fragment` is the key.** If you strip the fragment from the URL the artifact becomes permanently unreadable. Do not log, shorten, or proxy the URL in ways that drop the fragment.
-
-### External URL warnings
-
-If your HTML references `http://` or `https://` URLs, the script prints a warning:
-
-```
-Warning: 3 external reference(s) detected.
-  Warning: external URL: https://cdn.example.com/style.css
-  ...
-  Artifact may not render offline and could leak referrer information.
-```
-
-This is advisory, not blocking. A fully self-contained artifact (inlined CSS, JS, and images) is always preferable.
-
-## Deleting an artifact
-
-Use the `deleteToken` from the upload response:
+### Working with Fossil directly
 
 ```bash
-curl -X DELETE https://<your-domain>/api/pages/<id> \
-  -H "X-Delete-Token: <deleteToken>"
+fossil clone "https://editor:<writeToken>@<host>/r/<id>" page.fossil
+fossil open page.fossil && $EDITOR index.html && fossil commit -m "Edit" && fossil push
 ```
 
-Or use the bearer token (useful for admin cleanup):
+The viewer shows the new check-in at once. Concurrent pushes become two leaves, as in any Fossil repository; the latest is shown. The end-to-end tests exercise clone and push with go-libfossil's own client; the server speaks Fossil's standard sync protocol, which stock `fossil` also uses.
 
-```bash
-curl -X DELETE https://<your-domain>/api/pages/<id> \
-  -H "Authorization: Bearer <your-bearer-token>"
-```
+## Pages that save themselves
 
-## Listing artifacts
+Inside the viewer, a page can use `window.artifact` (every call returns a promise):
 
-```bash
-curl https://<your-domain>/api/pages \
-  -H "Authorization: Bearer <your-bearer-token>"
-```
+| Call | Does |
+|------|------|
+| `canWrite()` | `true` when opened with the edit link |
+| `files()`, `read(path)` | The files of the version being shown |
+| `history()` | All check-ins, newest first |
+| `publish({ path: text }, message)` | Check in changed files. Rejects if someone else published first; calling again builds on the newer version |
+| `data.get(name)`, `data.set(name, value)`, `data.list()` | Small JSON values stored with the artifact but outside its history; last writer wins |
 
-Returns `{ "pages": [...] }` with page records sorted newest-first. Titles and source names are plaintext (provided by the uploader at publish time). No HTML content is exposed.
+The viewer's CSP blocks every network request from the page, so bundle everything: relative `<script src>`, stylesheet, image, font and media references to files in the same check-in are inlined when rendering. ES module imports and `fetch()` of relative files are not.
 
-## Size limits and TTL
+## Agent wake-up (optional)
 
-| Setting | Default | Configurable via |
-|---------|---------|-----------------|
-| Max payload | 10 MB | `MAX_PAYLOAD_BYTES` in `wrangler.jsonc` vars |
-| Default TTL | 7 days | `DEFAULT_TTL_SECONDS` in `wrangler.jsonc` vars |
-| Max TTL | 30 days | `MAX_TTL_SECONDS` in `wrangler.jsonc` vars |
-| No expiry | pass `--ttl never` | — |
+An update sent with the header `X-Wake: <kind>` asks the Worker to tell an agent through [notify](https://github.com/danmestas/notify): it posts to `NOTIFY_URL/v1/inbox/conversations/NOTIFY_AGENT/messages` with conversation `artifact-<id>`. Only the id and check-in are sent; the agent pulls the change itself. Set `NOTIFY_URL`, `NOTIFY_AGENT` and optionally `NOTIFY_SUBSCRIBER` in `wrangler.jsonc`, and `wrangler secret put NOTIFY_API_KEY`.
 
-The 10 MB limit applies to the encrypted ciphertext. The original HTML is slightly smaller (AES-GCM adds a 16-byte authentication tag). In practice R2 can hold files much larger; the limit exists to control egress costs and Worker memory.
+## HTTP API
+
+| Route | Access | Does |
+|-------|--------|------|
+| `POST /api/artifacts` | owner | Create: `{title, files: {path: base64}, slug?, ttlSeconds?, message?}` → `{id, tip, viewerUrl, editUrl, cloneUrl, expiresAt}` |
+| `GET /api/artifacts` | owner | List, most recently updated first |
+| `GET /api/artifacts/:id` | read | `{title, role, tip, timeline, expiresAt}`; `?tip` returns only the tip |
+| `PUT /api/artifacts/:id` | write | `{parent, files, message?, title?}` → `{tip, parent}`; `409` when `parent` is not the tip |
+| `DELETE /api/artifacts/:id` | write | Delete |
+| `GET /api/artifacts/:id/bundle?at=` | read | `{checkin, files: {path: base64}, missing}` |
+| `GET /api/artifacts/:id/files/<path>?at=` | read | One file's bytes |
+| `GET /api/artifacts/:id/data[/<name>]` | read | Page data names, or one value (`null` when unset) |
+| `PUT /api/artifacts/:id/data/<name>` | write | Store a JSON value |
+| `POST /r/:id` | Fossil login | Fossil sync protocol |
+| `GET /v/:id` | — | The viewer |
+
+## Limits
+
+| Limit | Value | Why |
+|-------|-------|-----|
+| One file, compressed | about 1.99 MB | A Durable Object's SQLite holds at most 2 MB per value, and Fossil stores each file in one row. Larger files are refused with `413` (API) or a sync error (`fossil push`) |
+| Request body | 10 MB | `MAX_PAYLOAD_BYTES` |
+| Default / max TTL | 7 days / 30 days, or `--ttl never` | `DEFAULT_TTL_SECONDS`, `MAX_TTL_SECONDS`; expiry is a Durable Object alarm |
+| Repository | 10 GB | Per Durable Object |
+
+A `fossil push` that includes an oversized file is refused, but if Fossil sent the check-in in an earlier round than the file, that check-in arrives without the file. The viewer then shows the other files, and the bundle lists the gap under `missing`. Storing large files in pieces belongs in go-libfossil and is planned.
 
 ## Safety model
 
 | Property | How |
 |----------|-----|
-| Server-side confidentiality | R2 stores only `iv \|\| ciphertext` for the HTML body. D1 stores plaintext metadata: title, source name, slug, timestamps, size, and SHA-256 of ciphertext/delete token. |
-| Key isolation | The 256-bit AES key is generated on the client, appended to the URL as a `#fragment`, and never transmitted to the server in any HTTP request. |
-| Integrity | SHA-256 of the ciphertext is verified by the Worker before storing. The viewer verifies AES-GCM authentication tag on decrypt. |
-| Token security | Bearer token and delete token comparisons use timing-safe equality. Delete tokens are stored as SHA-256 hashes. |
-| Viewer sandboxing | Decrypted HTML renders inside `<iframe sandbox="allow-scripts allow-forms allow-modals allow-popups" referrerpolicy="no-referrer">`. The iframe cannot access parent-document cookies, local storage, or same-origin APIs. |
-| CSP | Viewer shell uses script and style nonces. Artifacts get the same nonce injected. |
-| No indexing | All responses carry `X-Robots-Tag: noindex, nofollow` and `Referrer-Policy: no-referrer`. |
+| Access | Owner bearer token, or per-artifact read and write tokens compared by SHA-256 hash with timing-safe equality. Fossil logins `viewer` and `editor` use the same tokens; `nobody` and `anonymous` have no capabilities |
+| Atomic requests | Each request runs in one SQLite transaction; any error rolls it back |
+| Lost updates | API updates must name the tip they started from (`409` otherwise); Fossil pushes fork instead of overwriting |
+| Viewer sandboxing | `<iframe sandbox="allow-scripts allow-forms allow-modals allow-popups">` with an opaque origin; it cannot read the token |
+| CSP | Per-response nonce on the page's scripts and styles; `default-src 'none'` and `connect-src 'self'` |
+| No indexing | `X-Robots-Tag: noindex, nofollow` and `Referrer-Policy: no-referrer` on every response |
 
-**What this does not protect against:** anyone with the full URL (including fragment) can view the artifact. The key is only as secret as the URL. Use expiry (`--ttl`) for anything time-sensitive.
-
-## Scheduled cleanup
-
-A Cloudflare cron runs every hour (`0 * * * *`). It queries D1 for expired pages, deletes the R2 blobs in parallel batches of 100, then removes the D1 rows. No action needed on your part.
-
-To trigger cleanup manually during development:
-
-```bash
-curl -X POST "http://localhost:8787/__scheduled?cron=0+*+*+*+*"
-```
-
-## CI
-
-The repo ships a minimal GitHub Actions workflow (`.github/workflows/ci.yml`) that installs dependencies, regenerates Wrangler types, and runs a TypeScript no-emit check:
-
-```bash
-npm run types      # wrangler types --env-file .dev.vars.example
-npm run typecheck  # tsc --noEmit
-```
-
-No Cloudflare credentials are required — `wrangler types` reads from `wrangler.jsonc` and the example env file.
+**Not protected:** content is stored unencrypted on Cloudflare, and anyone holding a link has its access until the artifact is deleted or expires.
 
 ## Repo layout
 
 ```
 .
-├── .github/
-│   └── workflows/
-│       └── ci.yml                CI: install, wrangler types, tsc --noEmit
+├── .github/workflows/ci.yml   Checks on every PR; deploy on merge to main
 ├── src/
-│   └── index.ts                  Cloudflare Worker (routes, upload, viewer, cleanup)
-├── scripts/
-│   └── publish-html.mjs          CLI publisher (Node 20+, no build step)
-├── migrations/
-│   └── 0001_pages.sql            D1 schema (pages table + indexes)
-├── skills/
-│   └── publish-html-page/
-│       └── SKILL.md              OMP / Oh My Pi skill definition
-├── agent-harnesses/              Copy-paste fragments for other harnesses
-│   ├── agents-md-fragment.md     Codex / AGENTS.md
-│   ├── claude-md-fragment.md     CLAUDE.md injection
-│   ├── cursor-rule.mdc           Cursor (.cursor/rules/ or .cursorrules)
-│   ├── windsurf-rule.md          Windsurf (.windsurf/rules/)
-│   └── system-prompt-fragment.md Generic system-prompt / instructions
-├── docs/
-│   └── agent-harnesses.md        Harness install guide
-├── worker-configuration.d.ts     Generated Wrangler types (committed)
-├── wrangler.jsonc                 Worker config (bindings, routes, vars, crons)
-├── tsconfig.json
-├── package.json
-└── .dev.vars.example             Local dev env template (no real secrets)
+│   ├── index.ts               Worker: routes, access, viewer
+│   ├── repo.ts                Repo Durable Object (one per artifact)
+│   ├── registry.ts            Registry Durable Object
+│   ├── fossil.ts              Loads the wasm; one transaction per call
+│   └── util.ts
+├── fossil/                    go-libfossil server program (Go module)
+│   ├── main_js.go             Operations: create, commit, bundle, sync, …
+│   ├── dosql_js.go            database/sql driver over ctx.storage.sql
+│   ├── classify.go            What the driver emulates (unit-tested)
+│   ├── limits.go              The one-row size limit (unit-tested)
+│   ├── cmd/fsclient/          Native Fossil client for the e2e tests
+│   └── build.sh               TinyGo (default) or Go build
+├── public/                    Viewer shell and the shared API client
+├── scripts/                   publish-html.mjs (CLI), deploy.sh (deploy with secrets from the environment)
+├── test/e2e.test.mjs          End-to-end tests
+├── skills/, agent-harnesses/, docs/   Instructions for agents
+└── wrangler.jsonc
 ```
-
-## Agent harness integration
-
-See [`docs/agent-harnesses.md`](docs/agent-harnesses.md) for copy-paste instructions covering OMP skills, Claude Code skills, project-local skills, Codex / AGENTS.md, Cursor rules, Windsurf rules, and generic system-prompt fragments.

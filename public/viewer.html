@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<!-- The Worker fills this in with the response's CSP nonce (src/index.ts, handleViewer). -->
+<meta name="artifact-nonce" content="">
+<title>Artifact</title>
+<link rel="stylesheet" href="/viewer.css">
+</head>
+<body>
+<div id="shell">
+  <div id="ring"></div>
+  <div id="msg">Loading…</div>
+</div>
+<iframe id="frame"
+  sandbox="allow-scripts allow-forms allow-modals allow-popups"
+  referrerpolicy="no-referrer"
+  title="Artifact"></iframe>
+<div id="banner" hidden>A newer version was published. <button id="bannerShow" type="button">Show it</button></div>
+<button id="historyBtn" type="button" hidden>History</button>
+<aside id="history" hidden>
+  <header><strong>Versions</strong><button id="historyClose" type="button" aria-label="Close">×</button></header>
+  <ol id="historyList"></ol>
+</aside>
+<script type="module" src="/viewer.js"></script>
+</body>
+</html>

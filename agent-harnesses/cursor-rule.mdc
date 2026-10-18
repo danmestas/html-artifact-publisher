@@ -1,5 +1,5 @@
 ---
-description: Publish standalone HTML files as shareable encrypted URLs using html-artifact-publisher
+description: Publish standalone HTML files as shareable, versioned URLs using html-artifact-publisher
 globs: ["*.html"]
 alwaysApply: false
 ---
@@ -17,21 +17,31 @@ If either is missing, tell the user what to export and stop.
 
 ## Steps
 
-1. Confirm the file starts with `<!doctype html` or `<html`.
-2. Run:
+1. Confirm the file starts with `<!doctype html` or `<html`, and is self-contained (the viewer blocks all network requests). Files over about 1.99 MB compressed are refused.
+2. Run (a directory publishes a multi-file page):
    ```bash
-   node scripts/publish-html.mjs --json --title "<title>" <file.html>
+   node scripts/publish-html.mjs --json --title "<title>" <file.html | dir>
    ```
-3. Capture `viewerUrl` from the JSON output — it includes the `#fragment` decryption key.
-4. Return `viewerUrl` to the user.
+3. Capture `viewerUrl` (`/v/<id>#<readToken>`), `editUrl` (`/v/<id>#<writeToken>`) and `cloneUrl` (`https://editor:<writeToken>@<host>/r/<id>`, for `fossil clone`/`push`) from the JSON output.
+4. Return `viewerUrl` to the user. Keep `editUrl` and `cloneUrl` to yourself for later updates.
 5. Surface any non-empty `warningMessages` from JSON output.
+
+## Update
+
+Each publish or update is a versioned check-in. To revise an artifact, update it at the same URL instead of publishing a new one:
+
+```bash
+node scripts/publish-html.mjs update --json "<editUrl>" <file.html | dir> --message "<what changed>"
+```
+
+It needs the edit link (a read link fails). Exit code 3 means a version conflict (someone published since; nothing saved): rerun to build on the newer version. Exit code 1 "nothing changed" means the files match the latest version. `history <url>` lists versions; `list` shows your artifacts.
 
 ## Key rules
 
-- **Never strip the `#fragment`** from `viewerUrl`. It is the AES-256-GCM key; without it the artifact is permanently unreadable.
+- **Never strip the `#fragment`** from `viewerUrl`. It is the access token; without it the link cannot open the artifact.
 - **`--delete-local`** only for files the agent generated in the current session when the user explicitly asks for cleanup. Never for user-owned source files.
 - If upload fails, leave the file untouched and report the raw error.
-- The `deleteToken` in the response allows early deletion. Share it with the user if they might need to revoke access before expiry.
+- **Keep `editUrl` and `cloneUrl` private.** They can update and delete the artifact. Never print them into public places (PRs, issues, commits, channels, logs).
 
 ## TTL options
 
@@ -40,6 +50,5 @@ If either is missing, tell the user what to export and stop.
 ## Delete
 
 ```bash
-curl -X DELETE $HTML_PUBLISHER_URL/api/pages/<id> \
-  -H "X-Delete-Token: <deleteToken>"
+node scripts/publish-html.mjs delete "<editUrl>"
 ```

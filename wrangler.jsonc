@@ -8,49 +8,45 @@
     "enabled": true
   },
 
-  "routes": [
-    {
-      "pattern": "example.com",
-      "custom_domain": true
-    }
-  ],
+  // Served at https://html-artifact-publisher.<your-subdomain>.workers.dev.
+  // For a custom domain add: "routes": [{ "pattern": "<your-domain>", "custom_domain": true }]
+  "workers_dev": true,
 
-  "r2_buckets": [
-    {
-      "binding": "PAGES",
-      "bucket_name": "html-artifact-publisher-pages",
-      // Replace with real bucket name after `wrangler r2 bucket create html-artifact-publisher-pages`
-      "preview_bucket_name": "html-artifact-publisher-pages-dev"
-    }
-  ],
+  // The viewer shell. Requests the Worker answers itself skip the asset lookup.
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*", "/r/*", "/v/*", "/healthz"]
+  },
 
-  "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "html-artifact-publisher",
-      // Replace with real database_id after `wrangler d1 create html-artifact-publisher`
-      "database_id": "00000000-0000-0000-0000-000000000000",
-      "migrations_dir": "migrations"
-    }
+  // go-libfossil compiled to wasm by fossil/build.sh.
+  "rules": [{ "type": "CompiledWasm", "globs": ["**/*.wasm"] }],
+
+  // Every artifact is a Fossil repository in its own SQLite-backed Durable Object.
+  "durable_objects": {
+    "bindings": [
+      { "name": "REPO", "class_name": "Repo" },
+      { "name": "REGISTRY", "class_name": "Registry" }
+    ]
+  },
+
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["Repo", "Registry"] }
   ],
 
   // BEARER_TOKEN is a secret — set it with: wrangler secret put BEARER_TOKEN
-  // It is NOT declared in vars; `wrangler types` will include it from the stub.
+  // NOTIFY_API_KEY (optional) is a secret too.
 
   "vars": {
-    "PUBLIC_BASE_URL": "https://example.com",
     // Maximum TTL in seconds (30 days)
     "MAX_TTL_SECONDS": "2592000",
     // Default TTL when not specified (7 days)
     "DEFAULT_TTL_SECONDS": "604800",
-    // Maximum payload size in bytes (10 MB)
-    "MAX_PAYLOAD_BYTES": "10485760"
-  },
-
-  "triggers": {
-    "crons": [
-      // Run expired-page cleanup every hour
-      "0 * * * *"
-    ]
+    // Maximum request body in bytes (10 MB)
+    "MAX_PAYLOAD_BYTES": "10485760",
+    // Optional agent wake-up through notify (see README).
+    "NOTIFY_URL": "",
+    "NOTIFY_AGENT": "",
+    "NOTIFY_SUBSCRIBER": ""
   }
 }

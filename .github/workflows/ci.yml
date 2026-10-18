@@ -1,13 +1,87 @@
 name: CI
 
+# Every pull request and every push runs the checks. A push to main — which
+# is what merging a pull request does — then deploys the exact build that
+# passed them to Cloudflare.
+
 on:
   push:
   pull_request:
 
+env:
+  TINYGO_VERSION: '0.43.0'
+
 jobs:
   check:
-    name: Type check
+    name: Check
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: fossil/go.mod
+          cache-dependency-path: fossil/go.sum
+
+      - name: Cache TinyGo
+        id: tinygo-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/tinygo
+          key: tinygo-${{ env.TINYGO_VERSION }}-linux-amd64
+
+      - name: Install TinyGo
+        if: steps.tinygo-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -sSfL "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo${TINYGO_VERSION}.linux-amd64.tar.gz" | tar -xz -C ~
+
+      - name: Add TinyGo to PATH
+        run: echo "$HOME/tinygo/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Wrangler types
+        run: npm run types
+
+      - name: TypeScript no-emit
+        run: npm run typecheck
+
+      - name: Go vet and unit tests
+        run: npm run test:go
+
+      - name: Build the Fossil engine (TinyGo)
+        run: npm run build:wasm
+
+      - name: End-to-end tests
+        run: npm test
+
+      - name: Keep the tested build for deploy
+        uses: actions/upload-artifact@v4
+        with:
+          name: fossil-wasm
+          path: |
+            src/fossil.wasm
+            src/wasm_exec.js
+          retention-days: 7
+
+  deploy:
+    name: Deploy
+    needs: check
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    # One deploy at a time, in merge order.
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
 
@@ -19,8 +93,36 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Generate Wrangler types
-        run: npm run types
+      - name: Fetch the tested build
+        uses: actions/download-artifact@v4
+        with:
+          name: fossil-wasm
+          path: src
 
-      - name: TypeScript no-emit
-        run: npm run typecheck
+      - uses: dopplerhq/cli-action@v3
+
+      # Cloudflare credentials and the Worker's secrets come from Doppler; the
+      # only GitHub secret is DOPPLER_TOKEN, a service token for one config.
+      - name: Deploy to Cloudflare
+        id: deploy
+        env:
+          DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+        run: |
+          if [ -z "$DOPPLER_TOKEN" ]; then
+            # Not set up yet: keep main green and say what is missing.
+            echo "::warning::Skipped deploy: set the DOPPLER_TOKEN secret, a Doppler service token for html-artifact-publisher/prd (see README, Deploying)."
+            exit 0
+          fi
+          set -o pipefail
+          doppler run -- sh scripts/deploy.sh | tee deploy.log
+          url=$(grep -oE 'https://[A-Za-z0-9.-]+\.workers\.dev' deploy.log | head -1)
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test
+        if: steps.deploy.outputs.url != ''
+        run: |
+          for i in 1 2 3 4 5; do
+            curl -sSf "${{ steps.deploy.outputs.url }}/healthz" && exit 0
+            sleep 5
+          done
+          exit 1

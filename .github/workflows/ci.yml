@@ -99,17 +99,21 @@ jobs:
           name: fossil-wasm
           path: src
 
+      - uses: dopplerhq/cli-action@v3
+
+      # Cloudflare credentials and the Worker's secrets come from Doppler; the
+      # only GitHub secret is DOPPLER_TOKEN, a service token for one config.
       - name: Deploy to Cloudflare
         id: deploy
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
         run: |
-          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
-            echo "::error::Set the CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID secrets (see README, Deploying)."
+          if [ -z "$DOPPLER_TOKEN" ]; then
+            echo "::error::Set the DOPPLER_TOKEN secret: a Doppler service token for html-artifact-publisher/prd (see README, Deploying)."
             exit 1
           fi
-          npx wrangler deploy | tee deploy.log
+          set -o pipefail
+          doppler run -- sh scripts/deploy.sh | tee deploy.log
           url=$(grep -oE 'https://[A-Za-z0-9.-]+\.workers\.dev' deploy.log | head -1)
           echo "url=$url" >> "$GITHUB_OUTPUT"
 

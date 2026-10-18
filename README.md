@@ -64,8 +64,7 @@ On the Workers Paid plan ($5/month) a modest deployment stays inside the include
 ```bash
 npm install
 npm run build:wasm                 # fossil/ → src/fossil.wasm
-wrangler secret put BEARER_TOKEN   # a strong random token, e.g. openssl rand -hex 32
-npm run deploy
+npm run deploy:prod                # secrets from Doppler (see Deploying)
 
 export HTML_PUBLISHER_URL=https://html-artifact-publisher.<your-subdomain>.workers.dev
 export HTML_PUBLISHER_TOKEN=<your-bearer-token>
@@ -76,12 +75,17 @@ node scripts/publish-html.mjs --title "My first artifact" my-page.html
 
 Merging a pull request into `main` deploys it. `.github/workflows/ci.yml` runs on every pull request and push: typecheck, Go unit tests, the TinyGo build and the end-to-end tests. On a push to `main` its `deploy` job deploys the very build that passed, then checks `/healthz`.
 
-One-time setup:
+Secrets live in [Doppler](https://www.doppler.com). The deploy job reads them with `doppler run` and uploads the Worker's own secrets with the deploy itself (`wrangler deploy --secrets-file`), so a new version never runs without them. One-time setup:
 
-1. Create a Cloudflare API token with the **Edit Cloudflare Workers** template.
-2. In the GitHub repository's settings, add the secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`, under an environment named `production` (or as repository secrets). Environment protection rules, if you add any, gate every deploy.
-3. Set the owner token once: `wrangler secret put BEARER_TOKEN`. Secrets persist across deploys.
-4. For a custom domain, add a `routes` entry to `wrangler.jsonc`; otherwise the Worker is served on `workers.dev`.
+1. In Doppler, create the project `html-artifact-publisher` with a `prd` config holding:
+   - `CLOUDFLARE_API_TOKEN`: a Cloudflare API token from the **Edit Cloudflare Workers** template
+   - `CLOUDFLARE_ACCOUNT_ID`
+   - `BEARER_TOKEN`: the owner token, e.g. `openssl rand -hex 32`
+   - `NOTIFY_API_KEY` (optional)
+2. Create a Doppler service token for that config, and add it to the GitHub repository as the secret `DOPPLER_TOKEN`, under an environment named `production` (or as a repository secret). Environment protection rules, if you add any, gate every deploy.
+3. For a custom domain, add a `routes` entry to `wrangler.jsonc`; otherwise the Worker is served on `workers.dev`.
+
+To deploy by hand with the same secrets: `npm run build:wasm && npm run deploy:prod`.
 
 The Durable Object classes are created by the `v1` migration in `wrangler.jsonc` on the first deploy.
 
@@ -228,7 +232,7 @@ A `fossil push` that includes an oversized file is refused, but if Fossil sent t
 │   ├── cmd/fsclient/          Native Fossil client for the e2e tests
 │   └── build.sh               TinyGo (default) or Go build
 ├── public/                    Viewer shell and the shared API client
-├── scripts/publish-html.mjs   CLI
+├── scripts/                   publish-html.mjs (CLI), deploy.sh (deploy with secrets from the environment)
 ├── test/e2e.test.mjs          End-to-end tests
 ├── skills/, agent-harnesses/, docs/   Instructions for agents
 └── wrangler.jsonc

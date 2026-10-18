@@ -234,6 +234,8 @@ A `fossil push` that includes an oversized file is refused, but if Fossil sent t
 ├── public/                    Viewer shell and the shared API client
 ├── scripts/                   publish-html.mjs (CLI), deploy.sh (deploy with secrets from the environment)
 ├── test/e2e.test.mjs          End-to-end tests
-├── skills/, agent-harnesses/, docs/   Instructions for agents
+├── skills/, agent-harnesses/, docs/   Instructions for agents (publish-html-page,
+│                                      artifact-design, -runtime, -diagrams, -dataviz,
+│                                      pikchr)
 └── wrangler.jsonc
 ```

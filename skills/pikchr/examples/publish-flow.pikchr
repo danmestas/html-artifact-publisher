@@ -1,0 +1,23 @@
+# How a publish reaches a reader: the write path runs left to right,
+# the read path drops down from the repository.
+fontscale = 1.1
+boxwid = 1.3; boxht = 0.55; boxrad = 0.08
+linewid = 0.85; thickness = 0.015
+arrowht = 0.09; arrowwid = 0.06
+$ink = 0x29333a; $muted = 0x53616c; $rule = 0x6b737b
+$base = 0xe7eef2; $focus = 0xf6e7dc; $accent = 0x9a3f08
+
+CLI:  box "publish CLI" fill $base color $ink
+      arrow "POST" above color $ink
+API:  box "Worker API" fill $base color $ink
+      arrow "check-in" above color $ink
+Repo: box "Fossil repo" bold fill $focus color $accent thick
+
+View: box "viewer iframe" fill $base color $ink with .n at Repo.s + (0, -0.9)
+      arrow from Repo.s to View.n color $ink
+      text "reads files" ljust small color $muted at last arrow.c + (0.08, 0)
+
+Edge: box dashed fill none color $rule rad 0.12 behind CLI \
+      wid Repo.e.x - API.w.x + 0.3 ht boxht + 0.55 \
+      with .sw at (API.w.x - 0.15, API.s.y - 0.15)
+      text "Cloudflare" ljust small italic color $muted at Edge.nw + (0.12, -0.18)

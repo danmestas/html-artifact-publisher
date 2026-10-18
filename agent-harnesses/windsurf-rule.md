@@ -27,6 +27,10 @@ If either variable is absent, tell the user what to set and stop. Do not attempt
 
 4. Return `viewerUrl` to the user. Keep `editUrl` and `cloneUrl` to yourself for later updates.
 
+**Always post the link.** Every time you publish *or update* an artifact, give the user its read link: `viewerUrl` from the CLI output, on its own line, with the full `#…` token. It opens the newest version, and the CLI has already checked that it opens (`linkVerified: true`). Never post the edit link or clone URL in its place, and never build a link by hand. If `linkVerified` is false, say the link didn't open instead of presenting it as working.
+
+Diagrams: write them in Pikchr inside `<pre class="pikchr" aria-label="...">` unless the user asks for another tool; the viewer renders them. `publish` and `update` refuse a page whose Pikchr doesn't render. Fonts: Instrument Sans by default (IBM Plex Mono for code, IBM Plex Serif for long reading); name them in CSS and the viewer embeds only those.
+
 5. If JSON output includes non-empty `warningMessages`, surface them: those external resources will not load in the viewer.
 
 ## Updating an artifact

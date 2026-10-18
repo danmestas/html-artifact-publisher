@@ -226,6 +226,11 @@ test('CLI', async () => {
   writeFileSync(join(dir, 'index.html'), '<!doctype html><link rel="stylesheet" href="style.css"><h1>v2</h1>');
   const up = cli('update', '--json', '--no-clipboard', '--message', 'second', out.editUrl, dir);
   assert.equal(up.code, 0, up.out);
+  // The link printed after an update opens the artifact: it carries the read token.
+  const upOut = JSON.parse(up.out);
+  assert.equal(upOut.viewerUrl, out.viewerUrl);
+  assert.equal(upOut.linkVerified, true);
+  assert.equal(out.linkVerified, true);
   assert.equal(cli('update', '--no-clipboard', out.editUrl, dir).code, 1, 'nothing changed');
   assert.notEqual(cli('update', '--no-clipboard', out.viewerUrl, dir).code, 0, 'read link cannot update');
 
@@ -235,4 +240,24 @@ test('CLI', async () => {
   assert.match(cli('read', `${out.viewerUrl}@${hist[1].uuid.slice(0, 12)}`).out, /<h1>v1<\/h1>/);
   assert.match(cli('list').out, /CLI/);
   assert.equal(cli('delete', out.editUrl).code, 0);
+});
+
+test('pages with Pikchr: broken diagrams are refused, renderer and fonts are served', async () => {
+  const dir = join(work, 'diagram');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'index.html'), '<!doctype html><pre class="pikchr">box "a" at</pre>');
+  const bad = cli('publish', '--json', '--no-clipboard', dir);
+  assert.equal(bad.code, 1);
+  assert.match(bad.out, /Pikchr error in index.html, diagram at line 1/);
+
+  writeFileSync(join(dir, 'index.html'), '<!doctype html><pre class="pikchr">box "a"; arrow; box "b"</pre>');
+  const good = cli('publish', '--json', '--no-clipboard', dir);
+  assert.equal(good.code, 0, good.out);
+  assert.equal(cli('delete', JSON.parse(good.out).editUrl).code, 0);
+
+  for (const path of ['/pikchr/worker.js', '/pikchr/pikchr.js', '/pikchr/pikchr.wasm', '/fonts/instrument-sans.woff2', '/diagrams.js', '/fonts.js']) {
+    const r = await fetch(base + path);
+    assert.equal(r.status, 200, path);
+    await r.arrayBuffer();
+  }
 });

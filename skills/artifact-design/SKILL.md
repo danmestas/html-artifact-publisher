@@ -24,7 +24,9 @@ The CLI warns about any `http(s)` URL it finds; treat that warning as an error.
   published directory (`<script src="app.js">`, `<link rel="stylesheet"
   href="site.css">`). The viewer inlines those and adds the CSP nonce.
 - Images, fonts, audio, video: relative files (the viewer turns them into
-  `data:` URLs), or things generated in script (canvas, `Blob` URLs).
+  `data:` URLs), or things generated in script (canvas, `Blob` URLs). The
+  house fonts are the exception: name them in CSS and the viewer embeds them
+  (see Typography).
 - A library is a vendored file in the directory, loaded with a plain
   `<script src>`, using its UMD/global build. It must not need `eval`,
   `new Function`, string `setTimeout`, or WebAssembly (all blocked). Skip
@@ -90,14 +92,32 @@ conventions, its vocabulary. Include at least one detail only this subject
 would have, as content (a real tolerance, a real field name, a real date
 format). Use real content, never lorem ipsum.
 
-**Typography.** No webfont service is reachable, so either:
-- use a system stack chosen for the role, for example
-  `ui-serif, Georgia, "Times New Roman", serif`,
-  `system-ui, -apple-system, "Segoe UI", Roboto, sans-serif`,
-  `ui-monospace, "SF Mono", Menlo, Consolas, monospace`; or
-- ship one small subset `.woff2` in the directory (`fonts/display.woff2`),
-  declared with `@font-face { src: url(fonts/display.woff2) format("woff2"); }`
-  and a full fallback stack. Keep it to one or two faces, tens of KB each.
+**Typography.** Unless the user names a font, set pages in **Instrument
+Sans**: neutral but with character, good for both headings and running text.
+Add an IBM Plex face when the task calls for it:
+
+| Role | Font | Use it for |
+|---|---|---|
+| Default (body and headings) | `"Instrument Sans"` | almost everything |
+| Code and data | `"IBM Plex Mono"` | code, IDs, hashes, terminal output, aligned numbers |
+| Long reading | `"IBM Plex Serif"` | essays, reports and letters meant to be read start to finish |
+| Engineered, dense | `"IBM Plex Sans"` | technical references, specs and dense tool UIs |
+
+The viewer embeds these four itself, and only into pages whose CSS names them:
+Latin-only woff2 subsets, roughly 15–50 KB per face. Italic files ship only if
+the page can show italics, and Plex Mono and Serif bold files only if it shows
+bold. So don't name a family you don't use, and don't add an `@font-face` for
+them. Always give a fallback stack:
+`font-family: "Instrument Sans", system-ui, -apple-system, "Segoe UI", sans-serif;`
+`font-family: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;`
+
+**If the user wants another font,** use it. No webfont service is reachable, so ship a
+subset `.woff2` in the published directory (`fonts/display.woff2`), declared
+with `@font-face { font-family: "Display"; src: url(fonts/display.woff2)
+format("woff2"); }` plus a full fallback stack. Keep it to one or two faces of
+tens of KB each. A page that declares its own `@font-face` for a family keeps
+it; the viewer doesn't replace it. A plain system stack is also fine when the
+user asks for one.
 
 Set a short type scale and stick to it. Keep running text near 65 characters
 per line, body line-height around 1.5, headings `text-wrap: balance`, and add
@@ -123,8 +143,8 @@ block, but still sets every color explicitly.
   --bg: #fbfaf8;   --surface: #f1efeb; --fg: #1d1c1a;
   --muted: #6b6760; --line: #dcd8d1;  --accent: #2f5d8a;
   --ok: #2e7d4f;   --warn: #a86a00;   --bad: #b3261e;
-  --font-body: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --font-body: "Instrument Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
@@ -282,7 +302,7 @@ page needs other viewers' changes. See **artifact-runtime**.
   :root {
     /* Layout: one column, 44rem measure, table scrolls on phones */
     --bg: #fafaf7; --fg: #1f1e1b; --muted: #6a675f; --line: #dad6cd;
-    --accent: #8a4b2a; --font: system-ui, -apple-system, "Segoe UI", sans-serif;
+    --accent: #8a4b2a; --font: "Instrument Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
     color-scheme: light;
   }
   @media (prefers-color-scheme: dark) {

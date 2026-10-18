@@ -1,0 +1,27 @@
+# Routing with curves: rounded elbows for a detour, an arc for a self-loop,
+# and a rounded closed path as a soft region.
+boxwid = 1.2; boxht = 0.5; boxrad = 0.08
+linewid = 0.8; thickness = 0.015; arrowht = 0.09; arrowwid = 0.06
+$ink = 0x29333a; $muted = 0x53616c; $rule = 0x6b737b; $base = 0xe7eef2
+
+In:    box "request" fill $base color $ink
+       arrow color $ink
+Cache: box "cache" fill $base color $ink
+       arrow "hit" above color $ink
+Out:   box "response" fill 0xf6e7dc color 0x9a3f08 thick
+Db:    cylinder "database" fill $base color $ink wid 1.2 ht 0.6 with .n at Cache.s + (0, -0.75)
+
+# Miss: an orthogonal route with rounded elbows (rad on a line rounds its corners).
+       arrow from Cache.s to Db.n color $ink
+       text "miss" ljust small italic color $muted at last arrow.c + (0.08, 0)
+       arrow from Db.e right until even with Out.s then up to Out.s rad 0.15 color $ink
+
+# Refresh: an arc that leaves the cache and comes back to it.
+       arc -> from Cache.ne + (-0.25, 0) to Cache.nw + (0.25, 0) ccw color $muted dashed
+       text "refresh" small italic color $muted at Cache.n + (0, 0.36)
+
+# A soft region around the read path: a closed line with rounded corners.
+Edge:  line from In.nw + (-0.15, 0.62) right until even with Cache.e + (0.15, 0) \
+         then down until even with In.s - (0, 0.15) then left until even with In.w - (0.15, 0) \
+         close rad 0.2 dashed color $rule behind In
+       text "edge" ljust small italic color $muted at In.nw + (-0.03, 0.47)

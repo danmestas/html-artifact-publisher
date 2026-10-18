@@ -71,11 +71,17 @@ Environment (must be set before running):
 1. Confirm the HTML file starts with `<!doctype html` or `<html`. Files whose
    compressed size exceeds about 1.99 MB are refused ("too large to store").
 2. Run the script with `--title` matching the artifact's purpose.
+   If the page has Pikchr diagrams (`<pre class="pikchr">`), the script renders them
+   first and refuses to publish on a Pikchr error (exit 1, with the diagram's line).
+   Fix the diagram and rerun.
 3. Capture `viewerUrl` and `editUrl` from the output. `viewerUrl` is the
    complete read link (the read token is in the `#fragment`; do not strip it).
    In human mode it is also copied to clipboard automatically.
 4. Return `viewerUrl` to the user. Keep `editUrl` (and `cloneUrl`) to
    yourself for later updates.
+
+   **Always post the link.** Every time you publish *or update* an artifact, give the user its read link: `viewerUrl` from the CLI output, on its own line, with the full `#…` token. It opens the newest version, and the CLI has already checked that it opens (`linkVerified: true`). Never post the edit link or clone URL in its place, and never build a link by hand. If `linkVerified` is false, say the link didn't open instead of presenting it as working.
+
 5. To revise the artifact, run `update <editUrl> <file|dir> --message "<what changed>"`.
    This adds a new version at the same URL; do not publish a new artifact for
    every revision. A read link cannot update. Exit code 3 means a version
@@ -126,6 +132,7 @@ wins). Saving works only when the page was opened with the edit link.
   "cloneUrl":  "https://editor:<writeToken>@artifacts.example.com/r/abc123",
   "checkin":   "5f1c2e…",
   "expiresAt": "2026-07-23T00:00:00.000Z",
+  "linkVerified": true,
   "warnings": 0,
   "warningMessages": []
 }
@@ -134,7 +141,8 @@ wins). Saving works only when the page was opened with the edit link.
 Tokens are 64 hex characters; a link may end in `@<check-in>` to select a
 version. Share only `viewerUrl`. Keep `editUrl` for `update` and `cloneUrl`
 for Fossil; do not log or expose them unless the user needs them. `update`
-prints `{id, viewerUrl, checkin, warnings, warningMessages}`.
+prints `{id, viewerUrl, checkin, linkVerified, warnings, warningMessages}`;
+`viewerUrl` is the read link and opens the new version: post it.
 
 ## Related skills
 

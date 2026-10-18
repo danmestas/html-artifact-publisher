@@ -18,6 +18,10 @@ Both must be set before running the script. If either is missing, tell the user 
    ```
 3. Capture `viewerUrl`, `editUrl` and `cloneUrl` from the JSON output (`{id, viewerUrl, editUrl, cloneUrl, checkin, expiresAt, warnings, warningMessages}`). `viewerUrl` (`/v/<id>#<readToken>`) is the full read link including the `#fragment` token; `editUrl` is `/v/<id>#<writeToken>`; `cloneUrl` is `https://editor:<writeToken>@<host>/r/<id>` for `fossil clone`/`push`.
 4. Return `viewerUrl` to the user. Keep `editUrl` and `cloneUrl` to yourself for later updates.
+
+**Always post the link.** Every time you publish *or update* an artifact, give the user its read link: `viewerUrl` from the CLI output, on its own line, with the full `#…` token. It opens the newest version, and the CLI has already checked that it opens (`linkVerified: true`). Never post the edit link or clone URL in its place, and never build a link by hand. If `linkVerified` is false, say the link didn't open instead of presenting it as working.
+
+Diagrams: write them in Pikchr inside `<pre class="pikchr" aria-label="...">` unless the user asks for another tool; the viewer renders them. `publish` and `update` refuse a page whose Pikchr doesn't render. Fonts: Instrument Sans by default (IBM Plex Mono for code, IBM Plex Serif for long reading); name them in CSS and the viewer embeds only those.
 5. If `warningMessages` is non-empty, surface those external URL warnings to the user.
 
 ### Updating an artifact
@@ -28,7 +32,7 @@ Artifacts are versioned: each publish or update is a check-in. To revise one, up
 node scripts/publish-html.mjs update --json "<editUrl>" <file.html | dir> --message "<what changed>"
 ```
 
-It needs the edit link; a read link fails. It prints `{id, viewerUrl, checkin, warnings, warningMessages}`. Exit code 3 means a version conflict (someone published since); nothing was saved. Rerun to build on the newer version (use `read <url> [--out dir]` first if your change depends on it). Exit code 1 with "nothing changed" means the files already match the latest version. `history <url>` lists versions; a URL ending in `@<check-in>` reads that version. `list` shows your artifacts.
+It needs the edit link; a read link fails. It prints `{id, viewerUrl, checkin, linkVerified, warnings, warningMessages}`; `viewerUrl` is the read link, which opens the new version. Exit code 3 means a version conflict (someone published since); nothing was saved. Rerun to build on the newer version (use `read <url> [--out dir]` first if your change depends on it). Exit code 1 with "nothing changed" means the files already match the latest version. `history <url>` lists versions; a URL ending in `@<check-in>` reads that version. `list` shows your artifacts.
 
 ### Options reference
 

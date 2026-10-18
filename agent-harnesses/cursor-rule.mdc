@@ -24,6 +24,10 @@ If either is missing, tell the user what to export and stop.
    ```
 3. Capture `viewerUrl` (`/v/<id>#<readToken>`), `editUrl` (`/v/<id>#<writeToken>`) and `cloneUrl` (`https://editor:<writeToken>@<host>/r/<id>`, for `fossil clone`/`push`) from the JSON output.
 4. Return `viewerUrl` to the user. Keep `editUrl` and `cloneUrl` to yourself for later updates.
+
+**Always post the link.** Every time you publish *or update* an artifact, give the user its read link: `viewerUrl` from the CLI output, on its own line, with the full `#…` token. It opens the newest version, and the CLI has already checked that it opens (`linkVerified: true`). Never post the edit link or clone URL in its place, and never build a link by hand. If `linkVerified` is false, say the link didn't open instead of presenting it as working.
+
+Diagrams: write them in Pikchr inside `<pre class="pikchr" aria-label="...">` unless the user asks for another tool; the viewer renders them. `publish` and `update` refuse a page whose Pikchr doesn't render. Fonts: Instrument Sans by default (IBM Plex Mono for code, IBM Plex Serif for long reading); name them in CSS and the viewer embeds only those.
 5. Surface any non-empty `warningMessages` from JSON output.
 
 ## Update

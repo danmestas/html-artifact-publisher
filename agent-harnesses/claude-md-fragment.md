@@ -11,6 +11,10 @@ node scripts/publish-html.mjs --json --title "<title>" [--ttl 7d] [--slug <slug>
 
 Capture `viewerUrl`, `editUrl` and `cloneUrl` from the JSON output. Return `viewerUrl` (`/v/<id>#<readToken>`) to the user; keep `editUrl` (`/v/<id>#<writeToken>`) to yourself for later updates. The `#fragment` is the access token — never strip it.
 
+**Always post the link.** Every time you publish *or update* an artifact, give the user its read link: `viewerUrl` from the CLI output, on its own line, with the full `#…` token. It opens the newest version, and the CLI has already checked that it opens (`linkVerified: true`). Never post the edit link or clone URL in its place, and never build a link by hand. If `linkVerified` is false, say the link didn't open instead of presenting it as working.
+
+Diagrams: write them in Pikchr inside `<pre class="pikchr" aria-label="...">` unless the user asks for another tool; the viewer renders them. `publish` and `update` refuse a page whose Pikchr doesn't render. Fonts: Instrument Sans by default (IBM Plex Mono for code, IBM Plex Serif for long reading); name them in CSS and the viewer embeds only those.
+
 **Update (new version at the same URL — do this instead of publishing a new artifact per revision):**
 ```bash
 node scripts/publish-html.mjs update --json "<editUrl>" <file.html | dir> --message "<what changed>"

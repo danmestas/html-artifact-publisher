@@ -42,6 +42,7 @@ Never publish on load, on a timer, or per keystroke.
 | `data.get(name)` | JSON value or `null` | works with either link |
 | `data.set(name, value)` | `true` | edit link only; last writer wins |
 | `data.list()` | `string[]` | names of stored values |
+| `pikchr(source)` | `{light, dark, width, height}` | renders Pikchr to SVG strings (light and dark); rejects with Pikchr's error. Diagrams written in `<pre class="pikchr">` are already rendered; use this to draw from data or input (see **pikchr**) |
 
 Facts that shape every design:
 
@@ -341,6 +342,8 @@ When woken:
 4. Make the change in `<dir>`, then
    `node scripts/publish-html.mjs update <edit-url> <dir> --message "<what changed and why>"`.
    Exit code 3 means someone published meanwhile: read again, reapply, update.
+   Then reply with the read link from the output (`viewerUrl`), so whoever asked can open
+   the change.
    Exit code 1 "nothing changed" means your edit was a no-op.
 5. Report back briefly with the viewer link and the check-in message.
 

@@ -1,6 +1,6 @@
 ---
 name: artifact-diagrams
-description: Load before putting a diagram - architecture, data flow, sequence, state machine, before/after comparison, timeline or any box-and-arrow figure - into an HTML page that will be published as an artifact through this repo's viewer. Covers when a diagram is worth drawing, how to show the real mechanism, and layout, labels and arrows. Diagrams are drawn in Pikchr (load the pikchr skill) and polished in Pikchr Studio; hand-written inline SVG is only for interactive figures. Use with artifact-design (page design) and publish-html-page (publishing); for charts of numbers load artifact-dataviz instead.
+description: Load before putting a diagram - architecture, data flow, sequence, state machine, before/after comparison, timeline or any box-and-arrow figure - into an HTML page that will be published as an artifact through this repo's viewer. Covers when a diagram is worth drawing, how to show the real mechanism, and layout, labels and arrows. Pikchr is the default (load the pikchr skill; the viewer renders it), polished in Pikchr Studio; another framework only when the user asks for one; hand-written inline SVG for interactive figures. Use with artifact-design (page design) and publish-html-page (publishing); for charts of numbers load artifact-dataviz instead.
 ---
 
 # Diagrams for artifacts
@@ -15,24 +15,25 @@ Pages are published as Fossil-versioned artifacts and rendered by our viewer in 
 iframe with a strict CSP (see **publish-html-page** for the publishing side and
 **artifact-design** for overall page design). For diagrams that means:
 
-- **Draw in Pikchr.** Every static diagram is a `.pikchr` source file next to the page,
-  rendered to inline SVG with `skills/pikchr/render.mjs` and polished in Pikchr Studio.
-  Load the **pikchr** skill for the language, the house style and the Studio loop. No
-  Mermaid, PlantUML, D3 or Graphviz: the page has no network access, and Pikchr is
-  Fossil's own diagram language.
-- **Hand-written inline SVG only for interactive figures** (toggle before and after,
+- **Pikchr by default.** Unless the user asks for something else, a diagram is Pikchr
+  source in `<pre class="pikchr">` in the page. The viewer renders it, loading Pikchr's
+  wasm only for pages that have one. Polish it in Pikchr Studio. Load the **pikchr**
+  skill for the language, the house style and the Studio loop.
+- **Another framework when the user asks for one** (Mermaid, Graphviz, D2, ...): see
+  "Other diagram tools" below. Nothing ships that the page doesn't use.
+- **Hand-written inline SVG for interactive figures** (toggle before and after,
   highlight a path), where the page's script needs to reach into the drawing; see
   "Interactive figures" below.
 - **No inline event handlers.** `onclick=` / `onmouseover=` are blocked. If parts of the
   diagram are interactive (highlight a path, toggle "before / after"), attach listeners with
   `addEventListener` in an inline `<script>`.
-- **Theme follows the OS.** `render.mjs` emits a light and a dark rendering and swaps
-  them with `prefers-color-scheme`; hand-written SVG uses CSS custom properties.
+- **Theme follows the OS.** The viewer renders Pikchr in light and dark and swaps them
+  with `prefers-color-scheme`; hand-written SVG uses CSS custom properties.
 - **Phone to desktop.** The viewer gives the page the full width under its top bar - as little
   as ~360 px on a phone.
-- **No image export from the page.** Downloads are blocked in the viewer. The `.pikchr`
-  source is published with the page; anyone who needs the figure elsewhere can open it in
-  Pikchr Studio and export SVG or PNG there.
+- **No image export from the page.** Downloads are blocked in the viewer. The Pikchr
+  source is in the page; anyone who needs the figure elsewhere can open it in Pikchr
+  Studio and export SVG or PNG there.
 
 ## Deciding what to draw
 
@@ -163,7 +164,7 @@ silently pick up the first's marker.
   .diagram { margin: 24px 0; }
   .diagram .scroll { overflow-x: auto; }
   .diagram svg { display: block; width: 100%; min-width: 480px; height: auto;
-                 color: var(--ink); font: 13px/1 system-ui, sans-serif; }
+                 color: var(--ink); font-size: 13px; line-height: 1; }
   .diagram .node rect { fill: var(--panel); stroke: currentColor; stroke-width: 1.5; }
   .diagram .node.accent rect { stroke: var(--accent); stroke-width: 2.5; }
   .diagram .node text { fill: currentColor; text-anchor: middle; dominant-baseline: middle; }
@@ -204,7 +205,7 @@ writes need the edit link.
 
 ## Phone width
 
-Pikchr figures from `render.mjs` handle this already: they shrink to 70% of natural size
+Pikchr diagrams handle this already: the viewer lets them shrink to 70% of natural size
 and then scroll inside their own box. Keep their natural width around 840 px or less, or
 lay the flow out top to bottom. For hand-written SVG:
 
@@ -217,18 +218,30 @@ lay the flow out top to bottom. For hand-written SVG:
   naturally on phones.
 - Do not rely on hover to reveal labels; touch has no hover.
 
-## Very large graphs
+## Other diagram tools
 
-If the figure needs automatic layout of dozens of nodes (a dependency graph of a whole repo),
-draw a smaller diagram of the part the argument needs; that is usually the better figure
-anyway. Runtime layout engines (Mermaid and the like) do not run in the viewer: they need the
-network, `eval` or WebAssembly, all of which the CSP blocks.
+Use another tool when the user names one, or when a figure needs automatic layout that
+Pikchr doesn't do (a graph of dozens of nodes; though first ask whether a smaller diagram
+of the part that matters would serve better). The page can't reach the network, so:
+
+- **Runs in the page:** vendor the library's classic (UMD) build as a file in the published
+  directory (`<script src="vendor/lib.min.js">`; the viewer inlines it). It must not need
+  `eval`, `new Function`, WebAssembly or network access, and its file must stay under about
+  1.99 MB compressed. Ship only the build you use. Open the read link and check that it
+  actually draws before sharing.
+- **Can't run in the page** (for example a Graphviz build that needs WebAssembly): render
+  to SVG with the tool's own CLI when you write the page, inline the SVG, and replace its
+  hard-coded colours with theme tokens. Publish the source next to it (e.g.
+  `diagrams/deps.dot`) so it can be edited and re-rendered later.
+
+Whatever the tool, the rules above still apply: show the mechanism, label the arrows,
+follow the theme, stay readable at phone width.
 
 ## Accessibility
 
 - Wrap each diagram in `<figure>` with a `<figcaption>` stating what it shows.
 - Give the `<svg>` `role="img"` and an `aria-label` that tells the same story in one or two
-  sentences - the path, not a list of box names (`render.mjs --alt` does this).
+  sentences - the path, not a list of box names (for Pikchr, the `aria-label` on the `<pre>`).
 - Text and lines reach 4.5:1 / 3:1 against the surface in both themes; the accent is never
   the only carrier of meaning (pair it with a heavier stroke, a label, or the caption).
 - For complex flows, the prose next to the figure should also state the steps in order.

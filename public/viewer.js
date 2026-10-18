@@ -4,6 +4,8 @@
 // over postMessage; the access token never enters the iframe.
 
 import { Artifact, ConflictError, parseFragment, fragment } from './client.js';
+import { renderDiagrams, renderPikchr } from './diagrams.js';
+import { embedFonts } from './fonts.js';
 
 const $ = id => document.getElementById(id);
 const NONCE = document.querySelector('meta[name="artifact-nonce"]')?.content ?? '';
@@ -16,6 +18,7 @@ let link = null;     // { token, at } from the fragment
 let info = null;     // { title, role, tip, timeline } as last loaded
 let shown = null;    // { checkin, files } being shown
 let frameUrl = '';   // blob: URL of the rendered page, revoked on the next render
+let renders = 0;     // a newer render() supersedes one still awaiting diagrams or fonts
 
 function fail(message) {
   $('msg').textContent = message;
@@ -66,6 +69,7 @@ const RUNTIME = `(function(){
     read: function (path) { return call('read', path); },
     history: function () { return call('history'); },
     publish: function (files, message) { return call('publish', files, message); },
+    pikchr: function (source) { return call('pikchr', source); },
     data: {
       get: function (name) { return call('dataGet', name); },
       set: function (name, value) { return call('dataSet', name, value); },
@@ -89,7 +93,9 @@ const RUNTIME = `(function(){
 // The page renders in a sandboxed iframe with an opaque origin, which cannot
 // load this page's blob: URLs. So the other files of the check-in are inlined:
 // scripts and stylesheets become inline tags, everything else a data: URL.
-function render() {
+// Pikchr diagrams are rendered to SVG, and the fonts the page names embedded.
+async function render() {
+  const run = ++renders;
   const names = Object.keys(shown.files);
   const entry = names.includes('index.html') ? 'index.html' : names.find(n => /\.html?$/i.test(n));
   if (!entry) throw new Error('this version has no .html file to show');
@@ -137,6 +143,9 @@ function render() {
   }
   for (const el of doc.querySelectorAll('style')) el.textContent = urls(el.textContent, entry);
   for (const el of doc.querySelectorAll('[style]')) el.setAttribute('style', urls(el.getAttribute('style'), entry));
+  await renderDiagrams(doc, NONCE);
+  await embedFonts(doc, NONCE);
+  if (run !== renders) return;
 
   // The iframe inherits this page's CSP: only nonce-stamped scripts and styles run.
   for (const el of doc.querySelectorAll('script, style, link[rel~="stylesheet"]')) el.setAttribute('nonce', NONCE);
@@ -329,6 +338,8 @@ const ops = {
     return dec.decode(shown.files[path]);
   },
   history: () => info.timeline,
+  // Renders Pikchr source to SVG: {light, dark, width, height}.
+  pikchr: source => renderPikchr(source),
 
   // A new check-in on top of the latest version. It refuses when someone else
   // published since this page loaded, rather than overwrite their work; the
@@ -390,7 +401,7 @@ async function reload(show) {
   if (show) {
     shown = await art.bundle(link.at);
     if (shown.missing?.length) console.warn('missing from this version:', shown.missing.join(', '));
-    render();
+    await render();
   } else {
     renderChrome();
   }

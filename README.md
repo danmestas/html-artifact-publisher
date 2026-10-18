@@ -82,7 +82,7 @@ Secrets live in [Doppler](https://www.doppler.com). The deploy job reads them wi
    - `CLOUDFLARE_ACCOUNT_ID`
    - `BEARER_TOKEN`: the owner token, e.g. `openssl rand -hex 32`
    - `NOTIFY_API_KEY` (optional)
-2. Create a Doppler service token for that config, and add it to the GitHub repository as the secret `DOPPLER_TOKEN`, under an environment named `production` (or as a repository secret). Environment protection rules, if you add any, gate every deploy.
+2. Create a Doppler service token for that config, and add it to the GitHub repository as the secret `DOPPLER_TOKEN` (until it exists, merges skip the deploy with a warning), under an environment named `production` (or as a repository secret). Environment protection rules, if you add any, gate every deploy.
 3. For a custom domain, add a `routes` entry to `wrangler.jsonc`; otherwise the Worker is served on `workers.dev`.
 
 To deploy by hand with the same secrets: `npm run build:wasm && npm run deploy:prod`.

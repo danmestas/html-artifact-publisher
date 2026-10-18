@@ -1,10 +1,13 @@
-# Vendored Pikchr renderer
+# Pikchr renderer
 
 `pikchr.js` and `pikchr.wasm` are copied unchanged from Pikchr Studio
 (https://github.com/danmestas/pikchr-studio, `public/`, commit
 a921fc53887bbc99d8b3857cf35648a5d449b9e5). They are a WebAssembly build of
 Pikchr (upstream check-in a7f1c35bc0) with Studio's opt-in `pikchr_studio()`
-API added; `render.mjs` uses only the standard `pikchr()` entry point.
+API added. The viewer (`worker.js`, used by `../diagrams.js`), the publish CLI's
+diagram check (`scripts/pikchr.mjs`) and `skills/pikchr/render.mjs` all use only
+the standard `pikchr()` entry point. Browsers fetch these files only for pages
+with a `<pre class="pikchr">`.
 
 | File | sha256 |
 | --- | --- |

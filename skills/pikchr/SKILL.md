@@ -1,64 +1,82 @@
 ---
 name: pikchr
-description: Load before drawing any diagram for an artifact page (architecture, data flow, sequence, state machine, boundary or before/after figure). Diagrams are written in Pikchr, rendered to theme-aware inline SVG with the bundled render.mjs (no network, no build), polished in Pikchr Studio through a #z= link, and kept as .pikchr source next to the page so they are versioned with it. Covers the language, the house style, the Studio loop, and the pitfalls. Use with artifact-diagrams (what to draw) and artifact-design (the page around it).
+description: Load before drawing any diagram for an artifact page (architecture, data flow, sequence, state machine, boundary or before/after figure). Pikchr is the default diagram language - use it unless the user asks for another. The page holds the Pikchr source in <pre class="pikchr"> and the viewer renders it (light and dark SVG, page font) with Pikchr's wasm, which it only loads for pages that have a diagram. Covers the language including arcs and splines, the house style, polishing in Pikchr Studio through a #z= link, checking with render.mjs, and the pitfalls. Use with artifact-diagrams (what to draw) and artifact-design (the page around it).
 ---
 
 # Pikchr diagrams for artifacts
 
-Every diagram in an artifact is a [Pikchr](https://pikchr.org) program. The `.pikchr`
-source is the diagram; the SVG in the page is generated from it and never edited by hand.
-Pikchr is Fossil's own diagram language, and Fossil stores our artifacts, so the source
-lives in the same repository and history as the page it illustrates.
+Pikchr is the default for every diagram in an artifact. If the user names another tool or
+framework, use that instead (see **artifact-diagrams**). The Pikchr source is the
+diagram: it lives in the page and is versioned with it, and the SVG is derived from it.
+Pikchr is also Fossil's own diagram language, and Fossil stores our artifacts.
 
 **artifact-diagrams** decides *whether* a figure is worth it and *what* it should show.
 This skill is *how* to draw it.
 
-## Why the page carries SVG, not Pikchr
+## How it renders
 
-The viewer's CSP blocks WebAssembly and all network access, so a page cannot render
-Pikchr when it is viewed. You render at authoring time with `skills/pikchr/render.mjs`,
-which runs the same wasm build Pikchr Studio uses (vendored in `skills/pikchr/vendor/`,
-Node 18+, no install), and paste the output into the page.
+Write the source in the page, inside `<pre class="pikchr">`:
 
-The output is a `<figure>` with two inline SVGs, one rendered in Pikchr's light mode and
-one in its dark mode, swapped by `prefers-color-scheme`, plus a small `<style>` block. It
-has no scripts and no external URLs. It keeps a minimum width of 70% of the diagram's
-natural size and scrolls sideways inside its own box below that, so text stays readable
-on a phone without the page scrolling sideways.
+```html
+<pre class="pikchr" aria-label="The CLI posts the page to the Worker API, which commits it to the Fossil repo; the viewer reads the files back.">
+CLI:  box "publish CLI" fill 0xe7eef2
+      arrow "POST" above
+API:  box "Worker API" fill 0xe7eef2
+</pre>
+```
+
+When the page opens, the viewer:
+
+- loads Pikchr's wasm (about 56 KB compressed, cached by the browser) in a Web Worker,
+  and only for pages that contain a `pre.pikchr`;
+- replaces each block with a `<div class="pikchr-diagram">` holding a light and a dark
+  SVG, swapped by `prefers-color-scheme` (or by `data-theme="light|dark"` on `<html>`);
+- keeps the block's `id` and other classes on the div, and puts its `aria-label` (or
+  `title`) on the SVG;
+- shows a red error box in place of a block that fails to render. `publish` and `update`
+  refuse such pages, so viewers should never see one.
+
+Diagram text uses the page's font: the SVG inherits `font-family`, so a page set in
+Instrument Sans (the default, see **artifact-design**) has Instrument Sans diagrams.
+Wide diagrams keep at least 70% of their natural size and scroll sideways inside their
+own box on a phone, rather than shrinking the text or making the page scroll.
+
+Options on the `<pre>`:
+
+- `data-theme="light"` or `"dark"` renders only that variant (for a page that is always
+  dark, for example).
+- In HTML, `<` followed by a letter starts a tag even inside `<pre>`. Write it as `&lt;`,
+  and `&` as `&amp;`. Arrows like `<-` and `<->` are fine as they are.
+
+A page's script can render Pikchr too, for example to redraw a diagram from data or
+user input: `await window.artifact.pikchr(source)` returns
+`{light, dark, width, height}` (SVG strings), or rejects with Pikchr's error message.
 
 ## Workflow
 
-1. **Write the source** in the artifact directory, e.g. `diagrams/publish-flow.pikchr`.
-   Publish the page as a directory (`publish-html.mjs dir/`) so the source is checked in
-   with every version of the page.
-2. **Check it** until it renders:
-   `node skills/pikchr/render.mjs diagrams/publish-flow.pikchr --check`.
-   Errors print the offending line with a caret; the exit code is 1.
-3. **Look at it.** If you can view images, render the figure into a scratch HTML page and
-   screenshot it in light and dark (Playwright: `colorScheme: 'dark'`). Fix overlaps,
-   cramped labels and crossings now, using the style rules below. Do not publish a
-   diagram you have not looked at when you can look.
-4. **Render the figure:**
-   ```sh
-   node skills/pikchr/render.mjs diagrams/publish-flow.pikchr \
-     --alt "The CLI posts the page to the Worker API, which commits it to the Fossil repo; the viewer reads the files back." \
-     --caption "Each publish is a Fossil check-in." --out diagrams/publish-flow.html
-   ```
-   Paste the contents of the `.html` output into `index.html` where the figure goes. The
-   viewer does not include HTML fragments by itself. With several figures, pass
-   `--no-style` to all but one (they share the same rules).
-5. **Offer Pikchr Studio for polish.** Give the user the link from
-   `node skills/pikchr/render.mjs diagrams/publish-flow.pikchr --studio` (see below).
-6. **On every change to the source,** re-run step 4, replace the figure in the page, and
-   `update` the artifact with a check-in message that names the diagram.
+1. **Write the source** in the page's `<pre class="pikchr" aria-label="...">`. The
+   `aria-label` tells the path in a sentence or two. Put a `<figcaption>` next to it (wrap
+   both in `<figure>`) when the reader needs to know what to notice.
+2. **Check it** until it renders: `node skills/pikchr/render.mjs page.html --check`
+   checks every block in the page and prints errors with the offending line. A single
+   source file or `-` (stdin) works too.
+3. **Look at it.** Publish, open the read link, and screenshot it in light and dark if you
+   can view images (Playwright: `colorScheme: 'dark'`). `render.mjs file --svg [--dark]`
+   prints a bare SVG for a quick look. Fix overlaps, cramped labels and crossings using the
+   style rules below. Do not hand over a diagram you have not looked at when you can look.
+4. **Offer Pikchr Studio for polish.** Give the user the link from
+   `node skills/pikchr/render.mjs source.pikchr --studio` (put the block's source in a
+   file or pipe it in with `-`). See below.
+5. **On every change,** edit the source in the page, `--check` it, `update` the artifact
+   with a check-in message that names the diagram, and post the read link.
 
 ## Pikchr Studio: making it beautiful
 
 [Pikchr Studio](https://pikchr-studio.daniel-mestas.workers.dev/) is a visual editor over
 Pikchr source. Dragging, aligning, resizing, restyling arrows and editing text all become
 edits to the source, and each edit is validated by Pikchr before it is applied. Nothing
-leaves Pikchr's vocabulary, so what comes back is still a plain `.pikchr` file that
-`render.mjs` renders identically.
+leaves Pikchr's vocabulary, so what comes back is still plain Pikchr source that the
+viewer renders identically.
 
 - `--studio` prints `https://pikchr-studio.daniel-mestas.workers.dev/#z=<payload>`.
   The payload is the source compressed with raw DEFLATE and encoded as base64url; it
@@ -69,15 +87,16 @@ leaves Pikchr's vocabulary, so what comes back is still a plain `.pikchr` file t
   give the arrow labels room"). Ask for the result back as source: in Studio, open `</>`
   (the source drawer) and copy it, or choose Download source in the ⤓ (export) menu. Do not take an
   exported SVG back, because the source is the diagram.
-- Save what comes back over the `.pikchr` file, `--check` it, render it, and update the
-  artifact. Keep the user's layout: do not reflow a diagram they placed by hand unless
+- Put what comes back into the page's `<pre class="pikchr">` in place of the old source
+  (escape `<` before a letter as `&lt;`), `--check` it, `update` the artifact and post the
+  read link. Keep the user's layout: do not reflow a diagram they placed by hand unless
   they ask.
 - Studio keeps relational placement (`with .n at A.s`, `right of`) unless the user
   chooses otherwise, and writes absolute `at (x, y)` for objects they drag. Both are
   fine. Do not "clean up" one style into the other.
 - Large diagrams make long links that some chat apps cut off. If the link is more than a
-  few kilobytes, also give the `.pikchr` source so the user can paste it into Studio's
-  source drawer.
+  few kilobytes, also give the source so the user can paste it into Studio's source
+  drawer.
 
 ## The language in brief
 
@@ -113,10 +132,40 @@ D: box "D" at (3, -1)            # absolute position: fine on a grid, and what S
 Full reference: https://pikchr.org/home/doc/trunk/doc/userman.md and the grammar at
 https://pikchr.org/home/doc/trunk/doc/grammar.md.
 
+### Curves: arcs and splines
+
+Straight and orthogonal lines are the default. Reach for a curve when it says something a
+straight line can't, and in more complex diagrams use them deliberately:
+
+- **`arc`** for a return or a loop: a retry back to an earlier state, a feedback path, a
+  self-transition. `arc -> from Running.s to Queued.s cw` bows below the row (`cw` turns
+  clockwise from start to end; without it the arc turns counter-clockwise, so add or drop
+  `cw` to flip the bow). Pikchr draws an arc as one quadratic Bézier with a fixed,
+  quarter-turn bow; `rad` does not change it. For a flatter or deeper curve, use a spline
+  through a point you choose. An arc with no endpoints is a quarter circle in the current
+  direction.
+- **`spline`** for a path that must go around something: it runs through the points you
+  give (`from`, each `then`, `to`) and smooths every corner into a Bézier curve.
+  `spline -> from A.n up 0.35 then right until even with C.n then down 0.35 to C.n`
+  bows over a box instead of crossing it. Give the first and last legs the direction the
+  line should leave and enter the boxes (here `up` and `down`), or the ends kink.
+- **Labels on curves** go where the curve has room, not on the line: inside an arc's bow
+  (`at (A.s.x + B.s.x)/2, A.s.y - 0.32`), or just outside a spline's flat run. `aligned`
+  text follows only straight segments, so don't use it on curves.
+- Style a secondary or exceptional path (cancel, timeout, fallback) as `dashed` in
+  `$muted`, and keep the main path solid in `$ink`. That way the reader sees the normal
+  flow first.
+- Don't curve a line just to look softer. If every edge curves, none of them stands out.
+
+`skills/pikchr/examples/state-machine.pikchr` shows both: a retry arc under the row, and a
+dashed cancel spline over it.
+
 ## House style
 
-What separates a clean Pikchr figure from a default one. The example in
-`skills/pikchr/examples/publish-flow.pikchr` follows every rule here; start from it.
+What separates a clean Pikchr figure from a default one. The examples in
+`skills/pikchr/examples/` (`publish-flow.pikchr`, a flow with a boundary;
+`state-machine.pikchr`, states with an arc and a spline) follow every rule here. Start
+from them.
 
 **Set the defaults once, at the top.**
 
@@ -142,8 +191,13 @@ barely change** (`0x8c8c8c` stays grey on a dark background) **or shift hue**
 - never pure `0x000000`/`0xffffff` and never a mid-grey;
 - at most one accent, on the object the text is about, carried by more than colour:
   `bold`, `thick`, or the caption naming it;
-- after rendering, check both SVGs. `render.mjs` prints both; screenshot them on
-  `#ffffff` and `#15171a`.
+- check both themes: open the read link in light and dark mode, or screenshot
+  `render.mjs --svg` and `--svg --dark` on `#ffffff` and `#15171a`.
+
+**Let the page set the font.** Don't pick fonts in Pikchr; the diagram inherits the
+page's `font-family`, so it matches the text around it. Pikchr sizes boxes and positions
+labels from its own estimate of text width, which is close to an average sans. With a
+wide font, or with `fit`, check for labels that touch their box edges and widen the box.
 
 **Name every object** (`API: box ...`). Names make relational placement readable, give
 arrows stable endpoints, and are what the user sees in Studio's source drawer.
@@ -177,16 +231,22 @@ or more boxes reads better as two rows, or top to bottom with `down`.
 - `$name` variables must be assigned before use; numbers and colours only, no strings.
 - A label string on a line goes before positioning words in practice:
   `arrow "POST" above` reads more clearly than mixing it into `from ... to ...`.
-- The figure is static. For an interactive figure (toggle before and after, highlight a
-  path) or a chart of numbers, use hand-written SVG per **artifact-diagrams** or
+- Rendered blocks are static. To redraw a diagram from data or user input, build the source
+  in script and call `window.artifact.pikchr(source)`. For highlighting parts of one
+  drawing or a chart of numbers, use hand-written SVG per **artifact-diagrams** or
   **artifact-dataviz**.
+- Don't paste rendered Pikchr SVG into a page. Keep the source in `pre.pikchr`, so the
+  diagram can be edited, follows the theme and uses the page font.
 
 ## Checklist
 
-- [ ] Source saved as `diagrams/<name>.pikchr` and published with the page.
-- [ ] `--check` passes; natural width is about 840 px or less, or the flow is vertical.
+- [ ] Source is in the page as `<pre class="pikchr" aria-label="...">`, with `<` before a
+      letter escaped.
+- [ ] `render.mjs page.html --check` passes; natural width is about 840 px or less, or the
+      flow is vertical.
 - [ ] Looked at both themes: no overlapping text, no label on a boundary, no crossings.
 - [ ] Only dark strokes and very light fills; one accent, also shown by weight.
-- [ ] `--alt` tells the path in a sentence or two; the caption says what to notice.
-- [ ] Offered the Studio link; any polished source that came back replaced the file and
-      was re-rendered.
+- [ ] Curves only where they mean something (a return, a detour); labels off the line.
+- [ ] `aria-label` tells the path in a sentence or two; a caption says what to notice.
+- [ ] Offered the Studio link; any polished source that came back replaced the block.
+- [ ] Posted the read link after publishing or updating.

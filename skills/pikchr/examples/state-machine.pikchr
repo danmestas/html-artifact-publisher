@@ -1,0 +1,19 @@
+# A state machine: arcs carry the transitions back, splines route around a box.
+boxwid = 1.2; boxht = 0.5; boxrad = 0.25
+linewid = 0.9; thickness = 0.015; arrowht = 0.09; arrowwid = 0.06
+$ink = 0x29333a; $muted = 0x53616c; $base = 0xe7eef2
+
+Queued:  box "queued" fill $base color $ink
+         arrow "start" above color $ink
+Running: box "running" fill $base color $ink
+         arrow "finish" above color $ink
+Done:    box "done" fill 0xf6e7dc color 0x9a3f08 thick
+
+# Retry: an arc from the running state back to the queue, curving below.
+Retry:   arc -> from Running.s to Queued.s cw color $ink
+         text "retry" small italic color $muted at (Queued.s.x + Running.s.x)/2, Queued.s.y - 0.32
+
+# Cancel: a spline that leaves the top of the queue and lands on done,
+# bowing over "running" instead of crossing it.
+Cancel:  spline -> from Queued.n up 0.35 then right until even with Done.n then down 0.35 to Done.n color $muted dashed
+         text "cancel" small italic color $muted with .s at Running.n + (0, 0.42)

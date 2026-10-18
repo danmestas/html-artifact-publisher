@@ -11,6 +11,7 @@ import { basename, dirname, join, relative, sep } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { userInfo } from 'node:os';
 import { Artifact, ConflictError, createArtifact, listArtifacts, parseFragment } from '../public/client.js';
+import { loadPikchr, pikchrBlocks } from './pikchr.mjs';
 
 const HELP = `
 Usage:
@@ -156,6 +157,33 @@ function readInput(path) {
   return { files, warnings };
 }
 
+/** Refuse to publish a page whose <pre class="pikchr"> diagrams don't render. */
+async function checkDiagrams(files) {
+  const blocks = Object.entries(files).filter(([n]) => /\.html?$/i.test(n))
+    .flatMap(([name, data]) => pikchrBlocks(data.toString('utf8')).map(b => ({ name, ...b })));
+  if (!blocks.length) return;
+  const pikchr = await loadPikchr();
+  const errors = blocks.map(b => ({ b, r: pikchr(b.source) })).filter(x => x.r.error);
+  if (errors.length) {
+    die(errors.map(({ b, r }) => `Pikchr error in ${b.name}, diagram at line ${b.line}:\n${r.error}`).join('\n\n') +
+      '\n\nNothing was published. Fix the diagram (check it with skills/pikchr/render.mjs) and try again.');
+  }
+}
+
+/** Opens the read link the way a viewer would, so we never hand out a dead link. */
+async function verifyLink(base, id, viewerUrl) {
+  try {
+    const { token } = parseFragment(new URL(viewerUrl).hash);
+    await new Artifact(base, id, token).info();
+    const page = await fetch(`${base}/v/${id}`);
+    if (!page.ok) throw new Error(`the viewer page answered HTTP ${page.status}`);
+    return true;
+  } catch (e) {
+    if (!jsonOnly) console.warn(`Warning: the read link did not open (${e.message}).`);
+    return false;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
@@ -166,6 +194,7 @@ async function publish() {
   const base = env('HTML_PUBLISHER_URL');
   const token = env('HTML_PUBLISHER_TOKEN');
   const { files, warnings } = readInput(filePath);
+  await checkDiagrams(files);
   const sourceName = basename(filePath);
   const title = flagValue('--title') ?? sourceName;
 
@@ -184,6 +213,7 @@ async function publish() {
     cloneUrl: result.cloneUrl,
     checkin: result.tip,
     expiresAt: result.expiresAt ?? null,
+    linkVerified: await verifyLink(base, result.id, result.viewerUrl),
     warnings: warnings.length,
     warningMessages: warnings,
   }, result.viewerUrl);
@@ -203,7 +233,8 @@ async function update() {
   if (!rawUrl || !filePath) die('usage: update <edit-url> <file.html | dir>');
   const link = parseLink(rawUrl);
   const { files, warnings } = readInput(filePath);
-  const { tip, role } = await link.art.info();
+  await checkDiagrams(files);
+  const { tip, role, readToken } = await link.art.info();
   if (role !== 'write') die('this is a read link; updating needs the edit link');
   let result;
   try {
@@ -214,8 +245,10 @@ async function update() {
     if (e instanceof ConflictError) die(`${e.message}. Nothing was saved.`, 3);
     die(e.message);
   }
-  const viewerUrl = `${link.base}/v/${link.id}`;
-  output({ id: link.id, viewerUrl, checkin: result.tip, warnings: warnings.length, warningMessages: warnings }, viewerUrl);
+  // The read link: it opens the newest version, which is the one just saved.
+  const viewerUrl = `${link.base}/v/${link.id}#${readToken}`;
+  const linkVerified = await verifyLink(link.base, link.id, viewerUrl);
+  output({ id: link.id, viewerUrl, checkin: result.tip, linkVerified, warnings: warnings.length, warningMessages: warnings }, viewerUrl);
 }
 
 async function read() {
@@ -294,6 +327,7 @@ function output(result, viewerUrl) {
   } else {
     console.log(JSON.stringify(result, null, 2));
     console.log(`\nPublished: ${viewerUrl}`);
+    console.log('   Post this link to the user: it opens the newest version.');
     if (result.editUrl) console.log(`   Edit link (keep private): ${result.editUrl}`);
     if (result.cloneUrl) console.log(`   Clone (keep private):     fossil clone ${result.cloneUrl}`);
     if (result.expiresAt) console.log(`   Expires:   ${new Date(result.expiresAt).toLocaleString()}`);

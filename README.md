@@ -144,7 +144,7 @@ A single file is stored as `index.html`; a directory is stored as-is and needs a
 }
 ```
 
-Share `viewerUrl`. Keep `editUrl` and `cloneUrl` private.
+Share `viewerUrl`, after every publish and every update; `update` prints it too, and both check that it opens (`linkVerified`). Keep `editUrl` and `cloneUrl` private.
 
 ### Working with Fossil directly
 
@@ -166,8 +166,18 @@ Inside the viewer, a page can use `window.artifact` (every call returns a promis
 | `history()` | All check-ins, newest first |
 | `publish({ path: text }, message)` | Check in changed files. Rejects if someone else published first; calling again builds on the newer version |
 | `data.get(name)`, `data.set(name, value)`, `data.list()` | Small JSON values stored with the artifact but outside its history; last writer wins |
+| `pikchr(source)` | Render Pikchr to SVG: `{light, dark, width, height}` |
 
 The viewer's CSP blocks every network request from the page, so bundle everything: relative `<script src>`, stylesheet, image, font and media references to files in the same check-in are inlined when rendering. ES module imports and `fetch()` of relative files are not.
+
+## Diagrams and fonts
+
+The viewer adds two things to a page, and only when the page uses them:
+
+- **Pikchr diagrams.** A page writes [Pikchr](https://pikchr.org) source in `<pre class="pikchr" aria-label="...">`. The viewer renders each block to a light and a dark SVG, which switch with the theme, before showing the page. A block with an error shows the error in its place. Rendering runs Pikchr's wasm (from [Pikchr Studio](https://github.com/danmestas/pikchr-studio), about 56 KB compressed) in a Web Worker, so the page's CSP still blocks WebAssembly. Pages without a diagram never fetch it. `publish` and `update` refuse a page whose diagrams don't render; `node skills/pikchr/render.mjs page.html --check` runs the same check.
+- **House fonts.** If a page's CSS names Instrument Sans, IBM Plex Sans, IBM Plex Mono or IBM Plex Serif, the viewer embeds that family (Latin woff2 subsets in `public/fonts/`, SIL OFL). Italic files are added only if the page can show italics, and the Plex Mono and Serif bold files only if it can show bold. A page that declares its own `@font-face` for a family keeps it.
+
+The renderer and fonts are cached by the browser for a week (`public/_headers`).
 
 ## Agent wake-up (optional)
 
@@ -231,9 +241,10 @@ A `fossil push` that includes an oversized file is refused, but if Fossil sent t
 │   ├── limits.go              The one-row size limit (unit-tested)
 │   ├── cmd/fsclient/          Native Fossil client for the e2e tests
 │   └── build.sh               TinyGo (default) or Go build
-├── public/                    Viewer shell and the shared API client
-├── scripts/                   publish-html.mjs (CLI), deploy.sh (deploy with secrets from the environment)
-├── test/e2e.test.mjs          End-to-end tests
+├── public/                    Viewer shell, the shared API client, Pikchr (pikchr/,
+│                              diagrams.js) and the house fonts (fonts/, fonts.js)
+├── scripts/                   publish-html.mjs (CLI), pikchr.mjs (diagram check), deploy.sh
+├── test/                      End-to-end and Pikchr tests
 ├── skills/, agent-harnesses/, docs/   Instructions for agents (publish-html-page,
 │                                      artifact-design, -runtime, -diagrams, -dataviz,
 │                                      pikchr)

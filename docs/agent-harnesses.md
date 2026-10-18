@@ -2,7 +2,9 @@
 
 This guide covers every common agent harness shape. Each section is self-contained — read only the one that applies to you.
 
-The core operation is always the same: the agent runs `node scripts/publish-html.mjs <file.html>` with two environment variables set, captures `viewerUrl` from the output, and returns it to the user. The harness-specific part is only how you make that instruction available to the agent.
+The core operation is always the same: the agent runs `node scripts/publish-html.mjs <file.html | dir>` with two environment variables set, returns `viewerUrl` (the read link) to the user, and keeps `editUrl` (the private edit link) to itself. Artifacts are encrypted Fossil repositories, so every publish is a versioned check-in; to revise one, the agent runs `node scripts/publish-html.mjs update <editUrl> <file.html | dir> --message "<what changed>"` instead of publishing a new artifact (exit code 3 means a version conflict and nothing was saved). `read`, `history`, `list`, and `delete <editUrl>` round out the CLI. The harness-specific part is only how you make that instruction available to the agent.
+
+Pages can also call `window.artifact` inside the viewer (`canWrite()`, `files()`, `read(path)`, `history()`, `publish(files, message)`, and `data.get/set/list` for small JSON page data); saving works only when the page is opened with the edit link. The viewer blocks all network requests, so pages must be self-contained.
 
 ## Prerequisites for every harness
 
@@ -62,7 +64,7 @@ mkdir -p .claude/skills
 cp -r skills/publish-html-page .claude/skills/
 ```
 
-**What the skill does:** it instructs Claude to confirm the file is self-contained, run the publisher script with an appropriate `--title`, capture `viewerUrl` from JSON output, and return it to the user. It also enforces the `--delete-local` guard (never for user-authored files, only for files the agent generated in the current session when the user explicitly asked for cleanup).
+**What the skill does:** it instructs Claude to confirm the file is self-contained, run the publisher script with an appropriate `--title`, return `viewerUrl` from JSON output to the user, keep `editUrl` private, and use `update` for later revisions. It also enforces the `--delete-local` guard (never for user-authored files, only for files the agent generated in the current session when the user explicitly asked for cleanup).
 
 ---
 
@@ -94,7 +96,7 @@ If `AGENTS.md` does not exist yet:
 cp agent-harnesses/agents-md-fragment.md AGENTS.md
 ```
 
-The fragment is self-contained: it describes the tool, required env vars, step-by-step procedure, and the key rules (fragment preservation, delete-local guard, external URL warnings). Copy-paste is the full install.
+The fragment is self-contained: it describes the tool, required env vars, step-by-step procedure, the update workflow, and the key rules (fragment preservation, keeping `editUrl` private, delete-local guard, external URL warnings). Copy-paste is the full install.
 
 ---
 
@@ -132,7 +134,7 @@ mkdir -p .windsurf/rules
 cp agent-harnesses/windsurf-rule.md .windsurf/rules/publish-html.md
 ```
 
-Windsurf applies rules globally within the workspace. The rule file explains the tool, required env vars, and the step-by-step procedure.
+Windsurf applies rules globally within the workspace. The rule file explains the tool, required env vars, the step-by-step procedure, and the update workflow.
 
 ---
 
@@ -163,4 +165,4 @@ This fragment is harness-agnostic: plain prose, no YAML front matter, no harness
 | Windsurf | copy to `.windsurf/rules/` | `agent-harnesses/windsurf-rule.md` |
 | Generic / system-prompt | paste into system prompt | `agent-harnesses/system-prompt-fragment.md` |
 
-None of these harness files contain secrets. The bearer token and base URL come from environment variables that you configure separately in each environment.
+None of these harness files contain secrets. The bearer token and base URL come from environment variables that you configure separately in each environment. Edit links (`editUrl`) are secrets too: agents keep them out of public places.

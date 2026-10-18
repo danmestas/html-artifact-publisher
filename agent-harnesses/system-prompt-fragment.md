@@ -1,6 +1,6 @@
 # HTML artifact publisher
 
-You have access to a tool that publishes standalone HTML files as shareable, encrypted URLs. The server stores encrypted HTML payloads; metadata such as title, source name, expiry, and slug remains plaintext. The decryption key lives exclusively in the URL fragment and never reaches the server.
+You have access to a tool that publishes standalone HTML files as shareable, encrypted URLs. Each artifact is an encrypted Fossil repository; every publish or update is a check-in, so artifacts keep their version history. Metadata such as title, expiry, and slug remains plaintext. The decryption key lives exclusively in the URL fragment and never reaches the server.
 
 ## When to use
 
@@ -18,18 +18,29 @@ If either is missing, tell the user what to configure and stop.
 ## How to publish
 
 ```bash
-node scripts/publish-html.mjs --json --title "<descriptive title>" <file.html>
+node scripts/publish-html.mjs --json --title "<descriptive title>" <file.html | dir>
 ```
 
-The script encrypts the file locally, uploads the ciphertext, and prints a JSON result including `viewerUrl`. The `viewerUrl` includes the `#fragment` decryption key and is the complete share link.
+A single file is stored as `index.html`; a directory publishes a multi-file page. The script encrypts locally, uploads the ciphertext, and prints JSON: `{id, viewerUrl, editUrl, checkin, expiresAt, warnings, warningMessages}`. `viewerUrl` includes the `#fragment` decryption key and is the complete read link.
 
-Return `viewerUrl` to the user. This is the only URL that grants access to the artifact.
+Return `viewerUrl` to the user. Keep `editUrl` (`…#<key>.<writeToken>`) to yourself; it is what lets you update or delete the artifact later.
+
+## How to update
+
+To revise an artifact you already published, add a new version at the same URL instead of publishing a new artifact for every revision:
+
+```bash
+node scripts/publish-html.mjs update --json "<editUrl>" <file.html | dir> --message "<what changed>"
+```
+
+Exit code 3 means a version conflict: someone saved since, and nothing was saved. Fetch the latest with `read <url> [--out dir]`, reapply your change, and retry. `history <url>` lists versions (a URL ending in `@<check-in>` reads that version), and `list` shows your artifacts.
 
 ## Options
 
 - `--title <text>` — display title (default: filename)
 - `--ttl 1h|6h|24h|7d|30d|never` — time to live (default: `7d`)
 - `--slug <slug>` — vanity URL slug using `[a-z0-9-]`, up to 64 characters
+- `--message <text>` — check-in comment
 - `--delete-local` — delete the local HTML file after a confirmed successful upload
 - `--json` — emit only machine-readable JSON on stdout
 
@@ -41,15 +52,14 @@ Return `viewerUrl` to the user. This is the only URL that grants access to the a
 
 **If the upload fails** (non-2xx status or network error), leave the file on disk and report the error to the user verbatim. Do not attempt to delete the file.
 
-**Surface external URL warnings.** If JSON output includes a non-empty `warningMessages` array, tell the user — the artifact may not render offline and could leak referrer data to those domains.
+**Surface external URL warnings.** If JSON output includes a non-empty `warningMessages` array, tell the user — the viewer blocks all network requests, so those resources will not load. Keep pages self-contained.
 
-**Share `deleteToken` when appropriate.** The upload response includes a `deleteToken` that lets the artifact be deleted before it expires. If the user may want early revocation, provide it.
+**Keep `editUrl` private.** It can update and delete the artifact. Never print it into public places (chat channels, PRs, issues, commits, logs). Give it to the user only if they need to edit or revoke the artifact themselves.
 
 ## Deleting an artifact early
 
 ```bash
-curl -X DELETE $HTML_PUBLISHER_URL/api/pages/<id> \
-  -H "X-Delete-Token: <deleteToken>"
+node scripts/publish-html.mjs delete "<editUrl>"
 ```
 
 ## Size and TTL limits

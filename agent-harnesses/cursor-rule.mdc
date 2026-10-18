@@ -17,21 +17,31 @@ If either is missing, tell the user what to export and stop.
 
 ## Steps
 
-1. Confirm the file starts with `<!doctype html` or `<html`.
-2. Run:
+1. Confirm the file starts with `<!doctype html` or `<html`, and is self-contained (the viewer blocks all network requests).
+2. Run (a directory publishes a multi-file page):
    ```bash
-   node scripts/publish-html.mjs --json --title "<title>" <file.html>
+   node scripts/publish-html.mjs --json --title "<title>" <file.html | dir>
    ```
-3. Capture `viewerUrl` from the JSON output — it includes the `#fragment` decryption key.
-4. Return `viewerUrl` to the user.
+3. Capture `viewerUrl` and `editUrl` from the JSON output — both include the `#fragment` decryption key.
+4. Return `viewerUrl` to the user. Keep `editUrl` to yourself for later updates.
 5. Surface any non-empty `warningMessages` from JSON output.
+
+## Update
+
+Each publish or update is a versioned check-in. To revise an artifact, update it at the same URL instead of publishing a new one:
+
+```bash
+node scripts/publish-html.mjs update --json "<editUrl>" <file.html | dir> --message "<what changed>"
+```
+
+Exit code 3 means a version conflict (someone saved since; nothing saved): `read <url>` the latest, reapply your change, and retry. `history <url>` lists versions; `list` shows your artifacts.
 
 ## Key rules
 
 - **Never strip the `#fragment`** from `viewerUrl`. It is the AES-256-GCM key; without it the artifact is permanently unreadable.
 - **`--delete-local`** only for files the agent generated in the current session when the user explicitly asks for cleanup. Never for user-owned source files.
 - If upload fails, leave the file untouched and report the raw error.
-- The `deleteToken` in the response allows early deletion. Share it with the user if they might need to revoke access before expiry.
+- **Keep `editUrl` private.** It can update and delete the artifact. Never print it into public places (PRs, issues, commits, channels, logs).
 
 ## TTL options
 
@@ -40,6 +50,5 @@ If either is missing, tell the user what to export and stop.
 ## Delete
 
 ```bash
-curl -X DELETE $HTML_PUBLISHER_URL/api/pages/<id> \
-  -H "X-Delete-Token: <deleteToken>"
+node scripts/publish-html.mjs delete "<editUrl>"
 ```

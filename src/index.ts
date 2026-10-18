@@ -219,8 +219,11 @@ async function handleArtifact(req: Request, env: Env, ctx: ExecutionContext, id:
       if (url.searchParams.has('tip')) return reply(await stub.op(who, { op: 'tip' }));
       const r = (await stub.op(who, { op: 'info' })) as FossilReply<Record<string, unknown>>;
       if (!r.ok) return reply(r);
-      const [meta, role] = await Promise.all([stub.info(), stub.role(who)]);
-      return json({ id, title: meta?.title, role, expiresAt: isoOrNull(meta?.expiresAt ?? null), ...r.result });
+      const [meta, role, readToken] = await Promise.all([stub.info(), stub.role(who), stub.readToken(who)]);
+      return json({
+        id, title: meta?.title, role, expiresAt: isoOrNull(meta?.expiresAt ?? null), ...r.result,
+        ...(readToken ? { readToken } : {}),
+      });
     }
     if (method === 'PUT') {
       const b = await body<UpdateBody>(req, env);

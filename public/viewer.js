@@ -154,31 +154,170 @@ function render() {
   };
   frame.src = frameUrl;
   document.title = doc.title || info.title || 'Artifact';
-  renderHistory();
+  renderChrome();
 }
 
-// ─── History panel ───────────────────────────────────────────────────────────
+// ─── Chrome: the bar above the page ─────────────────────────────────────────
 
-function renderHistory() {
-  const list = $('historyList');
-  list.replaceChildren();
-  for (const c of info.timeline) {
-    const a = document.createElement('a');
-    a.href = fragment({ token: link.token, at: c.uuid === info.tip ? '' : c.uuid.slice(0, 16) });
-    a.setAttribute('aria-current', String(c.uuid === shown.checkin));
-    a.textContent = c.comment || '(no comment)';
-    const meta = document.createElement('small');
-    meta.textContent = `${new Date(c.time).toLocaleString()} · ${c.user} · ${c.uuid.slice(0, 10)}${c.uuid === info.tip ? ' · latest' : ''}`;
-    a.append(meta);
-    const li = document.createElement('li');
-    li.append(a);
-    list.append(li);
+const shortId = uuid => uuid.slice(0, 10);
+
+function ago(iso) {
+  const s = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (s < 45) return 'just now';
+  if (s < 3600) return `${Math.round(s / 60)} min ago`;
+  if (s < 86400) return `${Math.round(s / 3600)} h ago`;
+  return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+function linkWith(token, at = '') {
+  return location.origin + location.pathname + fragment({ token, at });
+}
+
+function el(tag, props = {}, ...children) {
+  const node = Object.assign(document.createElement(tag), props);
+  node.append(...children.filter(c => c != null));
+  return node;
+}
+
+function renderChrome() {
+  const latest = shown.checkin === info.tip;
+  const index = info.timeline.findIndex(c => c.uuid === shown.checkin);
+  const current = info.timeline[index];
+  const writer = info.role === 'write';
+
+  $('bar').hidden = false;
+  $('title').textContent = info.title || 'Untitled';
+  $('versionHash').textContent = shortId(shown.checkin);
+  $('versionTag').textContent = latest ? 'Latest' : current ? ago(current.time) : '';
+  $('versionTag').className = latest ? 'tag latest' : 'tag';
+  $('versionBtn').classList.toggle('old', !latest);
+  const head = info.timeline[0];
+  $('updated').textContent = head ? `Updated ${ago(head.time)} by ${head.user}` : '';
+  $('role').textContent = writer ? 'Can edit' : 'View only';
+  $('role').className = `pill ${writer ? 'write' : 'read'}`;
+  $('deleteBtn').hidden = !writer;
+
+  $('oldStrip').hidden = latest;
+  $('restoreBtn').hidden = latest || !writer;
+  $('backLatest').href = fragment({ token: link.token });
+  if (!latest && current) {
+    const when = new Date(current.time).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+    $('oldText').textContent = `You are viewing “${current.comment || 'an untitled check-in'}” by ${current.user}, ${when}. `
+      + `${index} newer version${index === 1 ? ' exists' : 's exist'}.`;
   }
-  $('historyBtn').hidden = false;
+
+  renderVersions();
+  renderShare();
 }
 
-$('historyBtn').addEventListener('click', () => { $('history').hidden = !$('history').hidden; });
-$('historyClose').addEventListener('click', () => { $('history').hidden = true; });
+function renderVersions() {
+  $('versionCount').textContent = `${info.timeline.length} check-in${info.timeline.length === 1 ? '' : 's'}`;
+  $('versionList').replaceChildren(...info.timeline.map(c => {
+    const item = el('a', {
+      className: 'version',
+      href: fragment({ token: link.token, at: c.uuid === info.tip ? '' : c.uuid.slice(0, 16) }),
+    },
+      el('span', { className: 'mono', textContent: shortId(c.uuid) }),
+      el('span', { className: 'what' },
+        el('span', { textContent: c.comment || '(no comment)' }),
+        el('span', { className: 'who', textContent: `${c.user} · ${ago(c.time)}` })),
+      c.uuid === info.tip ? el('span', { className: 'tag latest', textContent: 'Latest' }) : el('span'));
+    item.setAttribute('role', 'menuitemradio');
+    item.setAttribute('aria-checked', String(c.uuid === shown.checkin));
+    return item;
+  }));
+}
+
+/** One labelled, read-only value with a Copy button. */
+function shareRow(id, label, hint, value, { secret = false } = {}) {
+  const input = el('input', { id, readOnly: true, value });
+  const copy = el('button', { type: 'button', textContent: 'Copy' });
+  copy.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(value);
+      copy.textContent = 'Copied';
+      setTimeout(() => { copy.textContent = 'Copy'; }, 1500);
+    } catch {
+      input.select();
+    }
+  });
+  return el('div', { className: 'share-row' },
+    el('label', { htmlFor: id },
+      el('span', {}, label, secret ? el('span', { className: 'private', textContent: 'Private' }) : null),
+      el('span', { className: 'hint', textContent: hint })),
+    el('div', { className: 'copy' }, input, copy));
+}
+
+function renderShare() {
+  const writer = info.role === 'write';
+  const readToken = writer ? info.readToken : link.token;
+  const login = writer ? 'editor' : 'viewer';
+  const clone = `fossil clone ${location.origin.replace('://', `://${login}:${link.token}@`)}/r/${art.id}`;
+  $('shareRows').replaceChildren(...[
+    readToken ? shareRow('readLink', 'Read link', 'Anyone with it can view every version.', linkWith(readToken)) : null,
+    writer ? shareRow('editLink', 'Edit link', 'Can publish new versions and delete. Share only with editors.', linkWith(link.token), { secret: true }) : null,
+    shareRow('cloneCmd', 'Clone with Fossil', writer ? 'The whole history, to edit locally and push back.' : 'The whole history, read-only.', clone, { secret: writer }),
+  ].filter(Boolean));
+  $('shareFoot').textContent = info.expiresAt
+    ? `Expires ${new Date(info.expiresAt).toLocaleDateString(undefined, { dateStyle: 'medium' })}`
+    : 'Does not expire';
+}
+
+// One popover open at a time; Escape or a click elsewhere closes it.
+const popovers = [['versionBtn', 'versionMenu'], ['shareBtn', 'shareMenu'], ['moreBtn', 'moreMenu']];
+function closePopovers(except) {
+  for (const [btn, menu] of popovers) {
+    if (menu === except) continue;
+    $(menu).hidden = true;
+    $(btn).setAttribute('aria-expanded', 'false');
+  }
+}
+for (const [btn, menu] of popovers) {
+  $(btn).addEventListener('click', e => {
+    e.stopPropagation();
+    const open = $(menu).hidden;
+    closePopovers(menu);
+    $(menu).hidden = !open;
+    $(btn).setAttribute('aria-expanded', String(open));
+  });
+  $(menu).addEventListener('click', e => e.stopPropagation());
+}
+document.addEventListener('click', () => closePopovers());
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closePopovers(); });
+$('versionList').addEventListener('click', () => closePopovers());
+
+$('openLatest').addEventListener('click', () => {
+  closePopovers();
+  location.hash = fragment({ token: link.token });
+});
+
+$('restoreBtn').addEventListener('click', async () => {
+  const btn = $('restoreBtn');
+  btn.disabled = true;
+  try {
+    // Re-commits this version's files on top of the tip; files added since stay.
+    await art.publish(info.tip, shown.files, `Restore ${shortId(shown.checkin)}`);
+    location.hash = fragment({ token: link.token });
+  } catch (e) {
+    btn.disabled = false;
+    $('oldText').textContent = e instanceof ConflictError
+      ? 'Someone published while you were looking. Open the latest version and try again.'
+      : `Could not restore: ${e.message}`;
+  }
+});
+
+$('deleteBtn').addEventListener('click', async () => {
+  closePopovers();
+  if (!confirm(`Delete “${info.title}” and its whole history? Its links stop working.`)) return;
+  try {
+    await art.remove();
+    $('bar').hidden = true;
+    $('oldStrip').hidden = true;
+    fail('This artifact was deleted.');
+  } catch (e) {
+    fail(`Could not delete: ${e.message}`);
+  }
+});
 
 // ─── The page's window.artifact API ──────────────────────────────────────────
 
@@ -228,15 +367,19 @@ addEventListener('message', async e => {
 // ─── Watching for new versions ───────────────────────────────────────────────
 
 async function watch() {
-  if (document.visibilityState !== 'visible' || !art) return;
+  if (document.visibilityState !== 'visible' || !art || !info) return;
   try {
-    if ((await art.tip()) !== info.tip) $('banner').hidden = false;
+    if ((await art.tip()) === info.tip) return;
+    const by = (await art.info()).timeline[0]?.user;
+    $('toastText').textContent = by ? `${by} published a new version` : 'A new version was published';
+    $('toast').hidden = false;
   } catch { /* offline: try again next time */ }
 }
 setInterval(watch, WATCH_MS);
-$('bannerShow').addEventListener('click', () => {
-  $('banner').hidden = true;
-  reload(true).catch(e => fail(e.message));
+$('toastShow').addEventListener('click', () => {
+  $('toast').hidden = true;
+  if (link.at) location.hash = fragment({ token: link.token });
+  else reload(true).catch(e => fail(e.message));
 });
 
 // ─── Start ───────────────────────────────────────────────────────────────────
@@ -249,7 +392,7 @@ async function reload(show) {
     if (shown.missing?.length) console.warn('missing from this version:', shown.missing.join(', '));
     render();
   } else {
-    renderHistory();
+    renderChrome();
   }
 }
 
@@ -270,7 +413,7 @@ addEventListener('hashchange', () => {
     const next = parseFragment(location.hash);
     if (art && next.token === link.token) {
       link = next;
-      $('history').hidden = true;
+      closePopovers();
       reload(true).catch(e => fail(e.message));
     } else {
       location.reload();

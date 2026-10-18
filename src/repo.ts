@@ -63,7 +63,8 @@ export class Repo extends DurableObject<Env> {
   private ensureTable(): void {
     this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS _artifact (
       id TEXT NOT NULL, title TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER,
-      read_hash TEXT NOT NULL, write_hash TEXT NOT NULL)`);
+      read_hash TEXT NOT NULL, write_hash TEXT NOT NULL,
+      read_token TEXT NOT NULL DEFAULT '')`);
   }
 
   /** Create the repository and its first check-in. */
@@ -78,9 +79,11 @@ export class Repo extends DurableObject<Env> {
     });
     if (!reply.ok) return reply;
     this.ctx.storage.sql.exec(
-      `INSERT INTO _artifact VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO _artifact VALUES (?, ?, ?, ?, ?, ?, ?)`,
       args.id, args.title, Math.floor(Date.now() / 1000), args.expiresAt,
       await sha256hex(args.readToken), await sha256hex(args.writeToken),
+      // Kept so editors can share the read link; the write token is never stored.
+      args.readToken,
     );
     if (args.expiresAt != null) await this.ctx.storage.setAlarm(args.expiresAt * 1000);
     return reply;
@@ -120,6 +123,12 @@ export class Repo extends DurableObject<Env> {
     this.ensureTable();
     const m = this.meta();
     return m && { id: m.id, title: m.title, createdAt: m.createdAt, expiresAt: m.expiresAt };
+  }
+
+  /** The read token, for a caller who may share it (an editor). */
+  async readToken(caller: Caller): Promise<string | null> {
+    if ((await this.role(caller)) !== 'write') return null;
+    return this.ctx.storage.sql.exec<{ read_token: string }>(`SELECT read_token FROM _artifact`).toArray()[0]?.read_token ?? null;
   }
 
   async rename(title: string): Promise<void> {

@@ -135,3 +135,12 @@ Tokens are 64 hex characters; a link may end in `@<check-in>` to select a
 version. Share only `viewerUrl`. Keep `editUrl` for `update` and `cloneUrl`
 for Fossil; do not log or expose them unless the user needs them. `update`
 prints `{id, viewerUrl, checkin, warnings, warningMessages}`.
+
+## Related skills
+
+Load these before writing the page itself:
+
+- `skills/artifact-design` — page contract (CSP, sandbox, theme), layout and typography.
+- `skills/artifact-runtime` — `window.artifact`: saved data, self-editing pages, history, waking the agent.
+- `skills/artifact-diagrams` — inline-SVG diagrams that work in both themes.
+- `skills/artifact-dataviz` — charts, palette and `check-contrast.mjs`.

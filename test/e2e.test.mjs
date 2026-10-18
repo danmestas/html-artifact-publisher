@@ -133,6 +133,9 @@ test('access control', async () => {
 
   const owned = await api(`/api/artifacts/${a.id}`, { bearer: owner });
   assert.equal(owned.json.role, 'write');
+  // Editors can share the read link; readers never see any token.
+  assert.equal((await api(`/api/artifacts/${a.id}`, { token: a.write })).json.readToken, a.read);
+  assert.equal((await api(`/api/artifacts/${a.id}`, { token: a.read })).json.readToken, undefined);
   const list = await api('/api/artifacts', { bearer: owner });
   assert.ok(list.json.artifacts.some(x => x.id === a.id));
 

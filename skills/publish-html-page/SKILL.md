@@ -13,12 +13,12 @@ env_required:
 
 # publish-html-page
 
-Publish a self-contained HTML file (or a directory of files) to a shareable,
-encrypted URL at the configured `HTML_PUBLISHER_URL`. Each artifact is an
-encrypted Fossil repository: every publish or update is a check-in, so the
-artifact keeps its version history. Metadata such as title, expiry, and slug
-remains plaintext. The decryption key lives exclusively in the URL fragment and
-never reaches the server.
+Publish a self-contained HTML file (or a directory of files) to a shareable
+URL at the configured `HTML_PUBLISHER_URL`. Each artifact is a Fossil
+repository stored on the server (one Durable Object per artifact): every
+publish or update is a check-in, so the artifact keeps its version history.
+Content is not encrypted; access is controlled by tokens carried in the URL
+fragment — a read token for viewers and a write token for editors.
 
 ## When to use
 
@@ -68,17 +68,20 @@ Environment (must be set before running):
 
 ## Step-by-step
 
-1. Confirm the HTML file starts with `<!doctype html` or `<html`.
+1. Confirm the HTML file starts with `<!doctype html` or `<html`. Files whose
+   compressed size exceeds about 1.99 MB are refused ("too large to store").
 2. Run the script with `--title` matching the artifact's purpose.
 3. Capture `viewerUrl` and `editUrl` from the output. `viewerUrl` is the
-   complete read link (key is in the `#fragment`; do not strip it). In human
-   mode it is also copied to clipboard automatically.
-4. Return `viewerUrl` to the user. Keep `editUrl` to yourself for later
-   updates.
+   complete read link (the read token is in the `#fragment`; do not strip it).
+   In human mode it is also copied to clipboard automatically.
+4. Return `viewerUrl` to the user. Keep `editUrl` (and `cloneUrl`) to
+   yourself for later updates.
 5. To revise the artifact, run `update <editUrl> <file|dir> --message "<what changed>"`.
    This adds a new version at the same URL; do not publish a new artifact for
-   every revision. Exit code 3 means a version conflict (someone saved since);
-   nothing was saved — `read` the latest version, reapply your change, and retry.
+   every revision. A read link cannot update. Exit code 3 means a version
+   conflict (someone published since); nothing was saved — rerun to build on the
+   newer version (`read` it first if your change depends on it). Exit code 1
+   with "nothing changed" means your files already match the latest version.
 6. Add `--delete-local` only when you generated the file in this session and
    the user explicitly wants it cleaned up. Verify upload succeeded first
    (the script enforces this, but never bypass it).
@@ -95,10 +98,11 @@ Environment (must be set before running):
   those resources will not load.
 - If upload fails (non-2xx or network error), leave the file untouched and
   report the error verbatim.
-- The `editUrl` (`…#<key>.<writeToken>`) can update and delete the artifact
-  (`delete <editUrl>`). Keep it private: never print it into public places
-  (chat channels, PRs, issues, commits, logs). Give it to the user only if
-  they ask or need to edit or revoke the artifact themselves.
+- The `editUrl` (`…/v/<id>#<writeToken>`) can update and delete the artifact
+  (`delete <editUrl>`), and `cloneUrl` (`https://editor:<writeToken>@<host>/r/<id>`)
+  works with `fossil clone`/`push`. Keep both private: never print them into
+  public places (chat channels, PRs, issues, commits, logs). Give them to the
+  user only if they ask or need to edit or revoke the artifact themselves.
 - Clipboard copy is best-effort and non-fatal. Do not add `--no-clipboard`
   unless the user or environment explicitly requires it.
 - When running in a headless or non-interactive environment without a display
@@ -108,7 +112,8 @@ Environment (must be set before running):
 
 Inside the viewer, pages can use `window.artifact`: `canWrite()`, `files()`,
 `read(path)`, `history()`, `publish(files, message)` (a new check-in; rejects
-on conflict), and `data.get/set/list` (small JSON page data; last writer
+if someone else published since — calling again builds on the new tip), and
+`data.get/set/list` (small JSON values kept outside history; last writer
 wins). Saving works only when the page was opened with the edit link.
 
 ## Success output
@@ -116,8 +121,9 @@ wins). Saving works only when the page was opened with the edit link.
 ```json
 {
   "id": "abc123",
-  "viewerUrl": "https://artifacts.example.com/v/abc123#<key>",
-  "editUrl":   "https://artifacts.example.com/v/abc123#<key>.<writeToken>",
+  "viewerUrl": "https://artifacts.example.com/v/abc123#<readToken>",
+  "editUrl":   "https://artifacts.example.com/v/abc123#<writeToken>",
+  "cloneUrl":  "https://editor:<writeToken>@artifacts.example.com/r/abc123",
   "checkin":   "5f1c2e…",
   "expiresAt": "2026-07-23T00:00:00.000Z",
   "warnings": 0,
@@ -125,6 +131,7 @@ wins). Saving works only when the page was opened with the edit link.
 }
 ```
 
-Share only `viewerUrl`. Keep `editUrl` for `update`; do not log or expose it
-unless the user needs it. `update` prints the same shape without `editUrl`
-or `expiresAt`.
+Tokens are 64 hex characters; a link may end in `@<check-in>` to select a
+version. Share only `viewerUrl`. Keep `editUrl` for `update` and `cloneUrl`
+for Fossil; do not log or expose them unless the user needs them. `update`
+prints `{id, viewerUrl, checkin, warnings, warningMessages}`.

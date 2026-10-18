@@ -15,7 +15,7 @@ If either variable is absent, tell the user what to set and stop. Do not attempt
 
 ## Steps
 
-1. Confirm the HTML file starts with `<!doctype html` or `<html`. If it does not, explain that the publisher only accepts standalone HTML documents. Keep it self-contained: the viewer blocks all network requests, so external URLs will not load.
+1. Confirm the HTML file starts with `<!doctype html` or `<html`. If it does not, explain that the publisher only accepts standalone HTML documents. Keep it self-contained: the viewer blocks all network requests, so external URLs will not load. Files over about 1.99 MB compressed are refused.
 
 2. Run the publisher script in machine-readable mode:
    ```bash
@@ -23,9 +23,9 @@ If either variable is absent, tell the user what to set and stop. Do not attempt
    ```
    A directory publishes a multi-file page.
 
-3. Capture `viewerUrl` and `editUrl` from the JSON output. `viewerUrl` includes the `#fragment` decryption key and is the complete share link.
+3. Capture `viewerUrl`, `editUrl` and `cloneUrl` from the JSON output. `viewerUrl` (`/v/<id>#<readToken>`) is the complete share link; `editUrl` (`/v/<id>#<writeToken>`) can update and delete; `cloneUrl` (`https://editor:<writeToken>@<host>/r/<id>`) works with `fossil clone`/`push`.
 
-4. Return `viewerUrl` to the user. Keep `editUrl` to yourself for later updates.
+4. Return `viewerUrl` to the user. Keep `editUrl` and `cloneUrl` to yourself for later updates.
 
 5. If JSON output includes non-empty `warningMessages`, surface them: those external resources will not load in the viewer.
 
@@ -37,7 +37,7 @@ Each publish or update is a versioned check-in. To revise an artifact, update it
 node scripts/publish-html.mjs update --json "<editUrl>" <file.html | dir> --message "<what changed>"
 ```
 
-Exit code 3 means a version conflict (someone saved since); nothing was saved. Use `read <url>` to fetch the latest version, reapply your change, and retry. `history <url>` lists versions and `list` shows your artifacts.
+It needs the edit link; a read link fails. Exit code 3 means a version conflict (someone published since); nothing was saved. Rerun to build on the newer version (`read <url>` first if your change depends on it). Exit code 1 "nothing changed" means the files match the latest version. `history <url>` lists versions and `list` shows your artifacts.
 
 ## Options
 
@@ -52,10 +52,10 @@ Exit code 3 means a version conflict (someone saved since); nothing was saved. U
 
 ## Rules
 
-- **Never strip the `#fragment` from `viewerUrl`.** It is the AES-256-GCM key. Removing it makes the artifact permanently unreadable.
+- **Never strip the `#fragment` from `viewerUrl`.** It is the access token. Without it the link cannot open the artifact.
 - **`--delete-local`** is only safe for files the agent generated in the current session, and only when the user explicitly requests cleanup. Never use it for user-authored source files.
 - If the upload fails (non-2xx HTTP status or network error), leave the file on disk and report the error verbatim.
-- **Keep `editUrl` private.** It can update and delete the artifact. Never print it into public places (PRs, issues, commits, channels, logs); give it to the user only if they need to edit or revoke the artifact themselves.
+- **Keep `editUrl` and `cloneUrl` private.** They can update and delete the artifact. Never print them into public places (PRs, issues, commits, channels, logs); give them to the user only if they need to edit or revoke the artifact themselves.
 
 ## Deleting an artifact
 

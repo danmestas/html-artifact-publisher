@@ -1,6 +1,6 @@
 # HTML artifact publisher
 
-You have access to a tool that publishes standalone HTML files as shareable, encrypted URLs. Each artifact is an encrypted Fossil repository; every publish or update is a check-in, so artifacts keep their version history. Metadata such as title, expiry, and slug remains plaintext. The decryption key lives exclusively in the URL fragment and never reaches the server.
+You have access to a tool that publishes standalone HTML files as shareable URLs. Each artifact is a Fossil repository stored on the server (one Durable Object per artifact); every publish or update is a check-in, so artifacts keep their version history. Content is not encrypted; access is controlled by tokens in the URL fragment — a read token for viewers and a write token for editors.
 
 ## When to use
 
@@ -21,9 +21,9 @@ If either is missing, tell the user what to configure and stop.
 node scripts/publish-html.mjs --json --title "<descriptive title>" <file.html | dir>
 ```
 
-A single file is stored as `index.html`; a directory publishes a multi-file page. The script encrypts locally, uploads the ciphertext, and prints JSON: `{id, viewerUrl, editUrl, checkin, expiresAt, warnings, warningMessages}`. `viewerUrl` includes the `#fragment` decryption key and is the complete read link.
+A single file is stored as `index.html`; a directory publishes a multi-file page. The script uploads the files and prints JSON: `{id, viewerUrl, editUrl, cloneUrl, checkin, expiresAt, warnings, warningMessages}`. `viewerUrl` (`https://<host>/v/<id>#<readToken>`) is the complete read link; tokens are 64 hex characters, and `…@<check-in>` after the token selects a version.
 
-Return `viewerUrl` to the user. Keep `editUrl` (`…#<key>.<writeToken>`) to yourself; it is what lets you update or delete the artifact later.
+Return `viewerUrl` to the user. Keep `editUrl` (`https://<host>/v/<id>#<writeToken>`) to yourself; it is what lets you update or delete the artifact later. `cloneUrl` (`https://editor:<writeToken>@<host>/r/<id>`) works with `fossil clone`/`push`; keep it private too.
 
 ## How to update
 
@@ -33,7 +33,7 @@ To revise an artifact you already published, add a new version at the same URL i
 node scripts/publish-html.mjs update --json "<editUrl>" <file.html | dir> --message "<what changed>"
 ```
 
-Exit code 3 means a version conflict: someone saved since, and nothing was saved. Fetch the latest with `read <url> [--out dir]`, reapply your change, and retry. `history <url>` lists versions (a URL ending in `@<check-in>` reads that version), and `list` shows your artifacts.
+It needs the edit link (a read link fails) and prints `{id, viewerUrl, checkin, warnings, warningMessages}`. Exit code 3 means a version conflict: someone published since, and nothing was saved. Rerun to build on the newer version (fetch it with `read <url> [--out dir]` first if your change depends on it). Exit code 1 with "nothing changed" means the files already match the latest version. `history <url>` lists versions (a URL ending in `@<check-in>` reads that version), and `list` shows your artifacts.
 
 ## Options
 
@@ -46,7 +46,7 @@ Exit code 3 means a version conflict: someone saved since, and nothing was saved
 
 ## Rules you must follow
 
-**Never strip the `#fragment` from `viewerUrl`.** The fragment is the AES-256-GCM decryption key. A URL without the fragment is permanently unreadable — there is no recovery.
+**Never strip the `#fragment` from `viewerUrl`.** The fragment is the access token. A URL without it cannot open the artifact.
 
 **`--delete-local` is only for files you generated in the current session**, and only when the user explicitly asks for cleanup. Never pass `--delete-local` for user-authored files, source documents, or any file you did not create during this interaction.
 
@@ -54,7 +54,7 @@ Exit code 3 means a version conflict: someone saved since, and nothing was saved
 
 **Surface external URL warnings.** If JSON output includes a non-empty `warningMessages` array, tell the user — the viewer blocks all network requests, so those resources will not load. Keep pages self-contained.
 
-**Keep `editUrl` private.** It can update and delete the artifact. Never print it into public places (chat channels, PRs, issues, commits, logs). Give it to the user only if they need to edit or revoke the artifact themselves.
+**Keep `editUrl` and `cloneUrl` private.** They can update and delete the artifact. Never print them into public places (chat channels, PRs, issues, commits, logs). Give them to the user only if they need to edit or revoke the artifact themselves.
 
 ## Deleting an artifact early
 
@@ -64,4 +64,4 @@ node scripts/publish-html.mjs delete "<editUrl>"
 
 ## Size and TTL limits
 
-Maximum payload: 10 MB (of encrypted bytes). Default TTL: 7 days. Maximum TTL: 30 days. Pass `--ttl never` for no expiry.
+Maximum payload: 10 MB per request; a file whose compressed size exceeds about 1.99 MB is refused (HTTP 413, "too large to store"). Default TTL: 7 days. Maximum TTL: 30 days. Pass `--ttl never` for no expiry.

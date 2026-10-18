@@ -11,7 +11,7 @@ This skill covers what the page must do to render correctly there, and how to
 make it look considered rather than generated. Publishing itself is covered by
 **publish-html-page**; the `window.artifact` API (stored data, history,
 pages that publish themselves) by **artifact-runtime**; diagrams by
-**artifact-diagrams**; charts and dashboards by **artifact-dataviz**.
+**artifact-diagrams** and **pikchr** (drawn in Pikchr, polished in Pikchr Studio); charts and dashboards by **artifact-dataviz**.
 
 ## 1. Page contract (hard rules)
 

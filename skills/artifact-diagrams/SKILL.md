@@ -1,6 +1,6 @@
 ---
 name: artifact-diagrams
-description: Load before putting a diagram - architecture, data flow, sequence, state machine, before/after comparison, timeline or any box-and-arrow figure - into an HTML page that will be published as an artifact through this repo's viewer. Covers when a diagram is worth drawing, how to show the real mechanism, layout/labels/arrows, and theme-aware inline SVG that works under the viewer's CSP and at phone width (no Mermaid or other CDN renderers). Use with artifact-design (page design) and publish-html-page (publishing); for charts of numbers load artifact-dataviz instead.
+description: Load before putting a diagram - architecture, data flow, sequence, state machine, before/after comparison, timeline or any box-and-arrow figure - into an HTML page that will be published as an artifact through this repo's viewer. Covers when a diagram is worth drawing, how to show the real mechanism, and layout, labels and arrows. Diagrams are drawn in Pikchr (load the pikchr skill) and polished in Pikchr Studio; hand-written inline SVG is only for interactive figures. Use with artifact-design (page design) and publish-html-page (publishing); for charts of numbers load artifact-dataviz instead.
 ---
 
 # Diagrams for artifacts
@@ -15,19 +15,24 @@ Pages are published as Fossil-versioned artifacts and rendered by our viewer in 
 iframe with a strict CSP (see **publish-html-page** for the publishing side and
 **artifact-design** for overall page design). For diagrams that means:
 
-- **No Mermaid, PlantUML, D3 or Graphviz from a CDN.** The page has no network access; a
-  `<script src="https://...">` never runs. Draw the diagram as **inline SVG written by
-  hand** (or produced by a short inline script). Most diagrams in a page are 5-15 shapes,
-  which is less work by hand than fighting a layout engine.
+- **Draw in Pikchr.** Every static diagram is a `.pikchr` source file next to the page,
+  rendered to inline SVG with `skills/pikchr/render.mjs` and polished in Pikchr Studio.
+  Load the **pikchr** skill for the language, the house style and the Studio loop. No
+  Mermaid, PlantUML, D3 or Graphviz: the page has no network access, and Pikchr is
+  Fossil's own diagram language.
+- **Hand-written inline SVG only for interactive figures** (toggle before and after,
+  highlight a path), where the page's script needs to reach into the drawing; see
+  "Interactive figures" below.
 - **No inline event handlers.** `onclick=` / `onmouseover=` are blocked. If parts of the
   diagram are interactive (highlight a path, toggle "before / after"), attach listeners with
   `addEventListener` in an inline `<script>`.
-- **Theme follows the OS.** Colours come from CSS custom properties with a
-  `prefers-color-scheme: dark` override; the SVG inherits them.
+- **Theme follows the OS.** `render.mjs` emits a light and a dark rendering and swaps
+  them with `prefers-color-scheme`; hand-written SVG uses CSS custom properties.
 - **Phone to desktop.** The viewer gives the page the full width under its top bar - as little
   as ~360 px on a phone.
-- **No image export.** There is no "download diagram" path (downloads are blocked). The SVG is
-  the deliverable; people who need it elsewhere can copy the page's source.
+- **No image export from the page.** Downloads are blocked in the viewer. The `.pikchr`
+  source is published with the page; anyone who needs the figure elsewhere can open it in
+  Pikchr Studio and export SVG or PNG there.
 
 ## Deciding what to draw
 
@@ -63,15 +68,15 @@ because you can.
 
 - **One reading direction.** Flows go left→right; layers (client / server / storage) stack
   top→bottom. Do not mix the two in one figure.
-- **Use a grid.** Pick a column pitch and row pitch (e.g. boxes 120×44 on a 180 px column
-  pitch) and place everything on it. Equal gaps and shared centre lines are what make a hand
-  diagram look intentional.
+- **Use a grid.** One box size and one gap for the whole figure (in Pikchr: `boxwid`,
+  `boxht` and `linewid` set once at the top). Equal gaps and shared centre lines are what
+  make a diagram look intentional.
 - **Arrows are straight or orthogonal.** Horizontal and vertical segments; one bend at most
   where possible. Avoid crossings - move a box before you add a crossing.
 - **Boundaries are regions.** A dashed rounded rect behind the boxes, labeled in its corner
   ("browser sandbox", "server", "Fossil repo"), shows a trust or process boundary better than
   a note.
-- **Leave margin.** 12-16 px inside the viewBox edge so strokes and labels are never clipped.
+- **Leave room.** Labels never touch a box, a boundary or another label.
 
 ## Labels and arrows
 
@@ -80,19 +85,24 @@ because you can.
   midpoint of a horizontal arrow, or beside a vertical one.
 - **Box labels are names, 1-3 words.** Detail goes in a second, smaller line or in the caption.
   Sentences inside a diagram are a sign the text belongs in the prose.
-- **Text size 12-14 px at the drawn scale,** never below ~10 px after the figure is scaled to
-  phone width (see below). Use `text-anchor="middle"` and `dominant-baseline="middle"` to
-  centre labels in boxes instead of guessing offsets.
-- **Arrowheads** come from one `<marker>` in `<defs>`, referenced by `marker-end`. Give the
-  marker `fill="context-stroke"` where supported, or simply `fill: currentColor`, so its colour
-  matches the line in both themes.
 - **Encodings are few and explained.** Solid = synchronous call, dashed = async / eventual is
   fine, but if you use it, add a two-item key under the figure. If an encoding appears once,
   label the mark instead of adding a legend.
 - **One accent colour** for the element the text is about; everything else in ink and muted
   ink. Colour that does not mean anything is noise.
 
-## Theme-aware inline SVG
+## Interactive figures: hand-written SVG
+
+Use this only when the page's script must change the drawing. For everything else, use
+Pikchr.
+
+- **Text size 12-14 px at the drawn scale,** never below ~10 px after the figure is scaled to
+  phone width (see below). Use `text-anchor="middle"` and `dominant-baseline="middle"` to
+  centre labels in boxes instead of guessing offsets.
+- **Arrowheads** come from one `<marker>` in `<defs>`, referenced by `marker-end`. Give the
+  marker `fill: currentColor` so its colour matches the line in both themes.
+- **Leave 12-16 px inside the viewBox edge** so strokes and labels are never clipped.
+
 
 Define tokens on the page (artifact-design has the full set) and draw with them:
 
@@ -111,7 +121,7 @@ no `<image href="https://...">`, no `<foreignObject>`. If the page has two diagr
 marker a unique id (`arrow-a`, `arrow-b`) - duplicate ids make the second figure's arrows
 silently pick up the first's marker.
 
-## Example: box-and-arrow with a marker arrowhead
+### Example: box-and-arrow with a marker arrowhead
 
 ```html
 <figure class="diagram">
@@ -182,7 +192,21 @@ the target box so the head is not buried in the box stroke; `min-width: 480px` i
 `overflow-x: auto` wrapper keeps labels at a readable size on a phone, where the figure
 scrolls inside its box instead of shrinking text to 7 px or pushing the page sideways.
 
+### Interactivity
+
+Most diagrams should be static. When interaction answers a real question - "show only the
+write path", "compare before and after" - use real `<button>`s above the figure and toggle
+classes on SVG groups with `addEventListener('click', ...)`. Keep both states drawable on the
+same grid so toggling moves nothing that did not change. Respect `prefers-reduced-motion`
+(no animated transitions when it is set). Do not store the toggle state in `localStorage` -
+it throws in the sandbox; if it must persist, use `window.artifact.data`, and remember that
+writes need the edit link.
+
 ## Phone width
+
+Pikchr figures from `render.mjs` handle this already: they shrink to 70% of natural size
+and then scroll inside their own box. Keep their natural width around 840 px or less, or
+lay the flow out top to bottom. For hand-written SVG:
 
 - `viewBox` + `width: 100%; height: auto` is the baseline. Compute the scale: a 640-wide
   viewBox on a 340 px content column shrinks 13 px text to ~7 px - too small.
@@ -193,32 +217,18 @@ scrolls inside its box instead of shrinking text to 7 px or pushing the page sid
   naturally on phones.
 - Do not rely on hover to reveal labels; touch has no hover.
 
-## Interactivity (optional)
-
-Most diagrams should be static. When interaction answers a real question - "show only the
-write path", "compare before and after" - use real `<button>`s above the figure and toggle
-classes on SVG groups with `addEventListener('click', ...)`. Keep both states drawable on the
-same grid so toggling moves nothing that did not change. Respect `prefers-reduced-motion`
-(no animated transitions when it is set). Do not store the toggle state in `localStorage` -
-it throws in the sandbox; if it must persist, use `window.artifact.data`, and remember that
-writes need the edit link.
-
-## When hand-drawing stops being reasonable
+## Very large graphs
 
 If the figure needs automatic layout of dozens of nodes (a dependency graph of a whole repo),
-draw a smaller diagram of the part the argument needs - that is usually the better figure
-anyway. If you truly need a layout engine, vendor it as a file in the published directory
-(the viewer inlines `<script src="relative.js">`), keeping it under ~1.99 MB compressed, as a
-classic script, and checking that it does not use `eval` / `new Function` / WebAssembly.
-Mermaid's and similar text-to-diagram renderers are large, often load extras on demand and may
-evaluate code at runtime; test through the real viewer, and prefer pre-rendering to static
-SVG offline and pasting the SVG in (then replace hard-coded colours with tokens).
+draw a smaller diagram of the part the argument needs; that is usually the better figure
+anyway. Runtime layout engines (Mermaid and the like) do not run in the viewer: they need the
+network, `eval` or WebAssembly, all of which the CSP blocks.
 
 ## Accessibility
 
 - Wrap each diagram in `<figure>` with a `<figcaption>` stating what it shows.
 - Give the `<svg>` `role="img"` and an `aria-label` that tells the same story in one or two
-  sentences - the path, not a list of box names.
+  sentences - the path, not a list of box names (`render.mjs --alt` does this).
 - Text and lines reach 4.5:1 / 3:1 against the surface in both themes; the accent is never
   the only carrier of meaning (pair it with a heavier stroke, a label, or the caption).
 - For complex flows, the prose next to the figure should also state the steps in order.
@@ -228,7 +238,9 @@ SVG offline and pasting the SVG in (then replace hard-coded colours with tokens)
 - [ ] The diagram shows a mechanism or a difference the text depends on; a sentence wouldn't do.
 - [ ] Every arrow is labeled or its meaning is stated once in a key.
 - [ ] Shapes sit on a grid; no crossings that a moved box could remove; nothing clipped.
-- [ ] Colours are tokens / `currentColor`; checked in light and dark (toggle OS or devtools).
+- [ ] Drawn in Pikchr with the source published next to the page (or hand SVG because it is
+      interactive); checked in light and dark.
 - [ ] At 360 px wide the text is readable, either by scrolling inside the figure or by a
       narrow layout; the page itself does not scroll sideways.
-- [ ] No CDN URL, no `on*=` attributes, unique marker ids, caption and `aria-label` present.
+- [ ] Offered the Pikchr Studio link for polish.
+- [ ] No CDN URL, no `on*=` attributes, caption and `aria-label` present.

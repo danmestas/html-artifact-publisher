@@ -142,5 +142,6 @@ Load these before writing the page itself:
 
 - `skills/artifact-design` — page contract (CSP, sandbox, theme), layout and typography.
 - `skills/artifact-runtime` — `window.artifact`: saved data, self-editing pages, history, waking the agent.
-- `skills/artifact-diagrams` — inline-SVG diagrams that work in both themes.
+- `skills/artifact-diagrams` — when a diagram is worth it and what it should show.
+- `skills/pikchr` — drawing it: Pikchr source, `render.mjs`, polishing in Pikchr Studio.
 - `skills/artifact-dataviz` — charts, palette and `check-contrast.mjs`.

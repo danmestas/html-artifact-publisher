@@ -12,6 +12,10 @@ set -eu
 : "${CLOUDFLARE_ACCOUNT_ID:?CLOUDFLARE_ACCOUNT_ID is not set}"
 : "${BEARER_TOKEN:?BEARER_TOKEN is not set}"
 [ -f src/fossil.wasm ] || { echo "deploy: src/fossil.wasm is missing; run npm run build:wasm" >&2; exit 1; }
+# The same size budget as fossil/build.sh: never deploy an oversized engine.
+gz=$(gzip -9c src/fossil.wasm | wc -c)
+budget="${FOSSIL_WASM_MAX_GZIP:-880000}"
+[ "$gz" -le "$budget" ] || { echo "deploy: src/fossil.wasm is $gz bytes gzipped, over the $budget budget; rebuild with npm ci && npm run build:wasm (README: Building the Fossil engine)" >&2; exit 1; }
 
 secrets=$(mktemp)
 trap 'rm -f "$secrets"' EXIT INT TERM

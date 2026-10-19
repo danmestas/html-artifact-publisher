@@ -56,14 +56,14 @@ On the Workers Paid plan ($5/month) a modest deployment stays inside the include
 ## Prerequisites
 
 - [Node.js 22+](https://nodejs.org/) (CI uses Node 24)
-- [Go 1.26+](https://go.dev/dl/) and [TinyGo 0.43+](https://tinygo.org/getting-started/install/) to build the Fossil engine (set `GO_COMPILER=go` to build with standard Go instead: larger, no TinyGo needed)
+- [Go 1.26+](https://go.dev/dl/) and exactly [TinyGo 0.43.0](https://github.com/tinygo-org/tinygo/releases/tag/v0.43.0) to build the Fossil engine (see [Building the Fossil engine](#building-the-fossil-engine))
 - A Cloudflare account on the Workers Paid plan
 
 ## Quick start
 
 ```bash
-npm install
-npm run build:wasm                 # fossil/ → src/fossil.wasm
+npm ci
+npm run build:wasm                 # fossil/ → src/fossil.wasm, about 0.85 MB gzipped
 npm run deploy:prod                # secrets from Doppler (see Deploying)
 
 export HTML_PUBLISHER_URL=https://html-artifact-publisher.<your-subdomain>.workers.dev
@@ -85,7 +85,7 @@ Secrets live in [Doppler](https://www.doppler.com). The deploy job reads them wi
 2. Create a Doppler service token for that config, and add it to the GitHub repository as the secret `DOPPLER_TOKEN` (until it exists, merges skip the deploy with a warning), under an environment named `production` (or as a repository secret). Environment protection rules, if you add any, gate every deploy.
 3. For a custom domain, add a `routes` entry to `wrangler.jsonc`; otherwise the Worker is served on `workers.dev`.
 
-To deploy by hand with the same secrets: `npm run build:wasm && npm run deploy:prod`.
+To deploy by hand with the same secrets: `npm run build:wasm && npm run deploy:prod`. Prefer merging and letting CI deploy: CI builds the engine the same way every time. `deploy.sh` refuses an engine over the size budget.
 
 The Durable Object classes are created by the `v1` migration in `wrangler.jsonc` on the first deploy.
 
@@ -101,6 +101,16 @@ npm test                           # end-to-end: API, access, fossil clone/push,
 ```
 
 The end-to-end tests start their own `wrangler dev` with fresh state, and build `fossil/cmd/fsclient`, a minimal native Fossil client, for the clone and push tests.
+
+## Building the Fossil engine
+
+`npm run build:wasm` compiles `fossil/` with TinyGo into `src/fossil.wasm` (and copies TinyGo's `wasm_exec.js`). Built correctly, it is **about 2.44 MB raw and 0.85 MB gzipped**, the same on Linux and macOS:
+
+1. **`npm ci` first.** It installs Binaryen 132 (`wasm-opt`) from npm, pinned in `package.json`. The build points TinyGo at it (`WASMOPT`) and runs one more `wasm-opt -Oz` pass with it. Don't install Binaryen yourself: TinyGo's macOS release doesn't bundle `wasm-opt`, and a Homebrew one made a 3.07 MB / 1.05 MB build.
+2. **TinyGo exactly 0.43.0**, the version CI uses. The build checks it and stops otherwise. On macOS: download the `darwin` release from the link in Prerequisites (Homebrew may give another version); on Linux: the `linux-amd64` tarball, with its `bin/` on `PATH`.
+3. **Go from `fossil/go.mod`** (1.26). TinyGo uses it for the standard library.
+
+The build fails if the result is over the size budget, 880,000 bytes gzipped (`FOSSIL_WASM_MAX_GZIP` in `fossil/build.sh`), and `deploy.sh` checks the same budget before deploying. If you hit it, look for the causes above before raising the number; raise it only on purpose, in the same commit as the change that needs it. `GO_COMPILER=go sh fossil/build.sh` builds with standard Go instead (about 2.4 MB gzipped, no budget): for debugging, never for deploying.
 
 ## CLI usage
 
@@ -245,6 +255,7 @@ A `fossil push` that includes an oversized file is refused, but if Fossil sent t
 │                              diagrams.js) and the house fonts (fonts/, fonts.js)
 ├── scripts/                   publish-html.mjs (CLI), pikchr.mjs (diagram check), deploy.sh
 ├── test/                      End-to-end and Pikchr tests
+├── AGENTS.md, CLAUDE.md       Build, test and deploy rules for agents working on this repo
 ├── skills/, agent-harnesses/, docs/   Instructions for agents (publish-html-page,
 │                                      artifact-design, -runtime, -diagrams, -dataviz,
 │                                      pikchr)

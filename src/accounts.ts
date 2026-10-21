@@ -124,8 +124,18 @@ export async function accountRoutes(req: Request, env: Env): Promise<Response | 
     const view = url.searchParams.get('view') ?? 'all', status = url.searchParams.get('status') ?? 'all';
     if (!['all','mine','shared','starred','archived'].includes(view) || !['all','active','archived'].includes(status)) return error('Invalid filter');
     const cursor = url.searchParams.get('cursor') ?? '';
-    if (cursor) { try { const v: unknown = JSON.parse(cursor); if (!Array.isArray(v) || v.length!==2 || !Number.isSafeInteger(v[0]) || typeof v[1]!=='string' || !/^[A-Za-z0-9_-]{1,64}$/.test(v[1])) return error('Invalid cursor'); } catch { return error('Invalid cursor'); } }
-    const result = await r.library(user,{ admin:path==='/api/admin/artifacts',view,status,cursor,q:(url.searchParams.get('q') ?? '').slice(0,300),ownerId:(url.searchParams.get('ownerId') ?? '').slice(0,64),limit:limitOf(url) });
+    const sort = url.searchParams.get('sort') ?? 'recent';
+    if (sort !== 'recent' && sort !== 'name') return error('Invalid sort');
+    if (cursor) {
+      try {
+        const v: unknown = JSON.parse(cursor);
+        if (!Array.isArray(v) || (sort === 'name'
+          ? v.length !== 3 || v[0] !== 'name' || typeof v[1] !== 'string' || v[1].length > 300
+          : v.length !== 2 || !Number.isSafeInteger(v[0]) || v[0] < 0)
+          || typeof v.at(-1) !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(v.at(-1))) return error('Invalid cursor');
+      } catch { return error('Invalid cursor'); }
+    }
+    const result = await r.library(user,{ admin:path==='/api/admin/artifacts',view,status,cursor,sort,q:(url.searchParams.get('q') ?? '').slice(0,300),ownerId:(url.searchParams.get('ownerId') ?? '').slice(0,64),limit:limitOf(url) });
     return json({ ...result,artifacts:result.artifacts.map(e => ({ ...e,createdAt:isoOrNull(e.createdAt),updatedAt:isoOrNull(e.updatedAt),expiresAt:isoOrNull(e.expiresAt),viewerUrl:`${url.origin}/v/${e.slug ?? e.id}` })) });
   }
   if (path==='/api/people' && method==='GET') return json({ users:await r.people() });

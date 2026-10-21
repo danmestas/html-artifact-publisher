@@ -33,7 +33,7 @@ let state = {
   view: Object.hasOwn(VIEWS, params.get('view')) ? params.get('view') : 'all',
   q: params.get('q') || '', ownerId: params.get('ownerId') || '',
   status: ['all', 'active', 'archived'].includes(params.get('status')) ? params.get('status') : 'all',
-  cursor: params.get('cursor') || '',
+  cursor: params.get('cursor') || '', sort: params.get('sort') === 'name' ? 'name' : 'recent',
 };
 
 // A mail scanner must never consume a link. Keep its token only in this page's
@@ -82,20 +82,12 @@ function relativeDate(value) {
   if (ms < 86400000) return `${Math.floor(ms / 3600000)}h ago`;
   return dateText(value);
 }
-function applyTheme(value) {
-  if (value === 'light' || value === 'dark') document.documentElement.dataset.theme = value;
-  else delete document.documentElement.dataset.theme;
-}
 function savePreferences() {
-  try { localStorage.setItem('artifact-library-preferences', JSON.stringify(preferences)); } catch { /* Storage can be disabled. */ }
+  try {
+    const saved = JSON.parse(localStorage.getItem('artifact-library-preferences') || '{}') || {};
+    localStorage.setItem('artifact-library-preferences', JSON.stringify({ ...saved, layout }));
+  } catch { /* Storage can be disabled. */ }
 }
-applyTheme(preferences.theme);
-$('theme').value = ['light', 'dark'].includes(preferences.theme) ? preferences.theme : 'system';
-$('theme').addEventListener('change', () => {
-  preferences.theme = $('theme').value;
-  applyTheme(preferences.theme);
-  savePreferences();
-});
 
 async function api(path, { method = 'GET', body } = {}) {
   const response = await fetch(path, {
@@ -116,6 +108,7 @@ async function api(path, { method = 'GET', body } = {}) {
   return data;
 }
 function showLogin() {
+  clearPreviews();
   $('boot').hidden = true;
   $('app').hidden = true;
   $('login').hidden = false;
@@ -177,6 +170,7 @@ function writeUrl(replace = false) {
     if (state.status !== 'all') p.set('status', state.status);
   }
   if (state.cursor) p.set('cursor', state.cursor);
+  if (state.sort === 'name') p.set('sort', state.sort);
   history[replace ? 'replaceState' : 'pushState']({ previousCursors, page }, '', '/' + (p.size ? '?' + p : ''));
 }
 function closeNavigation() {
@@ -190,7 +184,7 @@ $('nav-toggle').addEventListener('click', () => {
 function resetPagination() { state.cursor = ''; previousCursors = []; page = 1; }
 function navigate(view) {
   clearTimeout(searchTimer);
-  state = { view, q: '', ownerId: '', status: 'all', cursor: '' };
+  state = { view, q: '', ownerId: '', status: 'all', cursor: '', sort: state.sort };
   resetPagination();
   writeUrl();
   closeNavigation();
@@ -202,7 +196,7 @@ window.addEventListener('popstate', e => {
   const p = new URLSearchParams(location.search);
   state = {
     view: Object.hasOwn(VIEWS, p.get('view')) ? p.get('view') : 'all',
-    q: p.get('q') || '', ownerId: p.get('ownerId') || '',
+    q: p.get('q') || '', ownerId: p.get('ownerId') || '', sort: p.get('sort') === 'name' ? 'name' : 'recent',
     status: ['all', 'active', 'archived'].includes(p.get('status')) ? p.get('status') : 'all', cursor: p.get('cursor') || '',
   };
   previousCursors = e.state?.previousCursors || [];
@@ -217,6 +211,10 @@ function search() {
 }
 $('search').addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(search, 250); });
 $('filters').addEventListener('submit', e => { e.preventDefault(); clearTimeout(searchTimer); search(); });
+$('sort').addEventListener('change', () => {
+  state.sort = $('sort').value;
+  resetPagination(); writeUrl(); loadPage();
+});
 for (const id of ['owner-filter', 'status-filter']) $(id).addEventListener('change', () => {
   state.ownerId = $('owner-filter').value;
   state.status = $('status-filter').value;
@@ -283,6 +281,8 @@ async function loadPage() {
   $('owner-filter').hidden = !inventory;
   $('status-filter').hidden = !inventory;
   $('admin-notice').hidden = !inventory;
+  clearPreviews();
+  $('sort').value = state.sort;
   $('search').value = state.q;
   $('status-filter').value = state.status;
   document.querySelectorAll('[data-layout]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.layout === layout)));
@@ -303,7 +303,7 @@ async function loadPage() {
         setOptions($('owner-filter'), users, 'Every owner');
         $('owner-filter').value = state.ownerId;
       }
-      const p = new URLSearchParams({ q: state.q, limit: '25' });
+      const p = new URLSearchParams({ q: state.q, limit: '25', sort: state.sort });
       if (state.cursor) p.set('cursor', state.cursor);
       if (inventory) {
         p.set('status', state.status);
@@ -317,7 +317,7 @@ async function loadPage() {
       $('next').disabled = !nextCursor;
       $('pagination').hidden = !state.cursor && !nextCursor;
       $('page-number').textContent = `Page ${page}${state.cursor && !previousCursors.length ? ' (linked page)' : ''}`;
-      $('result-status').textContent = `${data.artifacts.length} artifact${data.artifacts.length === 1 ? '' : 's'} on this page · Recently updated first`;
+      $('result-status').textContent = `${data.artifacts.length} of ${data.total} artifacts · ${state.sort === 'name' ? 'Name A–Z' : 'Recently updated first'}`;
     } else if (view === 'people') {
       const users = await loadPeople();
       if (seq !== loadSequence) return;
@@ -381,6 +381,34 @@ document.addEventListener('click', e => {
 function meta(item) {
   return `${item.ownerName || 'Instance owner'} · ${item.visibility || 'private'}${item.archived ? ' · archived' : ''} · ${relativeDate(item.updatedAt)}`;
 }
+const desktopPreviews = matchMedia('(min-width: 761px)');
+let previewObserver;
+function clearPreviews() {
+  previewObserver?.disconnect();
+  previewObserver = null;
+  document.querySelectorAll('.artifact-preview iframe').forEach(frame => frame.remove());
+}
+function loadPreviews() {
+  clearPreviews();
+  if (!desktopPreviews.matches || $('app').hidden) return;
+  previewObserver = new IntersectionObserver((entries, observer) => {
+    if (observer !== previewObserver || !desktopPreviews.matches || $('app').hidden) return;
+    for (const { target, isIntersecting } of entries) {
+      if (!isIntersecting || !target.isConnected) continue;
+      observer.unobserve(target);
+      const frame = node('iframe', { title: 'Static artifact preview', tabIndex: -1, loading: 'lazy' });
+      frame.setAttribute('sandbox', '');
+      frame.setAttribute('aria-hidden', 'true');
+      frame.referrerPolicy = 'no-referrer';
+      frame.src = `/p/${encodeURIComponent(target.dataset.id)}`;
+      target.prepend(frame);
+    }
+  }, { rootMargin: '100px' });
+  document.querySelectorAll('.artifact-preview').forEach(el => previewObserver.observe(el));
+}
+desktopPreviews.addEventListener('change', loadPreviews);
+window.addEventListener('pagehide', clearPreviews);
+window.addEventListener('pageshow', e => { if (e.persisted) loadPreviews(); });
 function renderArtifacts(items, inventory) {
   if (!items.length && state.view === 'archived' && !state.q) {
     $('content').replaceChildren(empty('Nothing archived', 'Archived artifacts you own or can access will appear here. Creators can restore them from the artifact menu.'));
@@ -396,22 +424,28 @@ function renderArtifacts(items, inventory) {
   for (const item of items) {
     const title = node('a', { className: 'artifact-title', href: viewerUrl(item), title: item.title, textContent: item.title || 'Untitled artifact' });
     if (item.starred) title.prepend(node('span', { className: 'star-mark', textContent: '★', ariaLabel: 'Starred' }));
-    const summary = node('div', {}, title, node('div', { className: 'artifact-meta', title: meta(item) }, node('span', { textContent: meta(item) })));
+    const summary = node('div', {}, title, node('div', { className: 'shelf-meta' },
+      node('span', { className: 'access-badge', textContent: item.accessLabel }),
+      node('span', { className: 'artifact-meta', title: meta(item), textContent: meta(item) })));
     const menu = button('⋯', () => openManage(item), 'icon-button artifact-menu');
     menu.setAttribute('aria-label', `${item.canManage ? 'Manage' : 'Details for'} ${item.title || 'artifact'}`);
     const entry = node('article', { className: grid ? 'artifact-card' : 'artifact-row', role: 'listitem' });
     if (grid) {
-      const glyph = node('div', { className: 'document-glyph', ariaHidden: 'true' }, node('span'), node('span'), node('span'), node('span'));
-      const preview = node('a', { className: 'artifact-preview', href: viewerUrl(item), tabIndex: -1, ariaHidden: 'true' }, glyph);
+      const preview = node('a', { className: 'artifact-preview', href: viewerUrl(item), tabIndex: -1, ariaHidden: 'true' },
+        node('span', { className: 'preview-label', textContent: 'Static preview · Open to interact' }));
+      preview.dataset.id = item.id;
       entry.append(preview, node('div', { className: 'artifact-summary' }, summary, menu));
     } else {
-      entry.append(summary, node('span', { className: 'cell', textContent: item.ownerName || 'Instance owner' }),
-        node('span', { className: 'cell', textContent: `${item.visibility || 'private'}${item.archived ? ' / archived' : ''}` }),
-        node('span', { className: 'cell time-cell', textContent: relativeDate(item.updatedAt) }), menu);
+      entry.append(summary, node('span', { className: 'cell' }, node('span', { className: 'sr-only', textContent: 'Owner: ' }), item.ownerName || 'Instance owner'),
+        node('span', { className: 'cell' }, node('span', { className: 'sr-only', textContent: 'Visibility and status: ' }), `${item.visibility || 'private'} / ${item.archived ? 'archived' : 'active'}`),
+        node('span', { className: 'cell time-cell' }, node('span', { className: 'sr-only', textContent: 'Updated: ' }), relativeDate(item.updatedAt)), menu);
     }
     list.append(entry);
   }
-  $('content').replaceChildren(list);
+  const headings = node('div', { className: 'inventory-head', ariaHidden: 'true' },
+    ...['Artifact / access', 'Owner', 'Visibility / status', 'Updated', ''].map(textContent => node('span', { textContent })));
+  $('content').replaceChildren(...(grid ? [list] : [headings, list]));
+  loadPreviews();
 }
 function renderPeople(users) {
   const list = node('div', { className: 'record-list' });
@@ -546,7 +580,7 @@ function openManage(item) {
   if (item.canManage) {
     actions.append(button('Manage access', () => openSharing(item)), button('Rename', () => openRename(item)),
       button(item.archived ? 'Restore to library' : 'Archive artifact', () => confirmAction(item.archived ? 'Restore artifact?' : 'Archive artifact?',
-        item.archived ? 'This artifact will return to the library. Its existing sharing stays the same.' : 'This hides the artifact from the default library. Existing links and named access will still work. The instance owner can restore it from Every artifact.',
+        item.archived ? 'This artifact will return to the library. Its existing sharing stays the same.' : 'This hides the artifact from the default library. Existing links and named access will still work. You can restore it from Archived; the instance owner can also restore it from Every artifact.',
         item.archived ? 'Restore artifact' : 'Archive artifact', async () => {
           await api(`/api/artifacts/${encodeURIComponent(item.id)}/manage`, { method: 'PATCH', body: { archived: !item.archived } });
           notify(item.archived ? 'Artifact restored.' : 'Artifact archived.');

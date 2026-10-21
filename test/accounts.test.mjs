@@ -134,6 +134,81 @@ test('permission isolation, named grants, account metadata, archive, transfer an
   assert.equal((await api(path,{method:'DELETE',cookie:c.cookie})).status,204);
 });
 
+test('name sorting, deterministic ties, filtered totals and compatible cursors',async()=>{
+  const auth={cookie:memberA.cookie};
+  const titles=['Parity zebra','Parity alpha','Parity Alpha','Parity middle'];
+  const created=[];
+  for (const title of titles) created.push(await create(auth,{title}));
+  // Isolated fixture timestamps make the default order unambiguously different.
+  for (let i=0;i<created.length;i++) registrySQL('UPDATE artifacts SET updated_at=? WHERE id=?',100+i,created[i].id);
+  const query='/api/library?q=Parity&limit=2';
+  const recent=await api(query,auth);
+  assert.deepEqual(recent.json.artifacts.map(a=>a.id),[created[3].id,created[2].id]);
+  assert.equal(recent.json.total,4);
+  const first=await api(query+'&sort=name',auth);
+  const second=await api(query+'&sort=name&cursor='+encodeURIComponent(first.json.nextCursor),auth);
+  const expected=created.map((a,i)=>({...a,title:titles[i]})).sort((a,b)=>a.title.toLowerCase()<b.title.toLowerCase()?-1:a.title.toLowerCase()>b.title.toLowerCase()?1:a.id<b.id?-1:1);
+  assert.deepEqual([...first.json.artifacts,...second.json.artifacts].map(a=>a.id),expected.map(a=>a.id));
+  assert.equal(second.json.total,4); assert.equal(second.json.nextCursor,null);
+  assert.ok(first.json.artifacts.every(a=>a.accessLabel==='Private'));
+  assert.equal((await api(query+'&cursor='+encodeURIComponent(first.json.nextCursor),auth)).status,400);
+  assert.equal((await api(query+'&sort=name&cursor='+encodeURIComponent(recent.json.nextCursor),auth)).status,400);
+  for (const cursor of ['null','[]','["name",1,"id"]','["name","ok","bad id"]','[-1,"id"]']) {
+    assert.equal((await api(query+'&sort=name&cursor='+encodeURIComponent(cursor),auth)).status,400);
+  }
+  assert.equal((await api(query+'&sort=invalid',auth)).status,400);
+  assert.equal((await api('/api/library?q=Parity',{cookie:memberB.cookie})).json.total,0);
+  await api(`/api/artifacts/${created[0].id}/manage`,{...auth,method:'PATCH',body:{archived:true}});
+  const archived=await api('/api/library?view=archived&q=Parity&sort=name',auth);
+  assert.deepEqual(archived.json.artifacts.map(a=>a.id),[created[0].id]);
+  const inventory=await api('/api/admin/artifacts?sort=name&q=Parity&status=active&ownerId='+memberA.user.id,{cookie:ownerAccount.cookie});
+  assert.equal(inventory.json.total,3);
+  assert.deepEqual(inventory.json.artifacts.map(a=>a.id),expected.filter(a=>a.id!==created[0].id).map(a=>a.id));
+  assert.ok(inventory.json.artifacts.every(a=>a.accessLabel==='Can edit'));
+  for (const a of created) await api('/api/artifacts/'+a.id,{...auth,method:'DELETE'});
+});
+
+test('static previews enforce access, strip active markup and bound entry payloads',async()=>{
+  const creator={cookie:memberA.cookie}, owner={cookie:ownerAccount.cookie}, reader={cookie:memberB.cookie};
+  const hostile='<html><head><base href="https://outside.invalid/"><meta http-equiv="refresh" content="0;url=https://outside.invalid/"><script>parent.pwned=true</script><style>h1{color:red;background:url(https://outside.invalid/css)}</style></head><body onload="alert(1)"><h1>Distinct static content</h1><a href="https://outside.invalid/" target="_top" ping="https://outside.invalid/ping">Link</a><iframe src="https://outside.invalid/frame"></iframe><object data="https://outside.invalid/obj"></object><form action="https://outside.invalid/form"><input autofocus></form><img src="https://outside.invalid/image" onerror="alert(1)"><svg onload="alert(1)"><a href="javascript:alert(1)">SVG</a></svg></body></html>';
+  const a=await create(creator,{files:{'index.html':Buffer.from(hostile).toString('base64'),'other.html':Buffer.from('<h1>Wrong entry</h1>').toString('base64')}});
+  const path='/p/'+a.id;
+  const hostCSP=(await api('/')).headers.get('content-security-policy');
+  assert.match(hostCSP,/script-src 'self'; style-src 'self'/);
+  assert.doesNotMatch(hostCSP,/unsafe-inline/,'preview support does not relax the host shell');
+  assert.equal((await api(path)).status,404);
+  assert.equal((await api(path,reader)).status,404);
+  for(const auth of [creator,owner]) {
+    const r=await api(path,auth); assert.equal(r.status,200,r.text);
+    assert.match(r.text,/Distinct static content/); assert.doesNotMatch(r.text,/Wrong entry/);
+    assert.doesNotMatch(r.text,/<(?:script|base|meta|iframe|object|form|svg)\b|\bonload=|\bonerror=|\bhref=|\btarget=|\bping=/i);
+    assert.match(r.headers.get('content-security-policy'),/^sandbox;/);
+    assert.match(r.headers.get('content-security-policy'),/default-src 'none'/);
+    assert.match(r.headers.get('content-security-policy'),/frame-ancestors 'self'/);
+    assert.equal(r.headers.get('cache-control'),'private, no-store');
+  }
+  for (const permission of ['read','write']) {
+    await api(`/api/artifacts/${a.id}/sharing`,{...creator,method:'PUT',body:{userId:memberB.user.id,permission}});
+    assert.equal((await api(path,reader)).status,200);
+    const shared=await api('/api/library?view=shared',reader);
+    assert.equal(shared.json.artifacts.find(e=>e.id===a.id).accessLabel,permission==='read'?'Can view':'Can edit');
+    assert.equal((await api('/api/library',creator)).json.artifacts.find(e=>e.id===a.id).accessLabel,'Shared by you');
+  }
+  await api(`/api/artifacts/${a.id}/sharing`,{...creator,method:'PUT',body:{userId:memberB.user.id,permission:null}});
+  assert.equal((await api(path,reader)).status,404,'revocation affects new preview requests');
+  for (const [files,expected] of [
+    [{'report.htm':Buffer.from('<h1>Alternate entry</h1>').toString('base64')},'Alternate entry'],
+    [{'notes.txt':Buffer.from('Not HTML').toString('base64')},'Static preview unavailable'],
+    [{'index.html':Buffer.from('<!doctype html><html><head><title>Script app</title><style>body{color:red}</style></head><body><div id="app"></div><script>document.body.textContent="Dynamic"</script></body></html>').toString('base64')},'Static preview unavailable'],
+    [{'index.html':Buffer.from('x'.repeat(256*1024+1)).toString('base64')},'Static preview unavailable'],
+  ]) {
+    const fixture=await create(creator,{files});
+    assert.ok((await api('/p/'+fixture.id,creator)).text.includes(expected));
+    await api('/api/artifacts/'+fixture.id,{...creator,method:'DELETE'});
+  }
+  await api('/api/artifacts/'+a.id,{...creator,method:'DELETE'});
+});
+
 // Expiry fixtures edit only the suite's throwaway Registry database. This
 // avoids a test-only authentication endpoint or waiting 15 minutes in CI.
 function registrySQL(sql, ...args) {
@@ -183,6 +258,8 @@ test('personal credentials, revoke and suspend, stable pagination, sole owner pr
   const second=await api('/api/credentials',{method:'POST',cookie:member.cookie,body:{name:'Before suspend'}});
   assert.equal((await api(`/api/people/${member.user.id}`,{method:'PATCH',cookie:owner.cookie,body:{status:'disabled'}})).status,200);
   assert.deepEqual((await api('/api/session',{cookie:member.cookie})).json,{user:null});
+  assert.equal((await api('/p/'+created[0].id,{cookie:member.cookie})).status,404,'suspension denies new previews');
+  assert.equal((await api('/p/'+created[0].id,{bearer:second.json.token})).status,404);
   assert.equal((await api('/api/artifacts',{method:'POST',bearer:second.json.token,body:{files:{'index.html':'eA=='}}})).status,401);
   assert.deepEqual((await api('/api/auth/request',{method:'POST',body:{email:member.user.email}})).json,{ok:true});
   assert.equal((await api('/api/people/instance-owner',{method:'PATCH',cookie:owner.cookie,body:{status:'disabled'}})).status,403);

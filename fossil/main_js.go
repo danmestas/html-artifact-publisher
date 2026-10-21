@@ -121,6 +121,42 @@ func handle(req request, body []byte) (any, error) {
 		}
 		return map[string]any{"checkin": uuid, "files": files, "missing": missing}, nil
 
+	case "preview":
+		rid, _, err := resolve(r, "")
+		if err != nil {
+			return nil, err
+		}
+		entries, err := r.ListFiles(rid)
+		if err != nil {
+			return nil, err
+		}
+		path := ""
+		for _, f := range entries {
+			name := strings.ToLower(f.Name)
+			if strings.HasSuffix(name, ".html") || strings.HasSuffix(name, ".htm") {
+				if path == "" || f.Name < path {
+					path = f.Name
+				}
+				if name == "index.html" {
+					path = f.Name
+					break
+				}
+			}
+		}
+		if path == "" {
+			return map[string]any{"reason": "no_html"}, nil
+		}
+		// Read only the entry file, never its siblings. Bound the payload sent
+		// across the WASM boundary; do not truncate markup into a misleading view.
+		b, err := r.ReadFile(rid, path)
+		if err != nil {
+			return map[string]any{"reason": "missing"}, nil
+		}
+		if len(b) > 256*1024 {
+			return map[string]any{"reason": "too_large"}, nil
+		}
+		return map[string]any{"data": base64.StdEncoding.EncodeToString(b)}, nil
+
 	case "raw":
 		rid, uuid, err := resolve(r, req.At)
 		if err != nil {

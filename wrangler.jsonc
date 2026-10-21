@@ -16,7 +16,7 @@
   "assets": {
     "directory": "./public",
     "binding": "ASSETS",
-    "run_worker_first": ["/", "/login", "/api/*", "/r/*", "/v/*", "/healthz"]
+    "run_worker_first": ["/", "/login", "/api/*", "/r/*", "/v/*", "/p/*", "/healthz"]
   },
 
   // go-libfossil compiled to wasm by fossil/build.sh.

@@ -7,6 +7,7 @@
 <!-- The Worker fills this in with the response's CSP nonce (src/index.ts, handleViewer). -->
 <meta name="artifact-nonce" content="">
 <title>Artifact</title>
+<script src="/appearance.js"></script>
 <link rel="stylesheet" href="/viewer.css">
 </head>
 <body>
@@ -28,6 +29,7 @@
   </div>
   <div class="bar-right">
     <a id="backLibrary" href="/" hidden>Library</a>
+    <select id="viewer-theme" data-appearance aria-label="Appearance"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select>
     <span id="updated" class="muted"></span>
     <span id="role" class="pill"></span>
     <div class="menu-anchor">

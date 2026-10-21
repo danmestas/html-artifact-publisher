@@ -6,6 +6,7 @@
   <meta name="color-scheme" content="light dark">
   <meta name="referrer" content="no-referrer">
   <title>Artifact Library</title>
+  <script src="/appearance.js"></script>
   <link rel="stylesheet" href="/library.css">
   <script type="module" src="/library.js"></script>
 </head>
@@ -20,6 +21,7 @@
       <span class="muted">Private by default. Shared on purpose.</span>
     </div>
     <div class="login-form"><div class="form-inner">
+      <label for="login-theme">Appearance</label><select id="login-theme" data-appearance><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select>
       <h2 id="login-title">Welcome back</h2>
       <p id="login-description" class="muted">Sign in to your artifact library.</p>
       <form id="login-form">
@@ -55,7 +57,7 @@
         </nav>
         <div class="account">
           <div class="identity"><strong id="account-name"></strong><span id="account-email" class="muted"></span><span id="account-role" class="tiny"></span></div>
-          <label for="theme">Appearance</label><select id="theme"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select>
+          <label for="theme">Appearance</label><select id="theme" data-appearance><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select>
           <button id="logout" class="full">Sign out</button>
         </div>
       </div>
@@ -67,6 +69,7 @@
         <div class="search"><label class="sr-only" for="search">Search artifacts</label><input id="search" type="search" placeholder="Search artifacts…" maxlength="200" autocomplete="off"></div>
         <select id="owner-filter" aria-label="Filter by owner" hidden><option value="">Every owner</option></select>
         <select id="status-filter" aria-label="Filter by status" hidden><option value="all">Every status</option><option value="active">Active</option><option value="archived">Archived</option></select>
+        <select id="sort" aria-label="Sort artifacts"><option value="recent">Recently updated</option><option value="name">Name A–Z</option></select>
         <div id="layout-switch" class="segmented" role="group" aria-label="Library layout"><button type="button" data-layout="grid" aria-pressed="true">Grid</button><button type="button" data-layout="list" aria-pressed="false">List</button></div>
       </form>
       <p id="result-status" class="tiny" role="status" aria-live="polite"></p>

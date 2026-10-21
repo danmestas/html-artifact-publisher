@@ -27,7 +27,8 @@ export class Registry extends DurableObject<Env> {
     const cols = sql.exec<{ name: string }>('PRAGMA table_info(artifacts)').toArray();
     if (!cols.some(c => c.name === 'owner_id')) sql.exec('ALTER TABLE artifacts ADD COLUMN owner_id TEXT');
     if (!cols.some(c => c.name === 'archived')) sql.exec('ALTER TABLE artifacts ADD COLUMN archived INTEGER NOT NULL DEFAULT 0');
-    sql.exec(`CREATE INDEX IF NOT EXISTS artifacts_library_order ON artifacts(updated_at DESC,id DESC);
+    sql.exec(`CREATE INDEX IF NOT EXISTS artifacts_name_order ON artifacts(title COLLATE NOCASE,id);
+      CREATE INDEX IF NOT EXISTS artifacts_library_order ON artifacts(updated_at DESC,id DESC);
       CREATE INDEX IF NOT EXISTS artifacts_owner ON artifacts(owner_id,archived,updated_at DESC,id DESC);
       CREATE INDEX IF NOT EXISTS grants_user ON grants(user_id,artifact_id);
       CREATE INDEX IF NOT EXISTS stars_user ON stars(user_id,artifact_id);
@@ -157,7 +158,7 @@ export class Registry extends DurableObject<Env> {
   async star(id: string, userId: string, starred: boolean): Promise<void> {
     this.ctx.storage.sql.exec(starred ? 'INSERT OR IGNORE INTO stars VALUES (?,?)' : 'DELETE FROM stars WHERE artifact_id=? AND user_id=?',id,userId);
   }
-  async library(user: Account, opts: { admin: boolean; view: string; q: string; ownerId: string; status: string; cursor: string; limit: number }) {
+  async library(user: Account, opts: { admin: boolean; view: string; q: string; ownerId: string; status: string; cursor: string; limit: number; sort?: 'recent' | 'name' }) {
     const clauses = [`${LIVE.replaceAll('expires_at','a.expires_at')}`];
     const args: (string | number)[] = [user.id,user.id,now()];
     if (!opts.admin) {
@@ -171,14 +172,25 @@ export class Registry extends DurableObject<Env> {
       if (opts.ownerId) { clauses.push("COALESCE(a.owner_id,'instance-owner')=?"); args.push(opts.ownerId); }
     }
     if (opts.q) { clauses.push("instr(lower(a.title),lower(?)) > 0"); args.push(opts.q); }
+    const joins = "FROM artifacts a LEFT JOIN accounts u ON u.id=COALESCE(a.owner_id,'instance-owner') LEFT JOIN grants g ON g.artifact_id=a.id AND g.user_id=? LEFT JOIN stars s ON s.artifact_id=a.id AND s.user_id=?";
+    const total = this.ctx.storage.sql.exec<{ n: number }>(`SELECT count(*) AS n ${joins} WHERE ${clauses.join(' AND ')}`,...args).one().n;
+    // SQLite NOCASE folds ASCII only, not locale-specific Unicode ordering.
+    // Keep the same collation and ID tie-breaker in the seek and ORDER BY.
+    const byName = opts.sort === 'name';
     if (opts.cursor) {
-      const [time,id] = JSON.parse(opts.cursor) as [number,string];
-      clauses.push('(a.updated_at < ? OR (a.updated_at=? AND a.id < ?))'); args.push(time,time,id);
+      const values = JSON.parse(opts.cursor);
+      if (byName) {
+        const [,title,id] = values;
+        clauses.push('(a.title COLLATE NOCASE > ? OR (a.title COLLATE NOCASE = ? AND a.id > ?))'); args.push(title,title,id);
+      } else {
+        const [time,id] = values;
+        clauses.push('(a.updated_at < ? OR (a.updated_at=? AND a.id < ?))'); args.push(time,time,id);
+      }
     }
-    const rows = this.ctx.storage.sql.exec<Row & { ownerName: string; starred: number; permission: 'read' | 'write'; shared: number }>(`SELECT a.*,u.name AS ownerName,s.user_id IS NOT NULL AS starred, g.permission, EXISTS(SELECT 1 FROM grants x WHERE x.artifact_id=a.id) AS shared FROM artifacts a LEFT JOIN accounts u ON u.id=COALESCE(a.owner_id,'instance-owner') LEFT JOIN grants g ON g.artifact_id=a.id AND g.user_id=? LEFT JOIN stars s ON s.artifact_id=a.id AND s.user_id=? WHERE ${clauses.join(' AND ')} ORDER BY a.updated_at DESC,a.id DESC LIMIT ?`,...args,opts.limit+1).toArray();
+    const rows = this.ctx.storage.sql.exec<Row & { ownerName: string; starred: number; permission: 'read' | 'write'; shared: number }>(`SELECT a.*,u.name AS ownerName,s.user_id IS NOT NULL AS starred, g.permission, EXISTS(SELECT 1 FROM grants x WHERE x.artifact_id=a.id) AS shared ${joins} WHERE ${clauses.join(' AND ')} ORDER BY ${byName ? 'a.title COLLATE NOCASE ASC,a.id ASC' : 'a.updated_at DESC,a.id DESC'} LIMIT ?`,...args,opts.limit+1).toArray();
     const more = rows.length > opts.limit; rows.splice(opts.limit);
     const last = rows.at(-1);
-    return { artifacts: rows.map(r => ({ ...toEntry(r), ownerName: r.ownerName ?? 'Instance owner', starred: !!r.starred, permission: user.role === 'owner' || (r.owner_id ?? 'instance-owner') === user.id ? 'write' as const : r.permission, canManage: user.role === 'owner' || (r.owner_id ?? 'instance-owner') === user.id, visibility: r.shared ? 'shared' : 'private' })), nextCursor: more && last ? JSON.stringify([last.updated_at,last.id]) : null };
+    return { artifacts: rows.map(r => ({ ...toEntry(r), ownerName: r.ownerName ?? 'Instance owner', accessLabel: (r.owner_id ?? 'instance-owner') === user.id ? (r.shared ? 'Shared by you' : 'Private') : (user.role === 'owner' || r.permission === 'write' ? 'Can edit' : 'Can view'), starred: !!r.starred, permission: user.role === 'owner' || (r.owner_id ?? 'instance-owner') === user.id ? 'write' as const : r.permission, canManage: user.role === 'owner' || (r.owner_id ?? 'instance-owner') === user.id, visibility: r.shared ? 'shared' : 'private' })), total, nextCursor: more && last ? JSON.stringify(byName ? ['name',last.title,last.id] : [last.updated_at,last.id]) : null };
   }
   async audit(userId: string, action: string, id: string | null = null, title: string | null = null): Promise<void> {
     this.ctx.storage.sql.exec('INSERT INTO activity VALUES (?,?,?,?,?,?)',genId(),userId,action,id,title,now());

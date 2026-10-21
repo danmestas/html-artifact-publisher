@@ -30,6 +30,8 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
     assert.equal((await api('/api/session')).json.user,null);
     click('#verify-button'); wait('#app:not([hidden])'); wait('.artifact-title');
     assert.equal(evaluate('document.getElementById("page-error").hidden'),true);
+    const { parityQA } = await import('./parity-browser.mjs');
+    await parityQA({base,api,owner,browserOwner,member,run,evaluate,wait,click,output});
     run('set','viewport','390','844');
     run('open',base+'/?view=starred');wait('.artifact-title');
     const longTitle=evaluate(`(()=>{const e=document.querySelector('.artifact-title');return {height:e.getBoundingClientRect().height,wrap:getComputedStyle(e).whiteSpace,clipped:e.scrollWidth>e.clientWidth}})()`);
@@ -74,7 +76,10 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
         run('screenshot',join(output,`${view}-${theme}-${width}.png`));
       }
     }
-    run('open',base+'/');wait('.artifact-title');
+    run('open',base+'/?sort=name');wait('.artifact-title');
+    assert.equal(evaluate('document.getElementById("sort").value'),'name');
+    const sortedTitles=evaluate('[...document.querySelectorAll(".artifact-title")].map(e=>e.textContent.replace(/^★/,"").toLowerCase())');
+    assert.deepEqual(sortedTitles,[...sortedTitles].sort());
     assert.equal(evaluate('document.querySelectorAll(".artifact-title").length'),25);
     const firstPage=evaluate('[...document.querySelectorAll(".artifact-title")].map(e=>new URL(e.href).pathname)');
     // Chromium pointer activation must use the post-scroll target coordinates.
@@ -176,6 +181,7 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
     assert.ok(!(await api('/api/credentials',{cookie:owner.cookie})).json.credentials.some(c=>c.name==='Browser credential'));
     // Archive, find in instance inventory, restore, and explicit deletion.
     run('open',base+'/?view=mine');wait('.artifact-title');item();run('find','role','button','click','--name','Archive artifact');
+    assert.ok(evaluate('document.getElementById("dialog-body").textContent.includes("You can restore it from Archived")'));
     click('#dialog-body button[type=submit]');run('wait','--fn','!document.getElementById("dialog").open');run('wait','[aria-busy="false"]');
     run('open',base+'/?view=admin&status=archived');wait('.artifact-title');item();run('find','role','button','click','--name','Restore to library');
     click('#dialog-body button[type=submit]');run('wait','--fn','!document.getElementById("dialog").open');run('wait','[aria-busy="false"]');
@@ -184,6 +190,7 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
     const sharing=await api(`/api/artifacts/${id}/sharing`,{cookie:owner.cookie});assert.equal(sharing.json.ownerId,member.user.id);assert.equal(sharing.json.grants.length,0);
     run('cookies','set','artifact_session',member.cookie.split('=')[1],'--url',base,'--httpOnly','--sameSite','Lax');
     run('open',base+'/?view=mine');wait('.artifact-title');item();run('find','role','button','click','--name','Archive artifact');
+    assert.ok(evaluate('document.getElementById("dialog-body").textContent.includes("You can restore it from Archived")'));
     click('#dialog-body button[type=submit]');run('wait','--fn','!document.getElementById("dialog").open');run('wait','[aria-busy="false"]');
     run('open',base+'/?view=archived');wait('.artifact-title');item();run('find','role','button','click','--name','Restore to library');
     click('#dialog-body button[type=submit]');run('wait','--fn','!document.getElementById("dialog").open');run('wait','[aria-busy="false"]');

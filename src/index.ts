@@ -27,6 +27,7 @@
  */
 
 import { Repo } from './repo';
+import { preview } from './preview';
 import { accountRoutes, artifactCaller, csrf, identity, readBody } from './accounts';
 import { Registry } from './registry';
 import type { FossilReply } from './fossil';
@@ -382,6 +383,13 @@ export default {
       const id = await registry(env).resolve(api[1]!);
       if (!id) return json({ error: 'not found', code: 'not_found' }, 404);
       return handleArtifact(req, env, ctx, id, api[2] ?? '');
+    }
+
+    const staticPreview = /^\/p\/([A-Za-z0-9_-]{1,64})$/.exec(path);
+    if (staticPreview && method === 'GET') {
+      const id = await registry(env).resolve(staticPreview[1]!);
+      if (!id) return new Response('Preview unavailable', { status: 404 });
+      return preview(req, env, id);
     }
 
     const sync = /^\/r\/([A-Za-z0-9_-]{1,64})\/?$/.exec(path);

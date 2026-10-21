@@ -1,0 +1,130 @@
+[
+  {
+    "name": "current-library-light-desktop",
+    "frames": 2,
+    "height": 1000,
+    "overflow": false,
+    "scheme": "light",
+    "width": 1440
+  },
+  {
+    "name": "current-viewer-light-desktop",
+    "frames": 0,
+    "height": 1000,
+    "overflow": false,
+    "scheme": "light",
+    "width": 1440
+  },
+  {
+    "name": "current-inventory-light-desktop",
+    "frames": 0,
+    "height": 1000,
+    "overflow": false,
+    "scheme": "light",
+    "width": 1440
+  },
+  {
+    "name": "current-library-dark-desktop",
+    "frames": 2,
+    "height": 1000,
+    "overflow": false,
+    "scheme": "dark",
+    "width": 1440
+  },
+  {
+    "name": "current-viewer-dark-desktop",
+    "frames": 0,
+    "height": 1000,
+    "overflow": false,
+    "scheme": "dark",
+    "width": 1440
+  },
+  {
+    "name": "current-inventory-dark-desktop",
+    "frames": 0,
+    "height": 1000,
+    "overflow": false,
+    "scheme": "dark",
+    "width": 1440
+  },
+  {
+    "name": "current-library-light-phone",
+    "frames": 0,
+    "height": 844,
+    "overflow": false,
+    "scheme": "light",
+    "width": 390
+  },
+  {
+    "name": "current-viewer-light-phone",
+    "frames": 0,
+    "height": 844,
+    "overflow": false,
+    "scheme": "light",
+    "width": 390
+  },
+  {
+    "name": "current-inventory-light-phone",
+    "frames": 0,
+    "height": 844,
+    "overflow": false,
+    "scheme": "light",
+    "width": 390
+  },
+  {
+    "name": "current-library-dark-phone",
+    "frames": 0,
+    "height": 844,
+    "overflow": false,
+    "scheme": "dark",
+    "width": 390
+  },
+  {
+    "name": "current-viewer-dark-phone",
+    "frames": 0,
+    "height": 844,
+    "overflow": false,
+    "scheme": "dark",
+    "width": 390
+  },
+  {
+    "name": "current-inventory-dark-phone",
+    "frames": 0,
+    "height": 844,
+    "overflow": false,
+    "scheme": "dark",
+    "width": 390
+  },
+  {
+    "name": "current-login-light-desktop",
+    "frames": 0,
+    "height": 1000,
+    "overflow": false,
+    "scheme": "light",
+    "width": 1440
+  },
+  {
+    "name": "current-login-dark-desktop",
+    "frames": 0,
+    "height": 1000,
+    "overflow": false,
+    "scheme": "dark",
+    "width": 1440
+  },
+  {
+    "name": "current-login-light-phone",
+    "frames": 0,
+    "height": 844,
+    "overflow": false,
+    "scheme": "light",
+    "width": 390
+  },
+  {
+    "name": "current-login-dark-phone",
+    "frames": 0,
+    "height": 844,
+    "overflow": false,
+    "scheme": "dark",
+    "width": 390
+  }
+]

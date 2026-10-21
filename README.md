@@ -42,7 +42,7 @@ flowchart LR
 
 | Who | How | Can |
 |-----|-----|-----|
-| Owner | `Authorization: Bearer <BEARER_TOKEN>` | Everything, including create and list |
+| Legacy owner credential | `Authorization: Bearer <BEARER_TOKEN>` | All artifact operations, including create and list; account administration uses an instance-owner login |
 | Read link | token after `#`, sent as `Authorization: Token <t>` | Read every version and the page data; `fossil clone` as `viewer` |
 | Edit link | token after `#` | Also publish versions, save page data, delete; `fossil push` as `editor` |
 | Anyone else | | Nothing: unknown and forbidden both answer 404, and anonymous clones are refused |
@@ -65,7 +65,9 @@ Personal API credentials are created in the account menu and displayed once. Use
 
 For isolated local integration tests only, set `TEST_MAIL_TRANSPORT=loopback` and an HTTP loopback `APP_ORIGIN` matching the server origin. The auth request/invitation JSON then includes `loginUrl` instead of sending mail. This transport must never be enabled on a shared server or production deployment. Normal production responses contain no login token. No real email is sent by the account test suite; production delivery is a separate operational verification.
 
-Account and management API shapes are documented in [`docs/accounts-library-spec.md`](docs/accounts-library-spec.md). Libraries and administrative inventories use bounded cursor pagination. Browser writes require a matching Origin; explicit authenticated CLI clients remain supported. Accounts, sessions, grants, stars and audit records live in the existing Registry SQLite Durable Object with additive schema changes; artifact contents remain in their existing Repo objects.
+The library offers Recently updated and Name A–Z sorting, filtered totals, visible permission labels, and a shared system/light/dark appearance choice across login, library and viewer. Sorting and filters survive viewer return. Gallery previews use the actual HTML entry file, but are static, script-disabled and isolated; unsupported or oversized content has an explicit fallback. External and multi-file dependent assets are not fetched for previews. Phone lists stay compact and do not load hidden gallery frames. See the [approved mockup control map](docs/mockup-control-map.md) and [parity acceptance evidence](docs/mockup-parity-audit.md).
+
+Account and management API shapes are documented in [`docs/accounts-library-spec.md`](docs/accounts-library-spec.md). Library/inventory queries accept `sort=recent` (default) or `sort=name`; name cursors use the title plus ID, recent cursors use the timestamp plus ID. Sorting is deterministic SQLite NOCASE, not locale-specific Unicode ordering. Libraries and administrative inventories use bounded cursor pagination. Browser writes require a matching Origin; explicit authenticated CLI clients remain supported. Accounts, sessions, grants, stars and audit records live in the existing Registry SQLite Durable Object with additive schema changes; artifact contents remain in their existing Repo objects.
 
 ### Cost
 

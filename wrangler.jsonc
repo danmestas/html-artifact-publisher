@@ -16,7 +16,7 @@
   "assets": {
     "directory": "./public",
     "binding": "ASSETS",
-    "run_worker_first": ["/api/*", "/r/*", "/v/*", "/healthz"]
+    "run_worker_first": ["/", "/login", "/api/*", "/r/*", "/v/*", "/healthz"]
   },
 
   // go-libfossil compiled to wasm by fossil/build.sh.
@@ -37,7 +37,14 @@
   // BEARER_TOKEN is a secret — set it with: wrangler secret put BEARER_TOKEN
   // NOTIFY_API_KEY (optional) is a secret too.
 
+  "send_email": [{ "name": "EMAIL" }],
+
   "vars": {
+    // Installation-specific values are supplied by scripts/deploy.sh from Doppler.
+    "APP_ORIGIN": "",
+    "EMAIL_FROM": "",
+    // Never enable outside an isolated localhost test server.
+    "TEST_MAIL_TRANSPORT": "",
     // Maximum TTL in seconds (30 days)
     "MAX_TTL_SECONDS": "2592000",
     // Default TTL when not specified (7 days)

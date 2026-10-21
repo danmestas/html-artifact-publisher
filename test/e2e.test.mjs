@@ -199,6 +199,11 @@ test('fossil clone and push', async () => {
   assert.ok(fossil('clone', a.cloneUrl, fresh).ok);
   const tooBig = fossil('push', fresh, a.cloneUrl, 'big.bin', `@${big}`, 'too big');
   assert.ok(!tooBig.ok && /too large to store/.test(tooBig.out), tooBig.out);
+  // A check-in can arrive before its file in a separate sync request.
+  assert.equal((await api(`/api/artifacts/${a.id}/files/big.bin`, { token: a.read })).status, 404);
+  const recovery = join(work, `${a.id}-recovery.fossil`);
+  assert.ok(fossil('clone', a.cloneUrl, recovery).ok, 'repository still clones after rejected push');
+  assert.equal((await api(`/api/artifacts/${a.id}/files/index.html`, { token: a.read })).text, '<h1>pushed</h1>', 'previously stored content remains readable');
 });
 
 test('viewer shell', async () => {

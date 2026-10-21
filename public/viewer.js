@@ -13,6 +13,24 @@ const WATCH_MS = 60_000;
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
+function libraryReturnLocation(value) {
+  if (!value || value.length > 4096) return '/';
+  try {
+    const target = new URL(value, location.origin);
+    if (target.origin !== location.origin || target.pathname !== '/' || target.username || target.password) return '/';
+    return target.pathname + target.search;
+  } catch { return '/'; }
+}
+$('backLibrary').href = libraryReturnLocation(new URLSearchParams(location.search).get('returnTo'));
+
+// Token links keep their original syntax. Session-only links may use #@<check-in>
+// for history, without minting or revealing capability tokens.
+function viewerFragment(hash) {
+  if (!hash || hash === '#') return { token: '', at: '' };
+  if (hash.startsWith('#@')) return { token: '', at: decodeURIComponent(hash.slice(2)) };
+  return parseFragment(hash);
+}
+
 let art = null;      // the Artifact API client
 let link = null;     // { token, at } from the fragment
 let info = null;     // { title, role, tip, timeline } as last loaded
@@ -204,7 +222,8 @@ function renderChrome() {
   $('updated').textContent = head ? `Updated ${ago(head.time)} by ${head.user}` : '';
   $('role').textContent = writer ? 'Can edit' : 'View only';
   $('role').className = `pill ${writer ? 'write' : 'read'}`;
-  $('deleteBtn').hidden = !writer;
+  $('deleteBtn').hidden = !writer || (!link.token && !info.canManage);
+  $('backLibrary').hidden = !!link.token;
 
   $('oldStrip').hidden = latest;
   $('restoreBtn').hidden = latest || !writer;
@@ -258,6 +277,13 @@ function shareRow(id, label, hint, value, { secret = false } = {}) {
 }
 
 function renderShare() {
+  if (!link.token) {
+    $('shareRows').replaceChildren(shareRow('libraryLink', 'Library link',
+      'Only the owner, instance owner, and people with named access can open this link after signing in.',
+      location.origin + location.pathname));
+    $('shareFoot').textContent = 'Manage named access from your library. This link does not grant access.';
+    return;
+  }
   const writer = info.role === 'write';
   const readToken = writer ? info.readToken : link.token;
   const login = writer ? 'editor' : 'viewer';
@@ -411,7 +437,7 @@ async function main() {
   const m = /^\/v\/([A-Za-z0-9_-]{1,64})$/.exec(location.pathname);
   if (!m || !NONCE) return fail('Open an artifact link: /v/<id>#<token>');
   try {
-    link = parseFragment(location.hash);
+    link = viewerFragment(location.hash);
   } catch (e) {
     return fail(e.message);
   }
@@ -421,7 +447,7 @@ async function main() {
 
 addEventListener('hashchange', () => {
   try {
-    const next = parseFragment(location.hash);
+    const next = viewerFragment(location.hash);
     if (art && next.token === link.token) {
       link = next;
       closePopovers();

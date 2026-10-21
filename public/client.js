@@ -63,7 +63,7 @@ export function fragment({ token, at = '' }) {
 
 export class Artifact {
   constructor(origin, id, token) {
-    Object.assign(this, { origin, id, auth: `Token ${token}`, base: `${origin}/api/artifacts/${encodeURIComponent(id)}` });
+    Object.assign(this, { origin, id, auth: token ? `Token ${token}` : '', base: `${origin}/api/artifacts/${encodeURIComponent(id)}` });
   }
 
   /** { id, title, role, tip, timeline, expiresAt } */
@@ -92,7 +92,7 @@ export class Artifact {
   dataGet(name) { return call(`${this.base}/data/${encodeURIComponent(name)}`, { auth: this.auth }); }
   async dataSet(name, value) {
     const res = await fetch(`${this.base}/data/${encodeURIComponent(name)}`, {
-      method: 'PUT', headers: { Authorization: this.auth, 'Content-Type': 'application/json' }, body: JSON.stringify(value),
+      method: 'PUT', headers: { ...(this.auth ? { Authorization: this.auth } : {}), 'Content-Type': 'application/json' }, body: JSON.stringify(value),
     });
     if (!res.ok) throw new ApiError(res.status, await res.json().catch(() => ({})));
   }

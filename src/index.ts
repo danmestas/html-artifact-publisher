@@ -26,10 +26,11 @@
  *   GET    /v/:id                            Viewer
  */
 
-import { Repo, type Caller } from './repo';
+import { Repo } from './repo';
+import { accountRoutes, artifactCaller, csrf, identity, readBody } from './accounts';
 import { Registry } from './registry';
 import type { FossilReply } from './fossil';
-import { b64decode, b64encode, clampTtl, genId, genToken, isoOrNull, timingSafeEqual } from './util';
+import { b64decode, b64encode, clampTtl, genId, genToken, isoOrNull } from './util';
 
 export { Repo, Registry };
 
@@ -72,24 +73,9 @@ function reply(r: FossilReply<unknown>): Response {
 
 // ─── Requests ────────────────────────────────────────────────────────────────
 
-function caller(req: Request, env: Env): Caller {
-  const auth = req.headers.get('Authorization') ?? '';
-  if (auth.startsWith('Bearer ')) {
-    return { owner: timingSafeEqual(auth.slice(7).trim(), env.BEARER_TOKEN), token: '' };
-  }
-  return { owner: false, token: auth.startsWith('Token ') ? auth.slice(6).trim() : '' };
-}
-
 /** The JSON body, or null when it is missing, malformed or over MAX_PAYLOAD_BYTES. */
 async function body<T>(req: Request, env: Env): Promise<T | null> {
-  const max = parseInt(env.MAX_PAYLOAD_BYTES, 10);
-  if (Number(req.headers.get('Content-Length') ?? 0) > max) return null;
-  try {
-    const text = await req.text();
-    return text.length > max ? null : (JSON.parse(text) as T);
-  } catch {
-    return null;
-  }
+  return await readBody(req, parseInt(env.MAX_PAYLOAD_BYTES, 10)) as T | null;
 }
 
 function registry(env: Env) {
@@ -139,14 +125,15 @@ function wake(env: Env, ctx: ExecutionContext, req: Request, id: string, tip: st
 interface CreateBody {
   title?: string;
   slug?: string;
-  ttlSeconds?: number;
+  ttlSeconds?: number | null;
   message?: string;
   user?: string;
   files?: Record<string, string>;
 }
 
 async function handleCreate(req: Request, env: Env): Promise<Response> {
-  if (!caller(req, env).owner) return json({ error: 'Unauthorized' }, 401);
+  const actor = await identity(req, env);
+  if (!actor.legacy && !actor.user) return json({ error: 'Unauthorized' }, 401);
   const b = await body<CreateBody>(req, env);
   if (!b || !validFiles(b.files) || !Object.keys(b.files).length) {
     return json({ error: 'Body must be JSON with files: { "index.html": "<base64>", ... }' }, 400);
@@ -155,14 +142,14 @@ async function handleCreate(req: Request, env: Env): Promise<Response> {
     return json({ error: 'slug must be 1-64 chars: lowercase letters, digits, hyphens' }, 400);
   }
   const title = String(b.title ?? '').slice(0, 300) || 'Untitled';
-  const ttl = clampTtl(b.ttlSeconds, parseInt(env.DEFAULT_TTL_SECONDS, 10), parseInt(env.MAX_TTL_SECONDS, 10));
+  const ttl = b.ttlSeconds === null ? null : clampTtl(b.ttlSeconds, parseInt(env.DEFAULT_TTL_SECONDS, 10), parseInt(env.MAX_TTL_SECONDS, 10));
   const now = Math.floor(Date.now() / 1000);
   const expiresAt = ttl != null ? now + ttl : null;
   const id = genId();
   const readToken = genToken();
   const writeToken = genToken();
 
-  if (!(await registry(env).add({ id, slug: b.slug ?? null, title, createdAt: now, updatedAt: now, expiresAt, tip: '' }))) {
+  if (!(await registry(env).add({ id, slug: b.slug ?? null, title, createdAt: now, updatedAt: now, expiresAt, tip: '', ownerId: actor.user?.id ?? 'instance-owner' }))) {
     return json({ error: 'Slug already in use' }, 409);
   }
   const r = await repo(env, id).create({
@@ -174,24 +161,26 @@ async function handleCreate(req: Request, env: Env): Promise<Response> {
     return reply(r);
   }
   await registry(env).touch(id, r.result.tip);
+  await registry(env).audit(actor.user?.id ?? 'instance-owner', 'publish', id, title);
 
   const origin = new URL(req.url).origin;
   const page = `${origin}/v/${b.slug ?? id}`;
   return json({
     id,
     tip: r.result.tip,
-    viewerUrl: `${page}#${readToken}`,
-    editUrl: `${page}#${writeToken}`,
-    cloneUrl: `${origin.replace('://', `://editor:${writeToken}@`)}/r/${id}`,
+    viewerUrl: actor.explicit ? `${page}#${readToken}` : page,
+    ...(actor.explicit ? { editUrl: `${page}#${writeToken}`, cloneUrl: `${origin.replace('://', `://editor:${writeToken}@`)}/r/${id}` } : {}),
     expiresAt: isoOrNull(expiresAt),
   }, 201);
 }
 
 async function handleList(req: Request, env: Env): Promise<Response> {
-  if (!caller(req, env).owner) return json({ error: 'Unauthorized' }, 401);
+  const actor = await identity(req, env);
+  if (!actor.legacy && !actor.user) return json({ error: 'Unauthorized' }, 401);
   const limit = Math.min(Math.max(parseInt(new URL(req.url).searchParams.get('limit') ?? '50', 10) || 50, 1), 200);
   const origin = new URL(req.url).origin;
-  const artifacts = (await registry(env).list(limit)).map(e => ({
+  const entries = actor.legacy ? await registry(env).list(limit) : (await registry(env).library(actor.user!, { admin: false, view: 'all', status: 'active', cursor: '', q: '', ownerId: '', limit })).artifacts;
+  const artifacts = entries.map(e => ({
     id: e.id, title: e.title, tip: e.tip,
     createdAt: isoOrNull(e.createdAt), updatedAt: isoOrNull(e.updatedAt), expiresAt: isoOrNull(e.expiresAt),
     viewerUrl: `${origin}/v/${e.slug ?? e.id}`,
@@ -208,7 +197,10 @@ interface UpdateBody {
 }
 
 async function handleArtifact(req: Request, env: Env, ctx: ExecutionContext, id: string, rest: string): Promise<Response> {
-  const who = caller(req, env);
+  const who = await artifactCaller(req, env, id);
+  const actor = await identity(req, env);
+  const entry = await registry(env).get(id);
+  const canManage = actor.legacy || !!(actor.user && (actor.user.role === 'owner' || entry?.ownerId === actor.user.id));
   const stub = repo(env, id);
   const url = new URL(req.url);
   const at = url.searchParams.get('at') ?? '';
@@ -221,7 +213,7 @@ async function handleArtifact(req: Request, env: Env, ctx: ExecutionContext, id:
       if (!r.ok) return reply(r);
       const [meta, role, readToken] = await Promise.all([stub.info(), stub.role(who), stub.readToken(who)]);
       return json({
-        id, title: meta?.title, role, expiresAt: isoOrNull(meta?.expiresAt ?? null), ...r.result,
+        id, title: meta?.title, role, expiresAt: isoOrNull(meta?.expiresAt ?? null), ...r.result, canManage,
         ...(readToken ? { readToken } : {}),
       });
     }
@@ -230,6 +222,7 @@ async function handleArtifact(req: Request, env: Env, ctx: ExecutionContext, id:
       if (!b || !validFiles(b.files) || typeof b.parent !== 'string' || !b.parent) {
         return json({ error: 'Body must be JSON with parent (the check-in you started from) and files' }, 400);
       }
+      if (b.title !== undefined && actor.user && !canManage) return json({ error: 'Artifact owner required to rename' }, 403);
       const r = (await stub.op(who, {
         op: 'commit', parent: b.parent, files: b.files,
         comment: String(b.message ?? 'Update').slice(0, 1000), user: String(b.user ?? 'web').slice(0, 64),
@@ -243,7 +236,9 @@ async function handleArtifact(req: Request, env: Env, ctx: ExecutionContext, id:
     }
     if (method === 'DELETE') {
       if ((await stub.role(who)) !== 'write') return json({ error: 'Unauthorized' }, 401);
+      if (actor.user && !canManage) return json({ error: 'Artifact owner required' }, 403);
       await Promise.all([stub.destroy(), registry(env).remove(id)]);
+      await registry(env).audit(actor.user?.id ?? 'instance-owner', 'delete', id, entry?.title);
       return new Response(null, { status: 204, headers: { ...corsHeaders(), ...secHeaders() } });
     }
   }
@@ -275,7 +270,19 @@ async function handleArtifact(req: Request, env: Env, ctx: ExecutionContext, id:
       });
     }
     if (method === 'PUT') {
-      const text = await req.text();
+      const maxBytes = Number.parseInt(env.MAX_PAYLOAD_BYTES, 10);
+      const reader = req.body?.getReader();
+      let text = '', bytes = 0;
+      const decoder = new TextDecoder();
+      if (!reader) return json({ error: 'Page data must be JSON' }, 400);
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        bytes += value.length;
+        if (bytes > maxBytes) { await reader.cancel(); return json({ error: 'Page data too large' }, 413); }
+        text += decoder.decode(value, { stream: true });
+      }
+      text += decoder.decode();
       try { JSON.parse(text); } catch { return json({ error: 'Page data must be JSON' }, 400); }
       const r = await stub.op(who, { op: 'uvSet', name, data: b64encode(new TextEncoder().encode(text)) });
       return reply(r);
@@ -355,6 +362,14 @@ export default {
 
     if (method === 'OPTIONS' && path.startsWith('/api/')) return new Response(null, { status: 204, headers: corsHeaders() });
     if (method === 'GET' && path === '/healthz') return json({ status: 'ok', ts: Date.now() });
+
+    if (path.startsWith('/api/') && !csrf(req)) return json({ error: 'Matching Origin required' }, 403);
+    const accountResponse = await accountRoutes(req, env);
+    if (accountResponse) return accountResponse;
+    if (method === 'GET' && (path === '/' || path === '/login')) {
+      const shell = await env.ASSETS.fetch(new URL('/index.html', req.url));
+      return new Response(shell.body, { status: shell.status, headers: { ...secHeaders(), 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Frame-Options': 'DENY', 'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'" } });
+    }
 
     if (path === '/api/artifacts') {
       if (method === 'POST') return handleCreate(req, env);

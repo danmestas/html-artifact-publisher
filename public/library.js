@@ -1,13 +1,14 @@
 import { encodeFiles } from './client.js';
 
 const $ = id => document.getElementById(id);
-const LIBRARY_VIEWS = ['all', 'mine', 'shared', 'starred'];
+const LIBRARY_VIEWS = ['all', 'mine', 'shared', 'starred', 'archived'];
 const ADMIN_VIEWS = ['admin', 'people', 'activity'];
 const VIEWS = {
   all: ['Your artifacts', 'A place for your work, and the work shared with you.'],
   mine: ['Created by me', 'The pages, tools, and ideas you have published.'],
   shared: ['Shared with me', 'Work that other people have shared directly with you.'],
   starred: ['Starred artifacts', 'A personal shelf for the work you want to come back to.'],
+  archived: ['Archived artifacts', 'Find archived work. Creators and the instance owner can restore it from the artifact menu.'],
   admin: ['Every artifact', 'The complete inventory, across every account.'],
   people: ['People & invitations', 'Invite people to create their own library.'],
   activity: ['Activity', 'Recent administrative changes in this instance.'],
@@ -239,6 +240,7 @@ $('previous').addEventListener('click', () => {
 
 async function showApp() {
   if (!user) return showLogin();
+  restoreLibraryNavigation();
   $('boot').hidden = true;
   $('login').hidden = true;
   $('app').hidden = false;
@@ -284,7 +286,7 @@ async function loadPage() {
   $('search').value = state.q;
   $('status-filter').value = state.status;
   document.querySelectorAll('[data-layout]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.layout === layout)));
-  const action = library ? ['Publish artifact', openUpload] : view === 'people' ? ['Invite someone', openInvite] : view === 'credentials' ? ['Create credential', openCreateCredential] : null;
+  const action = library && view !== 'archived' ? ['Publish artifact', openUpload] : view === 'people' ? ['Invite someone', openInvite] : view === 'credentials' ? ['Create credential', openCreateCredential] : null;
   $('page-action').hidden = !action;
   $('page-action').onclick = action ? action[1] : null;
   $('page-action').textContent = action?.[0] || '';
@@ -337,14 +339,53 @@ async function loadPage() {
     $('content').replaceChildren(button('Try again', loadPage));
     $('result-status').textContent = 'Could not load this page.';
     message('page-error', err.message);
-  } finally { if (seq === loadSequence) $('content').setAttribute('aria-busy', 'false'); }
+  } finally {
+    if (seq === loadSequence) {
+      $('content').setAttribute('aria-busy', 'false');
+      if (restoreScroll !== null) {
+        const top = restoreScroll;
+        restoreScroll = null;
+        requestAnimationFrame(() => window.scrollTo(0, top));
+      }
+    }
+  }
 }
 // Session URLs never carry tokens. Ignore untrusted URL schemes/origins from metadata.
-function viewerUrl(item) { return `/v/${encodeURIComponent(item.id)}`; }
+function viewerUrl(item) {
+  const query = new URLSearchParams({ returnTo: location.pathname + location.search });
+  return `/v/${encodeURIComponent(item.id)}?${query}`;
+}
+let restoreScroll = null;
+function rememberLibraryNavigation() {
+  if (!user) return;
+  try {
+    sessionStorage.setItem('artifact-library-navigation', JSON.stringify({
+      userId: user.id, url: location.pathname + location.search,
+      page, previousCursors, scrollY: window.scrollY,
+    }));
+  } catch { /* Browsing context is an optional per-tab convenience. */ }
+}
+function restoreLibraryNavigation() {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem('artifact-library-navigation') || 'null');
+    if (saved?.userId !== user.id || saved.url !== location.pathname + location.search) return;
+    if (Number.isSafeInteger(saved.page) && saved.page > 0) page = saved.page;
+    if (Array.isArray(saved.previousCursors) && saved.previousCursors.every(c => typeof c === 'string')) previousCursors = saved.previousCursors;
+    if (Number.isFinite(saved.scrollY) && saved.scrollY >= 0) restoreScroll = saved.scrollY;
+  } catch { /* The URL still restores filters when storage is unavailable. */ }
+}
+document.addEventListener('click', e => {
+  const anchor = e.target.closest('a');
+  if (anchor?.origin === location.origin && anchor.pathname.startsWith('/v/')) rememberLibraryNavigation();
+}, true);
 function meta(item) {
   return `${item.ownerName || 'Instance owner'} · ${item.visibility || 'private'}${item.archived ? ' · archived' : ''} · ${relativeDate(item.updatedAt)}`;
 }
 function renderArtifacts(items, inventory) {
+  if (!items.length && state.view === 'archived' && !state.q) {
+    $('content').replaceChildren(empty('Nothing archived', 'Archived artifacts you own or can access will appear here. Creators can restore them from the artifact menu.'));
+    return;
+  }
   if (!items.length) {
     $('content').replaceChildren(empty(state.q || state.ownerId || state.status !== 'all' ? 'No matching artifacts' : state.view === 'starred' ? 'Keep your favorites close' : 'Your shelf is ready',
       state.q || state.ownerId || state.status !== 'all' ? 'Try a different search or clear your filters.' : state.view === 'starred' ? 'Open an artifact’s menu and choose Star artifact.' : 'Publish a self-contained HTML file, or find work shared with you here.'));
@@ -401,8 +442,26 @@ function renderActivity(events) {
   }
   $('content').replaceChildren(list);
 }
+function cliSetupGuide() {
+  const commands = [
+    'git clone https://github.com/danmestas/html-artifact-publisher.git',
+    'cd html-artifact-publisher',
+    `export HTML_PUBLISHER_URL=${JSON.stringify(location.origin)}`,
+    'export HTML_PUBLISHER_TOKEN="<your-personal-credential>"',
+    'node scripts/publish-html.mjs --title "My artifact" page.html',
+  ].join('\n');
+  const copy = button('Copy setup example', async () => {
+    try { await navigator.clipboard.writeText(commands); notify('Setup example copied. Replace the credential placeholder locally.'); }
+    catch { notify('Clipboard unavailable. Select and copy the setup example.'); }
+  });
+  return node('section', { className: 'cli-guide' },
+    node('h2', { textContent: 'Publish from your terminal' }),
+    node('p', { className: 'muted', textContent: 'Use Node.js 22 or newer. Replace the placeholder with your personal credential and page.html with your file. Publishing does not require Go or TinyGo.' }),
+    node('pre', {}, node('code', { textContent: commands })), copy,
+    node('p', {}, node('a', { href: 'https://github.com/danmestas/html-artifact-publisher#cli-usage', target: '_blank', rel: 'noopener noreferrer', textContent: 'Full CLI instructions' })));
+}
 function renderCredentials(credentials) {
-  if (!credentials.length) return $('content').replaceChildren(empty('Publish as yourself', 'Create a named API credential for your CLI. The secret is displayed only once.'));
+  if (!credentials.length) return $('content').replaceChildren(empty('Publish as yourself', 'Create a named API credential for your CLI. The secret is displayed only once.'), cliSetupGuide());
   const list = node('div', { className: 'record-list' });
   for (const c of credentials) list.append(node('div', { className: 'record' },
     node('div', { className: 'identity' }, node('strong', { textContent: c.name }), node('small', { textContent: `Created ${dateText(c.createdAt)}` })),
@@ -410,7 +469,7 @@ function renderCredentials(credentials) {
       await api(`/api/credentials/${encodeURIComponent(c.id)}`, { method: 'DELETE' });
       notify('Credential revoked.');
     }, true))));
-  $('content').replaceChildren(list);
+  $('content').replaceChildren(list, cliSetupGuide());
 }
 
 function openDialog(title, ...children) {
@@ -647,7 +706,7 @@ function openCreateCredential() {
       });
       openDialog('Save your credential now', node('p', { className: 'notice', textContent: 'This is the only time this credential will be shown. Save it in your secret manager before closing.' }),
         secret, node('div', { className: 'actions' }, copy, button('I’ve saved it', () => $('dialog').close())),
-        node('p', { className: 'explain', textContent: 'Use this as your CLI bearer credential. Never include it in HTML, URLs, screenshots, or shared files.' }));
+        node('p', { className: 'explain', textContent: 'Never include your credential in HTML, URLs, screenshots, or shared files.' }), cliSetupGuide());
     }, { close: false, reload: true });
   });
   openDialog('Create API credential', form);

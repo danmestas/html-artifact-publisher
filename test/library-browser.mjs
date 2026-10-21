@@ -76,17 +76,38 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
     }
     run('open',base+'/');wait('.artifact-title');
     assert.equal(evaluate('document.querySelectorAll(".artifact-title").length'),25);
-    const firstPage=evaluate('[...document.querySelectorAll(".artifact-title")].map(e=>e.getAttribute("href"))');
+    const firstPage=evaluate('[...document.querySelectorAll(".artifact-title")].map(e=>new URL(e.href).pathname)');
     // Chromium pointer activation must use the post-scroll target coordinates.
     evaluate('document.getElementById("next").scrollIntoView({block:"center",behavior:"instant"})');
     click('#next');run('wait','--fn','document.getElementById("page-number").textContent==="Page 2"');run('wait','[aria-busy="false"]');
-    const secondPage=evaluate('[...document.querySelectorAll(".artifact-title")].map(e=>e.getAttribute("href"))');
+    const secondPage=evaluate('[...document.querySelectorAll(".artifact-title")].map(e=>new URL(e.href).pathname)');
     assert.ok(secondPage.length>0 && secondPage.every(href=>!firstPage.includes(href)),'next page advances without duplicates');
+    const secondPageUrl=evaluate('location.pathname+location.search');
+    click('#content article:first-child .artifact-title');wait('#frame');click('#backLibrary');wait('.artifact-title');run('wait','[aria-busy="false"]');
+    assert.equal(evaluate('location.pathname+location.search'),secondPageUrl,'Library returns to the same pagination cursor');
+    assert.equal(evaluate('document.getElementById("page-number").textContent'),'Page 2');
+    assert.deepEqual(evaluate('[...document.querySelectorAll(".artifact-title")].map(e=>new URL(e.href).pathname)'),secondPage);
     evaluate('document.getElementById("previous").scrollIntoView({block:"center",behavior:"instant"})');
     click('#previous');run('wait','--fn','document.getElementById("page-number").textContent==="Page 1"');run('wait','[aria-busy="false"]');
-    assert.deepEqual(evaluate('[...document.querySelectorAll(".artifact-title")].map(e=>e.getAttribute("href"))'),firstPage);
+    assert.deepEqual(evaluate('[...document.querySelectorAll(".artifact-title")].map(e=>new URL(e.href).pathname)'),firstPage);
     run('fill','#search','very long artifact');run('press','Enter');run('wait','[aria-busy="false"]');
     run('wait','--fn','document.querySelectorAll(".artifact-title").length===1');
+    const filteredUrl=evaluate('location.pathname+location.search');
+    click('.artifact-title');wait('#frame');
+    const filteredViewer=evaluate('location.pathname+location.search');
+    click('#shareBtn');
+    assert.equal(evaluate('document.getElementById("libraryLink").value'),base+filteredViewer.split('?')[0],'shared link excludes private browsing context');
+    run('press','Escape');
+    click('#backLibrary');wait('.artifact-title');run('wait','[aria-busy="false"]');
+    assert.equal(evaluate('location.pathname+location.search'),filteredUrl,'Library preserves the filtered view');
+    assert.equal(evaluate('document.getElementById("search").value'),'very long artifact');
+    assert.equal(evaluate('document.querySelectorAll(".artifact-title").length'),1);
+    click('.artifact-title');wait('#frame');run('back');wait('.artifact-title');
+    assert.equal(evaluate('location.pathname+location.search'),filteredUrl,'browser Back preserves the filtered view');
+    for(const unsafe of ['https://example.com/','//example.com/','javascript:alert(1)','/api/auth/logout']) {
+      run('open',base+filteredViewer.split('?')[0]+'?returnTo='+encodeURIComponent(unsafe));wait('#frame');
+      assert.equal(evaluate('document.getElementById("backLibrary").getAttribute("href")'),'/','return location stays on the library route');
+    }
     // Publish using actual file chooser/form, including literal hostile title.
     run('set','viewport','390','844'); run('open',base+'/'); wait('.artifact-title');
     click('#page-action'); wait('#upload-file');
@@ -103,8 +124,8 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
     click('#dialog-body button[type=submit]'); run('wait','--fn','!document.getElementById("dialog").open'); run('wait','[aria-busy="false"]');
     assert.equal(evaluate('!!document.querySelector(".artifact-title img")'),false);
     const href=evaluate('[...document.querySelectorAll(".artifact-title")].find(e=>e.textContent.includes("Browser upload")).getAttribute("href")');
-    const id=href.split('/').at(-1);
-    const item=()=>evaluate(`[...document.querySelectorAll('.artifact-title')].find(e=>e.getAttribute('href')===${JSON.stringify(href)}).closest('article').querySelector('.artifact-menu').click()`);
+    const id=new URL(href,base).pathname.split('/').at(-1);
+    const item=()=>evaluate(`[...document.querySelectorAll('.artifact-title')].find(e=>new URL(e.href).pathname===${JSON.stringify('/v/'+id)}).closest('article').querySelector('.artifact-menu').click()`);
     item(); wait('#dialog[open]');
     run('find','role','button','click','--name','Rename'); wait('#rename-title');
     run('fill','#rename-title','Browser renamed'); click('#dialog-body button[type=submit]'); run('wait','--fn','!document.getElementById("dialog").open'); run('wait','[aria-busy="false"]');
@@ -146,6 +167,8 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
     run('open',base+'/?view=credentials');wait('#app:not([hidden])');run('wait','[aria-busy="false"]');
     click('#page-action');wait('#credential-name');run('fill','#credential-name','Browser credential');click('#dialog-body button[type=submit]');wait('.secret');
     assert.match(evaluate('document.querySelector(".secret").textContent'),/^[a-f0-9]{64}$/);
+    assert.ok(evaluate('document.querySelector("#dialog-body .cli-guide code").textContent.includes("<your-personal-credential>")'));
+    assert.equal(evaluate('document.querySelector("#dialog-body .cli-guide code").textContent.includes(document.querySelector(".secret").textContent)'),false,'setup example never embeds the credential');
     click('#dialog-close');assert.equal(evaluate('document.querySelector(".secret")'),null);
     run('wait','[aria-busy="false"]');
     evaluate('[...document.querySelectorAll(".record")].find(e=>e.textContent.includes("Browser credential")).querySelector("button").click()');
@@ -159,6 +182,13 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
     run('open',base+'/?view=mine');wait('.artifact-title');item();run('find','role','button','click','--name','Transfer ownership');wait('#transfer-owner');
     run('select','#transfer-owner',member.user.id);run('check','#transfer-confirm');click('#dialog-body button[type=submit]');run('wait','--fn','!document.getElementById("dialog").open');run('wait','[aria-busy="false"]');
     const sharing=await api(`/api/artifacts/${id}/sharing`,{cookie:owner.cookie});assert.equal(sharing.json.ownerId,member.user.id);assert.equal(sharing.json.grants.length,0);
+    run('cookies','set','artifact_session',member.cookie.split('=')[1],'--url',base,'--httpOnly','--sameSite','Lax');
+    run('open',base+'/?view=mine');wait('.artifact-title');item();run('find','role','button','click','--name','Archive artifact');
+    click('#dialog-body button[type=submit]');run('wait','--fn','!document.getElementById("dialog").open');run('wait','[aria-busy="false"]');
+    run('open',base+'/?view=archived');wait('.artifact-title');item();run('find','role','button','click','--name','Restore to library');
+    click('#dialog-body button[type=submit]');run('wait','--fn','!document.getElementById("dialog").open');run('wait','[aria-busy="false"]');
+    assert.ok((await api('/api/library?view=mine',{cookie:member.cookie})).json.artifacts.some(a=>a.id===id),'member restores without instance administration');
+    run('cookies','set','artifact_session',browserOwner.cookie.split('=')[1],'--url',base,'--httpOnly','--sameSite','Lax');
     run('open',base+'/?view=admin');wait('.artifact-title');item();run('find','role','button','click','--name','Manage access');wait('#share-person');
     assert.equal(evaluate('[...document.querySelectorAll("#share-person option")].some(e=>e.value==="instance-owner")'),false,'instance owner has fixed administrative access');
     run('screenshot',join(output,'member-artifact-access-phone.png'));click('#dialog-close');

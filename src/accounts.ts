@@ -122,7 +122,7 @@ export async function accountRoutes(req: Request, env: Env): Promise<Response | 
   }
   if ((path==='/api/library' || path==='/api/admin/artifacts') && method==='GET') {
     const view = url.searchParams.get('view') ?? 'all', status = url.searchParams.get('status') ?? 'all';
-    if (!['all','mine','shared','starred'].includes(view) || !['all','active','archived'].includes(status)) return error('Invalid filter');
+    if (!['all','mine','shared','starred','archived'].includes(view) || !['all','active','archived'].includes(status)) return error('Invalid filter');
     const cursor = url.searchParams.get('cursor') ?? '';
     if (cursor) { try { const v: unknown = JSON.parse(cursor); if (!Array.isArray(v) || v.length!==2 || !Number.isSafeInteger(v[0]) || typeof v[1]!=='string' || !/^[A-Za-z0-9_-]{1,64}$/.test(v[1])) return error('Invalid cursor'); } catch { return error('Invalid cursor'); } }
     const result = await r.library(user,{ admin:path==='/api/admin/artifacts',view,status,cursor,q:(url.searchParams.get('q') ?? '').slice(0,300),ownerId:(url.searchParams.get('ownerId') ?? '').slice(0,64),limit:limitOf(url) });

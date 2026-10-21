@@ -110,6 +110,14 @@ test('permission isolation, named grants, account metadata, archive, transfer an
   assert.equal((await api(path+'/manage',{method:'PATCH',cookie:a.cookie,body:{ownerId:c.user.id}})).status,403);
   assert.equal((await api(path+'/manage',{method:'PATCH',cookie:a.cookie,body:{archived:true}})).status,200);
   assert.ok(!(await api('/api/library',{cookie:a.cookie})).json.artifacts.some(e=>e.id===id));
+  assert.ok((await api('/api/library?view=archived',{cookie:a.cookie})).json.artifacts.some(e=>e.id===id && e.canManage));
+  assert.ok((await api('/api/library?view=archived',{cookie:b.cookie})).json.artifacts.some(e=>e.id===id && !e.canManage));
+  assert.ok(!(await api('/api/library?view=archived',{cookie:c.cookie})).json.artifacts.some(e=>e.id===id));
+  assert.equal((await api(path+'/manage',{method:'PATCH',cookie:b.cookie,body:{archived:false}})).status,403);
+  assert.equal((await api(path+'/manage',{method:'PATCH',cookie:a.cookie,body:{archived:false}})).status,200,'member creator can restore their own artifact');
+  assert.ok((await api('/api/library?view=mine',{cookie:a.cookie})).json.artifacts.some(e=>e.id===id));
+  assert.ok(!(await api('/api/library?view=archived',{cookie:a.cookie})).json.artifacts.some(e=>e.id===id));
+  assert.equal((await api(path+'/manage',{method:'PATCH',cookie:a.cookie,body:{archived:true}})).status,200);
   assert.ok((await api('/api/admin/artifacts?status=archived',{cookie:owner.cookie})).json.artifacts.some(e=>e.id===id));
   assert.equal((await api(path,{cookie:b.cookie})).status,200,'archive does not revoke access');
   assert.equal((await api(path+'/manage',{method:'PATCH',cookie:owner.cookie,body:{archived:false,ownerId:c.user.id,title:'Transferred'}})).status,200);

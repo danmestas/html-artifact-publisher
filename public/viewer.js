@@ -13,6 +13,16 @@ const WATCH_MS = 60_000;
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
+function libraryReturnLocation(value) {
+  if (!value || value.length > 4096) return '/';
+  try {
+    const target = new URL(value, location.origin);
+    if (target.origin !== location.origin || target.pathname !== '/' || target.username || target.password) return '/';
+    return target.pathname + target.search;
+  } catch { return '/'; }
+}
+$('backLibrary').href = libraryReturnLocation(new URLSearchParams(location.search).get('returnTo'));
+
 // Token links keep their original syntax. Session-only links may use #@<check-in>
 // for history, without minting or revealing capability tokens.
 function viewerFragment(hash) {

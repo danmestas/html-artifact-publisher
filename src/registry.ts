@@ -161,7 +161,7 @@ export class Registry extends DurableObject<Env> {
     const clauses = [`${LIVE.replaceAll('expires_at','a.expires_at')}`];
     const args: (string | number)[] = [user.id,user.id,now()];
     if (!opts.admin) {
-      clauses.push("a.archived=0");
+      clauses.push('a.archived=?'); args.push(opts.view === 'archived' ? 1 : 0);
       if (user.role !== 'owner') { clauses.push("(COALESCE(a.owner_id,'instance-owner')=? OR g.permission IS NOT NULL)"); args.push(user.id); }
       if (opts.view === 'mine') { clauses.push("COALESCE(a.owner_id,'instance-owner')=?"); args.push(user.id); }
       if (opts.view === 'shared') { clauses.push("COALESCE(a.owner_id,'instance-owner')!=? AND g.permission IS NOT NULL"); args.push(user.id); }

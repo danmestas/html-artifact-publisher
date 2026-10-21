@@ -49,6 +49,24 @@ flowchart LR
 
 Tokens live in the URL fragment, which browsers send neither to servers nor in `Referer`. A link may end in `@<check-in>` (a hash prefix, tag or branch) to show that version. Content is not encrypted: anyone with access to the Cloudflare account can read it, as with any hosted service.
 
+### Invite-only accounts and library
+
+Open `/` to sign in and browse the library. Configure `OWNER_EMAIL` (the sole instance owner, stable ID `instance-owner`), `APP_ORIGIN` (exact HTTPS origin without a trailing slash), and `EMAIL_FROM` (sender on an onboarded Cloudflare Email Service domain). The Worker sends one-time links with its `send_email` binding named `EMAIL`; verify delivery and domain setup before enabling production sign-in. Login links expire after 15 minutes, are consumed once on explicit confirmation, and establish a seven-day HttpOnly, SameSite=Lax cookie (Secure on HTTPS). Unknown or disabled accounts receive generic responses; there is no registration endpoint.
+
+Email Sending must be enabled for the sender domain on Workers Paid, not just Email Routing with verified destination addresses. Cloudflare's [current sending limits](https://developers.cloudflare.com/email-service/platform/limits/) state that onboarding a sending domain enables arbitrary recipients immediately; without onboarding, only verified destinations work. The unrestricted `EMAIL` binding deliberately has no destination allowlist. The [binding configuration page](https://developers.cloudflare.com/email-service/configuration/send-bindings/) still describes the verified-destination baseline: do not mistake that baseline for an invitation-ready deployment. Before release, send an approved invitation to an external address that is **not** a verified routing destination, confirm receipt and acceptance, and check Email Sending delivery logs. Local tests cannot prove this operational gate.
+
+Changing `OWNER_EMAIL` keeps the stable owner ID and artifact ownership but revokes all prior owner sessions, personal credentials and pending login links on the next account API request. The new address must not already belong to a member; an email uniqueness collision fails closed rather than silently merging accounts. Choose a distinct owner mailbox before deployment.
+
+The instance owner invites members through People and can inspect all artifacts, including private or archived items. Legacy artifacts belong to `instance-owner`. Creators manage named read/write grants and can archive or delete their artifacts. Named edit recipients may update content but cannot manage sharing or delete. Account access never returns capability tokens. Existing explicit edit links, CLI publishing and Fossil sync remain compatible.
+
+Archive only hides an artifact from the ordinary library; it does **not** revoke access or invalidate links. An instance-owner transfer clears named grants, but capability links remain valid. Deletion is permanent. Private means limited to the creator, explicitly named recipients, capability-link holders and the instance owner—not encrypted storage.
+
+Personal API credentials are created in the account menu and displayed once. Use one as `HTML_PUBLISHER_TOKEN` with the existing CLI; new artifacts belong to that account. Revoking a credential prevents further account API access. Disabling a member revokes all sessions, credentials and pending login links. Neither suspension nor credential revocation revokes previously issued artifact capability links.
+
+For isolated local integration tests only, set `TEST_MAIL_TRANSPORT=loopback` and an HTTP loopback `APP_ORIGIN` matching the server origin. The auth request/invitation JSON then includes `loginUrl` instead of sending mail. This transport must never be enabled on a shared server or production deployment. Normal production responses contain no login token. No real email is sent by the account test suite; production delivery is a separate operational verification.
+
+Account and management API shapes are documented in [`docs/accounts-library-spec.md`](docs/accounts-library-spec.md). Libraries and administrative inventories use bounded cursor pagination. Browser writes require a matching Origin; explicit authenticated CLI clients remain supported. Accounts, sessions, grants, stars and audit records live in the existing Registry SQLite Durable Object with additive schema changes; artifact contents remain in their existing Repo objects.
+
 ### Cost
 
 On the Workers Paid plan ($5/month) a modest deployment stays inside the included usage: 1M Durable Object requests, 400k GB-s, 25B rows read, 50M rows written and 5 GB stored per month. 1,000 artifacts of about 1 MB with 100k views and 5k updates a month fit with room to spare. The design document has the details.
@@ -81,7 +99,11 @@ Secrets live in [Doppler](https://www.doppler.com). The deploy job reads them wi
    - `CLOUDFLARE_API_TOKEN`: a Cloudflare API token from the **Edit Cloudflare Workers** template
    - `CLOUDFLARE_ACCOUNT_ID`
    - `BEARER_TOKEN`: the owner token, e.g. `openssl rand -hex 32`
+   - `OWNER_EMAIL`: the explicitly approved instance owner's real email (required secret; never a default/demo identity)
+   - `EMAIL_FROM`: the sender address on your onboarded Email Sending domain
+   - `APP_ORIGIN`: your deployment's exact external HTTPS origin (no trailing slash)
    - `NOTIFY_API_KEY` (optional)
+   - Leave `TEST_MAIL_TRANSPORT` unset/empty. The production deploy script rejects it, checks owner/sender/origin configuration and uploads `OWNER_EMAIL` with the bearer secret. No privileged email is checked into production configuration.
 2. Create a Doppler service token for that config, and add it to the GitHub repository as the secret `DOPPLER_TOKEN` (until it exists, merges skip the deploy with a warning), under an environment named `production` (or as a repository secret). Environment protection rules, if you add any, gate every deploy.
 3. For a custom domain, add a `routes` entry to `wrangler.jsonc`; otherwise the Worker is served on `workers.dev`.
 
@@ -92,7 +114,7 @@ The Durable Object classes are created by the `v1` migration in `wrangler.jsonc`
 ## Local development
 
 ```bash
-cp .dev.vars.example .dev.vars     # set BEARER_TOKEN to any local value
+cp .dev.vars.example .dev.vars     # set BEARER_TOKEN and your explicit OWNER_EMAIL
 npm run build:wasm
 npm run dev                        # http://localhost:8787
 

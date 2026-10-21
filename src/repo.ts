@@ -14,6 +14,8 @@ export type Role = 'read' | 'write';
 export interface Caller {
   owner: boolean;
   token: string;
+  /** Registry-authorized account access; never derived from client JSON. */
+  permission?: Role;
 }
 
 export interface CreateArgs {
@@ -95,6 +97,7 @@ export class Repo extends DurableObject<Env> {
     const m = this.meta();
     if (!m) return null;
     if (caller.owner) return 'write';
+    if (caller.permission) return caller.permission;
     if (!caller.token) return null;
     const h = await sha256hex(caller.token);
     if (timingSafeEqual(h, m.writeHash)) return 'write';
@@ -127,7 +130,7 @@ export class Repo extends DurableObject<Env> {
 
   /** The read token, for a caller who may share it (an editor). */
   async readToken(caller: Caller): Promise<string | null> {
-    if ((await this.role(caller)) !== 'write') return null;
+    if (caller.permission || (await this.role(caller)) !== 'write') return null;
     return this.ctx.storage.sql.exec<{ read_token: string }>(`SELECT read_token FROM _artifact`).toArray()[0]?.read_token ?? null;
   }
 

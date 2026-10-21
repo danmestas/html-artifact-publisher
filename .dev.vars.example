@@ -2,3 +2,11 @@
 BEARER_TOKEN=local-dev-token-change-me
 # Optional: notify API key for agent wake-up.
 NOTIFY_API_KEY=
+# Invite-only account owner; lowercase email. Stable account id: instance-owner.
+OWNER_EMAIL=
+# Exact external origin, no trailing slash. Login links never use request Host.
+APP_ORIGIN=http://localhost:8787
+# Onboard this sender domain in Cloudflare Email Service before production use.
+EMAIL_FROM=library@example.com
+# Isolated loopback tests only; empty in normal development and production.
+TEST_MAIL_TRANSPORT=

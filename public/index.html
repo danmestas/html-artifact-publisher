@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="referrer" content="no-referrer">
+  <title>Artifact Library</title>
+  <link rel="stylesheet" href="/library.css">
+  <script type="module" src="/library.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div id="boot" class="boot" role="status">Opening your library…</div>
+  <section id="login" class="login" hidden aria-labelledby="login-title">
+    <div class="login-story">
+      <div class="brand"><span class="mark" aria-hidden="true">a</span> Artifacts</div>
+      <h1>A home for the things you make.</h1>
+      <p>Keep your pages, tools, and ideas together. Pick up where you left off, or share something worth opening.</p>
+      <span class="muted">Private by default. Shared on purpose.</span>
+    </div>
+    <div class="login-form"><div class="form-inner">
+      <h2 id="login-title">Welcome back</h2>
+      <p id="login-description" class="muted">Sign in to your artifact library.</p>
+      <form id="login-form">
+        <label for="login-email">Email address</label>
+        <input id="login-email" type="email" autocomplete="email" placeholder="you@example.com" maxlength="254" required>
+        <button class="primary full" type="submit">Email me a sign-in link</button>
+      </form>
+      <div id="verify-panel" hidden>
+        <p>Continue to use this one-time sign-in link. Only continue if you requested it or were invited to this instance.</p>
+        <button id="verify-button" class="primary full" type="button">Continue to your library</button>
+        <button id="different-email" class="full" type="button">Use a different email</button>
+      </div>
+      <p id="login-feedback" class="notice" role="status" hidden></p>
+      <div class="explain">An invitation is required to join.<br>Already invited? Use the email address on your invitation.</div>
+    </div></div>
+  </section>
+  <div id="app" class="shell" hidden>
+    <aside class="sidebar">
+      <div class="sidebar-top"><a class="brand" href="/"><span class="mark" aria-hidden="true">a</span> Artifacts</a><button id="nav-toggle" class="mobile-nav" aria-controls="navigation" aria-expanded="false" aria-label="Open navigation and account">Menu</button></div>
+      <div id="navigation" class="navigation">
+        <nav aria-label="Library navigation">
+          <button data-view="all">All artifacts</button>
+          <button data-view="mine">Created by me</button>
+          <button data-view="shared">Shared with me</button>
+          <button data-view="starred">Starred</button>
+          <span class="nav-label" data-owner-only hidden>Instance administration</span>
+          <button data-view="admin" data-owner-only hidden>Every artifact</button>
+          <button data-view="people" data-owner-only hidden>People & invitations</button>
+          <button data-view="activity" data-owner-only hidden>Activity</button>
+          <span class="nav-label">Your account</span>
+          <button data-view="credentials">API credentials</button>
+        </nav>
+        <div class="account">
+          <div class="identity"><strong id="account-name"></strong><span id="account-email" class="muted"></span><span id="account-role" class="tiny"></span></div>
+          <label for="theme">Appearance</label><select id="theme"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select>
+          <button id="logout" class="full">Sign out</button>
+        </div>
+      </div>
+    </aside>
+    <main id="main" class="main" tabindex="-1">
+      <header class="page-header"><div><h1 id="page-title">Your artifacts</h1><p id="page-description" class="muted"></p></div><button id="page-action" class="primary" hidden></button></header>
+      <div id="admin-notice" class="notice" hidden>You can inspect and manage every artifact in this instance, including private and archived work.</div>
+      <form id="filters" class="toolbar" role="search">
+        <div class="search"><label class="sr-only" for="search">Search artifacts</label><input id="search" type="search" placeholder="Search artifacts…" maxlength="200" autocomplete="off"></div>
+        <select id="owner-filter" aria-label="Filter by owner" hidden><option value="">Every owner</option></select>
+        <select id="status-filter" aria-label="Filter by status" hidden><option value="all">Every status</option><option value="active">Active</option><option value="archived">Archived</option></select>
+        <div id="layout-switch" class="segmented" role="group" aria-label="Library layout"><button type="button" data-layout="grid" aria-pressed="true">Grid</button><button type="button" data-layout="list" aria-pressed="false">List</button></div>
+      </form>
+      <p id="result-status" class="tiny" role="status" aria-live="polite"></p>
+      <div id="page-error" class="error" role="alert" hidden></div>
+      <div id="content"></div>
+      <div id="pagination" class="pagination" hidden><button id="previous">Previous</button><span id="page-number" class="tiny"></span><button id="next">Next page</button></div>
+      <p id="privacy-note" class="bottom-note">Private artifacts are hidden from other members, not from the instance owner. Archiving hides work from the library; it does not revoke access through existing links.</p>
+    </main>
+  </div>
+  <dialog id="dialog" aria-labelledby="dialog-title"><div class="dialog-heading"><h2 id="dialog-title"></h2><button id="dialog-close" class="icon-button" aria-label="Close dialog" type="button">×</button></div><div id="dialog-body"></div><p id="dialog-error" class="error" role="alert" hidden></p></dialog>
+  <div id="toast" role="status" hidden></div>
+</body>
+</html>

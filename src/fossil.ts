@@ -45,6 +45,14 @@ type Param = string | number | null | ArrayBuffer;
 (globalThis as Record<string, unknown>).__dosql = (q: string, params: unknown[]) => {
   if (!current) return { error: 'no repository is bound to this call' };
   try {
+    // Keep the repository's storage contract independent of workerd's SQLite
+    // limit (newer local runtimes may allow larger rows). HTTP writes already
+    // check this in fossil/limits.go; Fossil sync reaches this adapter directly.
+    // Match maxStored there, and let dosql's existing SQLITE_TOOBIG path abort
+    // the entire transaction instead of acknowledging an unstorable sync.
+    if (params.some(p => p instanceof Uint8Array && p.byteLength > 1_990_000)) {
+      return { error: 'SQLITE_TOOBIG: artifact exceeds the repository storage limit' };
+    }
     const ps: Param[] = params.map(p => (p instanceof Uint8Array ? p.slice().buffer : (p as Param)));
     const cur = current.exec(q, ...ps);
     const rows = [...cur.raw()];

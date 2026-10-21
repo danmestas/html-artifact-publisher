@@ -8,6 +8,10 @@ This is not a claim of equivalence with every feature of another platform. Nativ
 
 The [control inventory](mockup-control-map.md) is the requirement trace, not merely a feature summary. Every production control has an implemented equivalent; prototype role/device/login bypass controls are intentionally replaced by real authentication and responsive layouts.
 
+### Subsequent approved refinement
+
+After this audit, the user requested that login follow system appearance without a selector. The current implementation preserves the saved in-app theme while signed out and restores it after sign-in. The browser regressions now check this behavior on desktop and phone. References below to a login selector describe the originally audited release, not the current requirement.
+
 ## Measured experience
 
 | Workflow | Weight | Score | Evidence / remaining cost |

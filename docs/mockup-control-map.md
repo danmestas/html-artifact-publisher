@@ -9,7 +9,7 @@ The source prototype is the interactive Artifact Library Preview. Its later mobi
 | Login email and send-link button | Invite-only email-link request; actionable failure and generic unknown-account response. |
 | Continue to library | Explicit one-time-token confirmation, not the prototype's unauthenticated bypass. |
 | Sign out | Revoke the current authentication and remove library contents from the page. |
-| Appearance toggle | System/light/dark selection available on login; choice applies consistently to library and viewer chrome. Artifact-authored colors remain the author's choice. |
+| Appearance toggle | Updated user requirement: login follows the system without a selector; the saved system/light/dark choice is restored inside the app and retained across logout. Artifact-authored colors remain the author's choice. |
 | All artifacts / Created by me / Shared with me / Starred | Permission-filtered views; stars belong to each account. Instance owner retains access to every artifact. |
 | Search artifacts | Search actual titles; preserve query/view when opening and returning from an artifact. |
 | Recently updated / Name A–Z | Both actual server-side sort orders, including stable pagination, filters and viewer-return continuity. |

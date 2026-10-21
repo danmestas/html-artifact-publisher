@@ -213,8 +213,11 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
     assert.ok(evaluate('document.getElementById("page-error").textContent.includes("Local test connection failure")'));
     run('find','role','button','click','--name','Try again');wait('.artifact-title');
     assert.equal(evaluate('document.getElementById("page-error").hidden'),true);
+    const savedThemeBeforeLogout=evaluate('JSON.parse(localStorage.getItem("artifact-library-preferences")).theme');
     click('#nav-toggle');wait('#navigation');click('#logout');wait('#login:not([hidden])');
     assert.equal(evaluate('document.querySelectorAll(".artifact-title").length'),0);
+    assert.equal(evaluate('document.documentElement.dataset.theme||null'),null,'logout restores system appearance');
+    assert.equal(evaluate('JSON.parse(localStorage.getItem("artifact-library-preferences")).theme'),savedThemeBeforeLogout,'logout retains the in-app preference');
     run('open',base+'/login#token='+'0'.repeat(64));wait('#verify-button');click('#verify-button');wait('#login-feedback:not([hidden])');
     assert.ok(evaluate('document.getElementById("login-feedback").textContent.includes("request a fresh sign-in link")'));
     run('screenshot',join(output,'invalid-login-phone.png'));

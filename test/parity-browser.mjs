@@ -119,16 +119,26 @@ export async function parityQA({base,api,owner,browserOwner,member,run,evaluate,
     click('[data-layout="list"]');wait('.artifact-row');
     assert.equal(evaluate('document.querySelectorAll(".artifact-preview iframe").length'),0,'list removes frames');
     click('[data-layout="grid"]');wait('.artifact-card');
-    // Anonymous login uses the same preference and exposes all three options.
-    run('cookies','clear');run('open',base+'/login');wait('#login:not([hidden])');
-    for(const theme of ['light','dark','system']) {
-      run('select','#login-theme',theme);
-      assert.equal(evaluate('getComputedStyle(document.documentElement).colorScheme'),theme==='light'?'light':'dark');
+    // Signed-out screens follow the system without discarding the in-app choice.
+    run('cookies','clear');
+    for(const width of [1440,390]) for(const system of ['light','dark']) {
+      const saved=system==='light'?'dark':'light';
+      run('set','viewport',String(width),width===390?'844':'1000');run('set','media',system);
+      evaluate(`localStorage.setItem('artifact-library-preferences',JSON.stringify({...JSON.parse(localStorage.getItem('artifact-library-preferences')||'{}'),theme:${JSON.stringify(saved)}}))`);
       run('open',base+'/login');wait('#login:not([hidden])');
-      assert.equal(evaluate('document.getElementById("login-theme").value'),theme);
+      assert.equal(evaluate('document.getElementById("login-theme")'),null);
+      assert.equal(evaluate('getComputedStyle(document.documentElement).colorScheme'),system);
+      assert.equal(evaluate('JSON.parse(localStorage.getItem("artifact-library-preferences")).theme'),saved);
+      evaluate('window.dispatchEvent(new StorageEvent("storage",{key:"artifact-library-preferences"}))');
+      assert.equal(evaluate('getComputedStyle(document.documentElement).colorScheme'),system,'storage changes cannot override login appearance');
+      run('open',base+'/');wait('#login:not([hidden])');
+      assert.equal(evaluate('getComputedStyle(document.documentElement).colorScheme'),system,'signed-out homepage follows system too');
+      run('screenshot',join(output,`login-system-${system}-${width}.png`));
     }
     run('cookies','set','artifact_session',browserOwner.cookie.split('=')[1],'--url',base,'--httpOnly','--sameSite','Lax');
     run('open',base+'/');wait('.artifact-title');
+    assert.equal(evaluate('getComputedStyle(document.documentElement).colorScheme'),'light','sign-in restores the saved choice despite a dark system');
+    assert.equal(evaluate('document.getElementById("theme").value'),'light');
   } finally {
     socket.close();
     for(const id of ids) await api('/api/artifacts/'+id,{method:'DELETE',cookie:owner.cookie});

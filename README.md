@@ -126,13 +126,15 @@ npm test                           # end-to-end: API, access, fossil clone/push,
 
 The end-to-end tests start their own `wrangler dev` with fresh state, and build `fossil/cmd/fsclient`, a minimal native Fossil client, for the clone and push tests.
 
+`npm test` also runs the built TinyGo engine in a subprocess capped at 128 MiB of WASM memory and asserts a 48 MiB high-water budget for a synthetic multi-file workload. It covers many tiny files, incompressible assets, repeated updates, a storage failure after partial writes, recovery, and alternating repositories in one runtime. This catches SQL cleanup goroutines accumulating their fixed-size stacks when the cooperative scheduler cannot run; the SQL adapter yields between operations rather than shrinking the stacks. The cap measures WASM linear memory, not total Worker isolate memory, so the HTTP suite also exercises the actual Worker with asset updates, old versions and clone/push.
+
 ## Building the Fossil engine
 
 `npm run build:wasm` compiles `fossil/` with TinyGo into `src/fossil.wasm` (and copies TinyGo's `wasm_exec.js`). Built correctly, it is **about 2.44 MB raw and 0.85 MB gzipped**, the same on Linux and macOS:
 
 1. **`npm ci` first.** It installs Binaryen 132 (`wasm-opt`) from npm, pinned in `package.json`. The build points TinyGo at it (`WASMOPT`) and runs one more `wasm-opt -Oz` pass with it. Don't install Binaryen yourself: TinyGo's macOS release doesn't bundle `wasm-opt`, and a Homebrew one made a 3.07 MB / 1.05 MB build.
 2. **TinyGo exactly 0.43.0**, the version CI uses. The build checks it and stops otherwise. On macOS: download the `darwin` release from the link in Prerequisites (Homebrew may give another version); on Linux: the `linux-amd64` tarball, with its `bin/` on `PATH`.
-3. **Go from `fossil/go.mod`** (1.26). TinyGo uses it for the standard library.
+3. **Go from `fossil/go.mod`** (1.26). TinyGo uses it for the standard library. If a newer Go is installed globally, select Go 1.26 for this build with both `GOROOT` and `PATH`; native development can still use the newer version. Go 1.27.3 compiles with TinyGo 0.43.0, but its engine exceeds the current gzip deployment budget.
 
 The build fails if the result is over the size budget, 880,000 bytes gzipped (`FOSSIL_WASM_MAX_GZIP` in `fossil/build.sh`), and `deploy.sh` checks the same budget before deploying. If you hit it, look for the causes above before raising the number; raise it only on purpose, in the same commit as the change that needs it. `GO_COMPILER=go sh fossil/build.sh` builds with standard Go instead (about 2.4 MB gzipped, no budget): for debugging, never for deploying.
 
@@ -242,7 +244,7 @@ An update sent with the header `X-Wake: <kind>` asks the Worker to tell an agent
 | Default / max TTL | 7 days / 30 days, or `--ttl never` | `DEFAULT_TTL_SECONDS`, `MAX_TTL_SECONDS`; expiry is a Durable Object alarm |
 | Repository | 10 GB | Per Durable Object |
 
-A `fossil push` that includes an oversized file is refused, but if Fossil sent the check-in in an earlier round than the file, that check-in arrives without the file. The viewer then shows the other files, and the bundle lists the gap under `missing`. Storing large files in pieces belongs in go-libfossil and is planned.
+A `fossil push` that includes an oversized file is refused, but if Fossil sent the check-in in an earlier round than the file, that check-in arrives without the file. The viewer then shows the other files, and the bundle lists the gap under `missing`. Removing the per-file restriction depends on upstream bounded-value blob storage in [go-libfossil #459](https://github.com/danmestas/go-libfossil/issues/459); the guard remains until that capability lands.
 
 ## Safety model
 

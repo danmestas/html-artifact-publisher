@@ -1,0 +1,10 @@
+{
+  "memberArchiveVisible": true,
+  "privateArchiveIsolated": true,
+  "grantedArchiveVisible": true,
+  "granteeRestore403": true,
+  "admin403": true,
+  "memberRestoreUI": true,
+  "placeholderReveal": true,
+  "fixturesRemoved": true
+}

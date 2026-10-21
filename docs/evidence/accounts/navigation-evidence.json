@@ -1,0 +1,146 @@
+[
+  {
+    "w": 1440,
+    "h": 1000,
+    "theme": "light",
+    "before": {
+      "scroll": 37,
+      "titles": [
+        "Release review 19",
+        "Release review 09",
+        "Release review 15",
+        "Release review 07",
+        "Release review 06",
+        "Release review 18"
+      ],
+      "url": "/?cursor=%5B1792540305%2C%22DGYFkd4sFVirFldMVX9bJ%22%5D"
+    },
+    "after": {
+      "page": "Page 2",
+      "scroll": 37,
+      "titles": [
+        "Release review 19",
+        "Release review 09",
+        "Release review 15",
+        "Release review 07",
+        "Release review 06",
+        "Release review 18"
+      ],
+      "url": "/?cursor=%5B1792540305%2C%22DGYFkd4sFVirFldMVX9bJ%22%5D"
+    },
+    "heading": "25px",
+    "filteredReturn": true,
+    "browserBack": true,
+    "shareContextExcluded": true,
+    "setupCopied": true,
+    "overflow": false
+  },
+  {
+    "w": 1440,
+    "h": 1000,
+    "theme": "dark",
+    "before": {
+      "scroll": 37,
+      "titles": [
+        "Release review 19",
+        "Release review 09",
+        "Release review 15",
+        "Release review 07",
+        "Release review 06",
+        "Release review 18"
+      ],
+      "url": "/?cursor=%5B1792540305%2C%22DGYFkd4sFVirFldMVX9bJ%22%5D"
+    },
+    "after": {
+      "page": "Page 2",
+      "scroll": 37,
+      "titles": [
+        "Release review 19",
+        "Release review 09",
+        "Release review 15",
+        "Release review 07",
+        "Release review 06",
+        "Release review 18"
+      ],
+      "url": "/?cursor=%5B1792540305%2C%22DGYFkd4sFVirFldMVX9bJ%22%5D"
+    },
+    "heading": "25px",
+    "filteredReturn": true,
+    "browserBack": true,
+    "shareContextExcluded": true,
+    "setupCopied": true,
+    "overflow": false
+  },
+  {
+    "w": 390,
+    "h": 844,
+    "theme": "light",
+    "before": {
+      "scroll": 152,
+      "titles": [
+        "Release review 19",
+        "Release review 09",
+        "Release review 15",
+        "Release review 07",
+        "Release review 06",
+        "Release review 18"
+      ],
+      "url": "/?cursor=%5B1792540305%2C%22DGYFkd4sFVirFldMVX9bJ%22%5D"
+    },
+    "after": {
+      "page": "Page 2",
+      "scroll": 152,
+      "titles": [
+        "Release review 19",
+        "Release review 09",
+        "Release review 15",
+        "Release review 07",
+        "Release review 06",
+        "Release review 18"
+      ],
+      "url": "/?cursor=%5B1792540305%2C%22DGYFkd4sFVirFldMVX9bJ%22%5D"
+    },
+    "heading": "20px",
+    "filteredReturn": true,
+    "browserBack": true,
+    "shareContextExcluded": true,
+    "setupCopied": true,
+    "overflow": false
+  },
+  {
+    "w": 390,
+    "h": 844,
+    "theme": "dark",
+    "before": {
+      "scroll": 152,
+      "titles": [
+        "Release review 19",
+        "Release review 09",
+        "Release review 15",
+        "Release review 07",
+        "Release review 06",
+        "Release review 18"
+      ],
+      "url": "/?cursor=%5B1792540305%2C%22DGYFkd4sFVirFldMVX9bJ%22%5D"
+    },
+    "after": {
+      "page": "Page 2",
+      "scroll": 152,
+      "titles": [
+        "Release review 19",
+        "Release review 09",
+        "Release review 15",
+        "Release review 07",
+        "Release review 06",
+        "Release review 18"
+      ],
+      "url": "/?cursor=%5B1792540305%2C%22DGYFkd4sFVirFldMVX9bJ%22%5D"
+    },
+    "heading": "20px",
+    "filteredReturn": true,
+    "browserBack": true,
+    "shareContextExcluded": true,
+    "setupCopied": true,
+    "overflow": false
+  }
+]

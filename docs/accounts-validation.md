@@ -2,7 +2,7 @@
 
 ## Status
 
-Implementation and validation in progress. The tables below are acceptance criteria, not claims of passing results.
+Implementation and local acceptance validation completed. Results, measured experience scores, evidence and operational limitations are recorded in [accounts-audit.md](accounts-audit.md). The tables below define the acceptance criteria; they are not independent claims of production email delivery.
 
 ## Behavioral acceptance
 

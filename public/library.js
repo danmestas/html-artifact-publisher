@@ -108,6 +108,7 @@ async function api(path, { method = 'GET', body } = {}) {
   return data;
 }
 function showLogin() {
+  document.documentElement.setAttribute('data-system-appearance', '');
   clearPreviews();
   $('boot').hidden = true;
   $('app').hidden = true;
@@ -238,6 +239,7 @@ $('previous').addEventListener('click', () => {
 
 async function showApp() {
   if (!user) return showLogin();
+  document.documentElement.removeAttribute('data-system-appearance');
   restoreLibraryNavigation();
   $('boot').hidden = true;
   $('login').hidden = true;

@@ -21,7 +21,7 @@ The Fossil tests retain the existing storage-limit contract. Sync spans multiple
 | Publish/update | 20% | 9.1 | Phone HTML upload, rename, viewer rendering, version selection and restoration exercised across acceptance and regression passes. |
 | Share/access | 15% | 9.1 | Named grants work; shared viewer URLs omit private search/cursor context; edit access does not confer management. |
 | Owner management | 15% | 9.2 | Cross-account inventory, transfer, archive/restore, suspension and typed deletion confirmation exercised. |
-| Login/invitation | 10% | 8.7 | Explicit one-time-link confirmation and owner/member sign-in work in isolated local tests. Real mail delivery remains unverified. |
+| Login/invitation | 10% | 8.7 | Explicit one-time-link confirmation and owner/member sign-in work in isolated local tests. Live delivery was outside this usability audit; the later operational check is recorded below. |
 | CLI setup/revocation | 10% | 8.8 | Credentials include an actionable placeholder-only example and documentation link; configuration still takes manual steps. |
 | Failure recovery | 5% | 9.3 | Member creators can find and restore archived work; a failed fetch offers a working retry without dropping authentication. |
 | **Weighted result** | **100%** | **9.13** | Above 9.0 without rounding a nonpassing result upward. |
@@ -51,7 +51,7 @@ All pictured content uses local test accounts and disposable fixtures. The crede
 
 ## Operational limits
 
-- **Real email delivery is unverified.** Local one-time-link tests do not prove provider delivery, SPF/DKIM alignment, or inbox receipt. The isolated hosted preview is configured with an approved owner email, sender and its own HTTPS origin; production remains unchanged until the PR is merged.
+- **Hosted-preview email transport is verified.** A subsequent read-only Cloudflare activity-log query found two messages from the configured application sender to the configured owner marked `delivered`. No new email was sent for this check. [Cloudflare defines this status](https://developers.cloudflare.com/email-service/observability/logs/) as delivery to the recipient's mail server; inbox placement, human receipt, and link opening are not claimed. This operational evidence does not change the independently measured usability scores. The production application remains unchanged until the PR is merged.
 - Native clipboard readback was denied by browser automation. The copy handler's exact placeholder-only payload was checked at the clipboard boundary, not through an operating-system round trip.
 - Physical-device Safari and screen-reader announcement timing were not independently exercised. Viewport emulation and accessibility-tree checks are not substitutes for those tests.
 - Management dialogs remain information-dense on phones, and CLI setup requires cloning and environment configuration. These are remaining minor usability costs, not blocked workflows.

@@ -74,7 +74,22 @@ button:focus-visible, a:focus-visible, input:focus-visible { outline: 2px solid 
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.16); overflow: hidden;
 }
 .popover.versions { left: 0; width: 400px; }
-.popover.share { right: 0; width: 440px; }
+.popover.share { right: 0; width: 480px; max-height: min(80vh, 760px); overflow-y: auto; overscroll-behavior: contain; }
+.publication-section { padding: 0 16px 16px; }
+.publication-section h2 { margin: 4px 0 8px; font-size: 16px; }
+.publication-section h3 { margin: 20px 0 8px; font-size: 13px; }
+.publication-section .hint, .collaboration-hint { color: var(--muted); font-size: 12.5px; line-height: 1.5; }
+.publication-section > .primary { min-height: 44px; height: auto; }
+#publicationStatus:empty { display: none; }
+#publicationList .share-row { padding: 12px 0; }
+.publication-actions { display: flex; align-items: center; justify-content: flex-end; gap: 16px; }
+.publication-actions a { display: inline-flex; align-items: center; min-height: 44px; color: var(--accent); text-underline-offset: 3px; }
+.publication-actions button, #publicationMore { min-height: 44px; }
+#publicationMore { padding: 8px 12px; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 7px; }
+.collaboration { border-top: 1px solid var(--line); }
+.collaboration summary { cursor: pointer; padding: 14px 16px; font-weight: 500; }
+.collaboration-hint { margin: 0; padding: 0 16px 12px; }
+button:disabled { cursor: wait; opacity: .6; }
 .popover.more { right: 0; width: 240px; padding: 6px; display: flex; flex-direction: column; }
 .popover-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 14px 16px 10px; }
 .popover-foot { padding: 10px 16px; border-top: 1px solid var(--line); background: var(--bar); font-size: 12.5px; }

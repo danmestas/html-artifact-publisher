@@ -1,5 +1,12 @@
 import { DurableObject } from 'cloudflare:workers';
 import { genId } from './util';
+import { deletePublicationFiles, publicationManifest, publicationPrefix } from './publication-files';
+
+export type Publication = {
+  id: string; artifactId: string; ownerId: string; title: string; checkin: string;
+  createdAt: string; status: 'building' | 'live' | 'failed' | 'deleted'; files: number; bytes: number;
+}
+const PUBLICATION_COLUMNS = 'id, artifact_id AS artifactId, owner_id AS ownerId, title, checkin, created_at AS createdAt, status, files, bytes';
 
 export interface Entry {
   id: string; slug: string | null; title: string; createdAt: number; updatedAt: number;
@@ -35,7 +42,71 @@ export class Registry extends DurableObject<Env> {
       CREATE INDEX IF NOT EXISTS artifacts_owner ON artifacts(owner_id,archived,updated_at DESC,id DESC);
       CREATE INDEX IF NOT EXISTS grants_user ON grants(user_id,artifact_id);
       CREATE INDEX IF NOT EXISTS stars_user ON stars(user_id,artifact_id);
-      CREATE INDEX IF NOT EXISTS activity_order ON activity(created_at DESC,id DESC);`);
+      CREATE INDEX IF NOT EXISTS activity_order ON activity(created_at DESC,id DESC);
+      CREATE TABLE IF NOT EXISTS publications (id TEXT PRIMARY KEY, artifact_id TEXT NOT NULL, owner_id TEXT NOT NULL,
+        title TEXT NOT NULL, checkin TEXT NOT NULL, created_at TEXT NOT NULL, status TEXT NOT NULL,
+        files INTEGER NOT NULL DEFAULT 0, bytes INTEGER NOT NULL DEFAULT 0);
+      CREATE INDEX IF NOT EXISTS publications_owner ON publications(owner_id,created_at DESC,id DESC);
+      CREATE INDEX IF NOT EXISTS publications_status ON publications(status,created_at);
+      CREATE TABLE IF NOT EXISTS publication_cleanup (id INTEGER PRIMARY KEY CHECK(id=1), cursor TEXT NOT NULL);
+      INSERT OR IGNORE INTO publication_cleanup VALUES (1,'');`);
+  }
+  async beginPublication(artifactId: string, ownerId: string, title: string, checkin: string): Promise<Publication> {
+    let id: string;
+    do { id = genId().slice(0, 12); } while (await this.publication(id));
+    this.ctx.storage.sql.exec("INSERT INTO publications (id,artifact_id,owner_id,title,checkin,created_at,status) VALUES (?,?,?,?,?,?,'building')",
+      id, artifactId, ownerId, title, checkin, new Date().toISOString());
+    return (await this.publication(id))!;
+  }
+  async publication(id: string): Promise<Publication | null> {
+    return this.ctx.storage.sql.exec<Publication>(`SELECT ${PUBLICATION_COLUMNS} FROM publications WHERE id=?`, id).toArray()[0] ?? null;
+  }
+  async publications(ownerId: string | null, artifactId: string | null, cursor: string | null): Promise<{ publications: Publication[]; nextCursor: string | null }> {
+    const rows = this.ctx.storage.sql.exec<Publication>(`SELECT ${PUBLICATION_COLUMNS} FROM publications
+      WHERE status != 'deleted' AND (? IS NULL OR owner_id=?) AND (? IS NULL OR artifact_id=?)
+      AND (? IS NULL OR created_at || '/' || id < ?) ORDER BY created_at DESC,id DESC LIMIT 51`,
+      ownerId, ownerId, artifactId, artifactId, cursor, cursor).toArray();
+    const page = rows.slice(0, 50), last = page.at(-1);
+    return { publications: page, nextCursor: rows.length > 50 && last ? `${last.createdAt}/${last.id}` : null };
+  }
+  /** Marker activation and revocation are serialized, not the potentially large file copy. */
+  async activatePublication(id: string, entry: string, files: number, bytes: number): Promise<Publication | null> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const row = await this.publication(id);
+      if (!row || row.status !== 'building' || Date.parse(row.createdAt) < Date.now() - 3600_000) return null;
+      await this.env.BLOBS.put(publicationManifest(id), JSON.stringify({ entry }), { httpMetadata: { contentType: 'application/json' } });
+      this.ctx.storage.sql.exec("UPDATE publications SET status='live',files=?,bytes=? WHERE id=?", files, bytes, id);
+      return this.publication(id);
+    });
+  }
+  async failPublication(id: string): Promise<void> {
+    this.ctx.storage.sql.exec("UPDATE publications SET status='failed' WHERE id=? AND status='building'", id);
+  }
+  async revokePublication(id: string): Promise<void> {
+    await this.ctx.blockConcurrencyWhile(async () => {
+      await this.env.BLOBS.delete(publicationManifest(id));
+      this.ctx.storage.sql.exec("UPDATE publications SET status='deleted' WHERE id=?", id);
+    });
+    await deletePublicationFiles(this.env.BLOBS, id);
+  }
+  async cleanupPublications(): Promise<{ cleaned: number; remaining: boolean }> {
+    const sql = this.ctx.storage.sql;
+    const cursor = sql.exec<{ cursor: string }>('SELECT cursor FROM publication_cleanup WHERE id=1').toArray()[0]!.cursor;
+    // Revisit tombstones on every pass: a cancelled writer can land a late R2 put
+    // even after its first cleanup, and may die before its cancellation handler.
+    const rows = sql.exec<{ id: string; status: string }>(`SELECT id,status FROM publications WHERE id > ? AND
+      (status IN ('failed','deleted') OR (status='building' AND created_at < ?))
+      ORDER BY id LIMIT 26`, cursor, new Date(Date.now() - 3600_000).toISOString()).toArray();
+    let cleaned = 0;
+    for (const row of rows.slice(0, 25)) {
+      const hadFiles = (await this.env.BLOBS.list({ prefix: publicationPrefix(row.id), limit: 1 })).objects.length > 0;
+      await this.revokePublication(row.id);
+      if (hadFiles || row.status !== 'deleted') cleaned++;
+    }
+    const remaining = rows.length > 25;
+    // Compare-and-set avoids concurrent cleanup calls moving the pass backward.
+    sql.exec('UPDATE publication_cleanup SET cursor=? WHERE id=1 AND cursor=?', remaining ? rows[24]!.id : '', cursor);
+    return { cleaned, remaining };
   }
   async seed(email: string): Promise<void> {
     if (!email) return;

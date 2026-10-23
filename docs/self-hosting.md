@@ -4,14 +4,15 @@ This guide takes you from a fresh clone of this repository to your own publisher
 
 ## What you get, and what it runs on
 
-One Cloudflare Worker that publishes HTML pages as private, versioned links, plus a web library where invited people sign in, browse and share them. Everything runs on Cloudflare:
+A signed-in Cloudflare Worker that publishes HTML pages as private, versioned links, plus a web library where invited people sign in, browse and share them. A second Worker serves independent public snapshots on a separate origin. Everything runs on Cloudflare:
 
 | Piece | Cloudflare product | What it holds |
 |---|---|---|
 | The app and the viewer | Workers (with static assets) | Code, the viewer, fonts, the Pikchr renderer |
+| Public snapshots | Separate `artifact-pages` Worker (`wrangler.public.jsonc`) | Public file serving, with no account secrets or app Durable Object bindings |
 | One Fossil repository per artifact | Durable Objects (SQLite storage) | Every version of each page's text files |
 | The library | One Durable Object | Accounts, sharing, stars, the list of artifacts |
-| Images, video, fonts, `.wasm`, databases, any file over 256 KB | R2 | Stored once by their SHA-256 |
+| Images, video, fonts, `.wasm`, databases, any file over 256 KB | R2 | Private blobs stored once by SHA-256, plus independent public snapshot copies in the same bucket |
 | Sign-in links and invitations | Email Service (sending) | Nothing stored |
 
 You need no other service. Doppler (for secrets) and GitHub Actions (for automatic deploys) are optional.
@@ -81,7 +82,8 @@ Never paste the token into a chat with an agent. Put it straight into your secre
 | `BEARER_TOKEN` | The instance owner's API token for the CLI. Generate it: `openssl rand -hex 32` |
 | `OWNER_EMAIL` | The instance owner's email |
 | `EMAIL_FROM` | The sender address on your Email Sending domain |
-| `APP_ORIGIN` | The publisher's exact address, e.g. `https://html-artifact-publisher.yourname.workers.dev` (no trailing slash) |
+| `APP_ORIGIN` | The signed-in publisher's exact HTTPS origin, e.g. `https://html-artifact-publisher.yourname.workers.dev` (no trailing slash) |
+| `PUBLIC_ORIGIN` | Optional separate exact HTTPS origin for public snapshots (no trailing slash). Omit to discover `artifact-pages`'s `workers.dev` origin automatically; set it when using a custom public domain |
 | `NOTIFY_API_KEY` | Optional, for waking an agent through notify |
 
 Choose one place to keep them:
@@ -101,8 +103,12 @@ The first deploy:
 - refuses to run if a setting is missing or unsafe (for example an `http://` origin);
 - refuses an engine over the size budget;
 - creates the R2 bucket `html-artifact-publisher-blobs` if it doesn't exist;
+- deploys `artifact-pages` from `wrangler.public.jsonc`, using the same R2 bucket as the app but no app bindings or secrets;
+- discovers its `workers.dev` origin unless you supplied `PUBLIC_ORIGIN`;
 - creates the Durable Object classes (`Repo`, `Registry`);
-- uploads the Worker with its secrets, and prints its URL.
+- uploads the signed-in app with its secrets and the resolved `PUBLIC_ORIGIN` variable, and prints `APP_URL` and `PUBLIC_URL`.
+
+The public origin must differ from `APP_ORIGIN`. Keep both configurations' `BLOBS` bindings pointed at the same bucket if you rename it. Both Workers need deploying when updating; `deploy.sh` handles their order.
 
 ### 5. Check it works
 
@@ -118,6 +124,8 @@ node scripts/publish-html.mjs --json --title "Hello" /tmp/hello.html
 The output should say `"linkVerified": true`. Open its `viewerUrl`: you should see the heading in Instrument Sans and a small diagram.
 
 **You:** open `APP_ORIGIN` in a browser, sign in with the owner email, and check that the sign-in email arrives. Then invite a second address that you control, and check that it can sign in too.
+
+To check public snapshots, open the test artifact as its owner, choose **Share → Publish**, and confirm that every file in the selected version will become public. Open the resulting public URL in a signed-out/private browser window. Check both the page and its local supporting files. Standalone JavaScript can work; external/CDN dependencies are blocked by the public CSP. Then unpublish it from **Published links** and check that its public URL and copied-file URLs return 404 while the private source and history still open.
 
 ### 6. Automatic deploys from GitHub (optional)
 
@@ -135,6 +143,14 @@ Add a route to `wrangler.jsonc`:
 
 Set `APP_ORIGIN` to `https://artifacts.yourdomain.com`, then deploy again.
 
+For public snapshots on a custom domain, add a separate route to **`wrangler.public.jsonc`**, for example:
+
+```jsonc
+"routes": [{ "pattern": "pages.yourdomain.com", "custom_domain": true }]
+```
+
+Set `PUBLIC_ORIGIN=https://pages.yourdomain.com` in the deployment environment and deploy again. It must be an exact HTTPS origin with no trailing slash, different from `APP_ORIGIN`. The signed-in app remains on its own origin; never route public snapshot files through that origin. Without this override, `deploy.sh` uses the public Worker's discovered `workers.dev` address.
+
 ### 8. Point your agents at it
 
 On each machine where an agent will publish:
@@ -147,11 +163,23 @@ export HTML_PUBLISHER_TOKEN=<a personal API credential>
 
 Give each person or agent their own **personal API credential** (library → account menu → API credentials) rather than the owner's `BEARER_TOKEN`. What they publish then lands in their own library, and you can revoke a credential on its own.
 
+## Public snapshots and collaboration
+
+The artifact owner or instance owner can use **Share → Publish** to publish an immutable copy of an exact selected check-in, up to **250 files and 250 MiB**. Every file in that version becomes publicly accessible, including images, scripts and supporting files. Publishing a newer version creates a new public snapshot rather than replacing the old one.
+
+Public snapshots do **not** include private history, shared page data or the app's `window.artifact` runtime bridge. Existing collaboration links and named access are separate: they still open the private viewer and its full history according to their permissions. The exporter rejects private-runtime dependencies it detects, missing source files, missing referenced local scripts/stylesheets, unsupported base URLs and diagram/font preparation failures. It prepares Pikchr diagrams and house fonts before copying.
+
+The public Worker's CSP applies an opaque-origin sandbox and allows standalone scripts and bundled/local resources, but blocks external/CDN resources, remote fonts and external API requests. The exporter rejects detected non-local resource dependencies, bare module imports, literal root-relative JavaScript loads (for example `fetch('/data.json')`), root-relative import-map URLs and embedded frames/objects. Use document/module-relative imports and local `fetch()` paths instead: these work on public snapshots, unlike private viewer rendering. Static checks cannot guarantee that dynamically constructed loads will work. Bundle dependencies into the selected check-in and verify the public result before sharing it.
+
+**Deleting or expiring the private source does not unpublish a public copy.** Use the library's **Published links** view to unpublish a snapshot explicitly. Members see their own publications; the instance owner sees all accounts'. Unpublishing (`DELETE /api/publications/:id`) revokes the public link and deletes its independent copied files without changing the private artifact or history. Deleted records are retained for cleanup bookkeeping but hidden from the default list. Copies already downloaded cannot be recalled.
+
+The instance owner can choose **Clean up unpublished files** (`POST /api/publications/cleanup` with `{}`) to retry cleanup of failed/deleted publications and builds older than one hour. It never deletes live snapshots. Cleanup keeps a durable cursor for bounded 25-record passes and resweeps retained deleted records to collect late orphan writes. The response reports `cleaned` and `remaining`; repeat the action if more work remains.
+
 ## Day to day
 
 - **Updating.** Pull the latest code and deploy again, or merge to `main` if you set up step 6. Storage changes only ever add tables and columns, so your data carries over.
 - **Backups.** Each artifact is a Fossil repository: `fossil clone` it with its clone URL. Images and large files are in R2 and are not in the clone; `node scripts/publish-html.mjs read <url> --out <dir>` writes a version with the real files.
-- **Removing everything.** `npx wrangler delete`, then `npx wrangler r2 bucket delete html-artifact-publisher-blobs` (the bucket must be empty first). Then delete the API token.
+- **Removing everything.** Unpublish public snapshots first if you need their links revoked while the service still runs. Delete both Workers with `npx wrangler delete` and `npx wrangler delete --config wrangler.public.jsonc`, then `npx wrangler r2 bucket delete html-artifact-publisher-blobs` (the bucket must be empty first). Then delete the API token. Deleting only the signed-in app does not remove the public Worker or its copied files.
 
 ## When something goes wrong
 
@@ -163,6 +191,9 @@ Give each person or agent their own **personal API credential** (library → acc
 | The sign-in email never arrives | The sender domain isn't onboarded to Email Sending, or `EMAIL_FROM` isn't on it. Check Email Sending's delivery logs in the dashboard |
 | `Email sign-in is not configured` (503) | `EMAIL_FROM` or `APP_ORIGIN` isn't set on the deployed Worker |
 | The CLI says `missing_blob` | An image upload didn't finish. Run the same command again: uploads that already arrived are reused |
+| `A separate PUBLIC_ORIGIN must be configured before publishing` (503) | Run `deploy.sh` so it deploys the public Worker and sets the app's resolved public origin, or correct the separate HTTPS override |
+| A public page loses scripts, fonts or other external assets | The public CSP blocks external/CDN resources. Bundle them in the selected version and publish a new snapshot |
+| `Unsupported static export` | Remove the detected private runtime dependency or unsupported base URL before publishing; a snapshot has no private runtime/data bridge |
 
 ## For agents setting this up
 

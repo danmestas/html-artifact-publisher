@@ -49,7 +49,7 @@ flowchart LR
 | Legacy owner credential | `Authorization: Bearer <BEARER_TOKEN>` | All artifact operations, including create and list; account administration uses an instance-owner login |
 | Read link | token after `#`, sent as `Authorization: Token <t>` | Read every version and the page data; `fossil clone` as `viewer` |
 | Edit link | token after `#` | Also publish versions, save page data, delete; `fossil push` as `editor` |
-| Anyone else | | Nothing: unknown and forbidden both answer 404, and anonymous clones are refused |
+| Anyone else | | No private artifact access: unknown and forbidden both answer 404, and anonymous clones are refused. Explicitly published snapshots on the separate public origin need no authentication |
 
 Tokens live in the URL fragment, which browsers send neither to servers nor in `Referer`. A link may end in `@<check-in>` (a hash prefix, tag or branch) to show that version. Content is not encrypted: anyone with access to the Cloudflare account can read it, as with any hosted service.
 
@@ -72,6 +72,18 @@ For isolated local integration tests only, set `TEST_MAIL_TRANSPORT=loopback` an
 The library offers Recently updated and Name A–Z sorting, filtered totals, visible permission labels, and a saved system/light/dark appearance choice inside the app. The signed-out login screen follows the system theme without a selector and does not overwrite that saved preference. Sorting and filters survive viewer return. Gallery previews use the actual HTML entry file, but are static, script-disabled and isolated; unsupported or oversized content has an explicit fallback. External and multi-file dependent assets are not fetched for previews. Phone lists stay compact and do not load hidden gallery frames. See the [approved mockup control map](docs/mockup-control-map.md) and [parity acceptance evidence](docs/mockup-parity-audit.md).
 
 Account and management API shapes are documented in [`docs/accounts-library-spec.md`](docs/accounts-library-spec.md). Library/inventory queries accept `sort=recent` (default) or `sort=name`; name cursors use the title plus ID, recent cursors use the timestamp plus ID. Sorting is deterministic SQLite NOCASE, not locale-specific Unicode ordering. Libraries and administrative inventories use bounded cursor pagination. Browser writes require a matching Origin; explicit authenticated CLI clients remain supported. Accounts, sessions, grants, stars and audit records live in the existing Registry SQLite Durable Object with additive schema changes; artifact contents remain in their existing Repo objects.
+
+### Public snapshots
+
+In the viewer, the artifact owner or instance owner can choose **Share → Publish** to make an immutable public copy of the **selected exact version**. Every file in that version is copied, including images, scripts and supporting files—not just the visible HTML. Anyone with its public URL can open it without signing in. Publishing another version creates a separate snapshot; it never updates an existing public URL.
+
+This is distinct from collaboration links and named access: those open the private viewer with its full history and permitted page data. A public snapshot exposes only the chosen version's copied files, with no private history, shared page data or `window.artifact` runtime. Standalone JavaScript can run; pages that depend on the private runtime are rejected by the exporter. Pikchr diagrams and house fonts are prepared before copying. Missing source files, missing referenced local scripts/stylesheets, unsupported base URLs, or failed diagram/font preparation prevent publishing.
+
+Public pages run on a **separate origin**, served by the `artifact-pages` Worker (`wrangler.public.jsonc`). Its CSP gives documents an opaque sandbox origin, permits scripts and bundled/local resources, and blocks external resources, including CDN scripts, remote fonts and external API requests. The exporter rejects detected non-local resource dependencies, bare module imports, literal root-relative JavaScript loads (such as `fetch('/data.json')`), root-relative import-map URLs, and embedded frames/objects. Use document/module-relative imports and local `fetch()` paths instead; these are supported on public snapshots, unlike private viewer rendering. These static checks are conservative, not a guarantee that dynamically constructed loads will work. Bundle dependencies in the selected version and check the resulting public page before sharing it. Snapshots allow at most **250 files and 250 MiB** of prepared content.
+
+Use **Published links** in the signed-in library to view and unpublish your snapshots; the instance owner sees every account's publications. Unpublishing explicitly revokes the public link and deletes its copied files, leaving the source artifact and history untouched. **Deleting or expiring the private source does not unpublish its public copies.** Already downloaded copies cannot be recalled. Deleted publication records remain for cleanup bookkeeping but are excluded from the default list.
+
+The instance owner's **Clean up unpublished files** action removes leftover copies only from failed/deleted publications or builds older than one hour; it never deletes live snapshots. Cleanup uses a durable cursor in bounded 25-record passes and resweeps retained deleted records to catch late orphan writes. It reports whether another pass is needed.
 
 ### Cost
 
@@ -111,12 +123,15 @@ Secrets live in [Doppler](https://www.doppler.com). The deploy job reads them wi
    - `OWNER_EMAIL`: the explicitly approved instance owner's real email (required secret; never a default/demo identity)
    - `EMAIL_FROM`: the sender address on your onboarded Email Sending domain
    - `APP_ORIGIN`: your deployment's exact external HTTPS origin (no trailing slash)
+   - `PUBLIC_ORIGIN` (optional): a separate exact HTTPS origin for public snapshots, without a trailing slash; omit it to discover the public Worker's `workers.dev` origin automatically
    - `NOTIFY_API_KEY` (optional)
    - Leave `TEST_MAIL_TRANSPORT` unset/empty. The production deploy script rejects it, checks owner/sender/origin configuration and uploads `OWNER_EMAIL` with the bearer secret. No privileged email is checked into production configuration.
 2. Create a Doppler service token for that config, and add it to the GitHub repository as the secret `DOPPLER_TOKEN` (until it exists, merges skip the deploy with a warning), under an environment named `production` (or as a repository secret). Environment protection rules, if you add any, gate every deploy.
 3. For a custom domain, add a `routes` entry to `wrangler.jsonc`; otherwise the Worker is served on `workers.dev`.
 
 To deploy by hand with the same secrets: `npm run build:wasm && npm run deploy:prod`. Prefer merging and letting CI deploy: CI builds the engine the same way every time. `deploy.sh` refuses an engine over the size budget.
+
+The deploy script creates the shared R2 bucket if needed, deploys the public `artifact-pages` Worker from `wrangler.public.jsonc` first, then deploys the signed-in app with `PUBLIC_ORIGIN` set to the discovered public `workers.dev` origin or your explicit override. Both Workers bind the same bucket; the public Worker has no app Durable Object bindings or account secrets and serves only independent publication copies. For a custom public domain, configure its route in `wrangler.public.jsonc` and set `PUBLIC_ORIGIN` to that HTTPS origin, distinct from `APP_ORIGIN`.
 
 The Durable Object classes are created by the `v1` migration in `wrangler.jsonc` on the first deploy.
 
@@ -243,6 +258,12 @@ An update sent with the header `X-Wake: <kind>` asks the Worker to tell an agent
 | `PUT /api/artifacts/:id/data/<name>` | write | Store a JSON value |
 | `POST /r/:id` | Fossil login | Fossil sync protocol |
 | `GET /v/:id` | — | The viewer |
+| `POST /api/artifacts/:id/publications` | artifact owner or instance owner | Publish selected exact check-in: `{at: fullHash, documents: {htmlPath: preparedHtml}}`; copies every source file |
+| `GET /api/publications?cursor=&artifactId=` | signed-in account or legacy owner credential | Own publications, or all accounts for the instance owner; `{publications, nextCursor}` |
+| `DELETE /api/publications/:id` | publication owner or instance owner | Explicitly revoke public access and delete copied files, without changing the source |
+| `POST /api/publications/cleanup` | instance owner | `{}` → `{cleaned, remaining}`; failed/deleted/stale builds only, never live |
+
+Public URLs use the separate `PUBLIC_ORIGIN`: `GET /:publicationId/` serves the entry document and `GET /:publicationId/<path>` serves a copied file. Neither requires account access or a capability token.
 
 ## Limits
 
@@ -284,7 +305,7 @@ type image/jpeg
 | CSP | Per-response nonce on the page's scripts and styles; `default-src 'none'` and `connect-src 'self'` |
 | No indexing | `X-Robots-Tag: noindex, nofollow` and `Referrer-Policy: no-referrer` on every response |
 
-**Not protected:** content is stored unencrypted on Cloudflare, and anyone holding a link has its access until the artifact is deleted or expires.
+**Not protected:** content is stored unencrypted on Cloudflare. A private capability link remains usable until the source artifact is deleted or expires; a public snapshot remains available until explicitly unpublished, independently of the source's lifetime. Downloaded copies cannot be recalled.
 
 ## Repo layout
 

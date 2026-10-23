@@ -27,6 +27,14 @@ node -e '
     console.error("deploy: valid owner/sender emails and an exact non-loopback HTTPS APP_ORIGIN are required");
     process.exit(1);
   }
+  if (process.env.PUBLIC_ORIGIN) {
+    const publicOrigin = new URL(process.env.PUBLIC_ORIGIN);
+    if (publicOrigin.protocol !== "https:" || publicOrigin.origin !== process.env.PUBLIC_ORIGIN ||
+        publicOrigin.origin === origin.origin || ["localhost", "127.0.0.1", "[::1]"].includes(publicOrigin.hostname)) {
+      console.error("deploy: PUBLIC_ORIGIN must be a separate exact non-loopback HTTPS origin");
+      process.exit(1);
+    }
+  }
 '
 [ -f src/fossil.wasm ] || { echo "deploy: src/fossil.wasm is missing; run npm run build:wasm" >&2; exit 1; }
 # The same size budget as fossil/build.sh: never deploy an oversized engine.
@@ -36,7 +44,8 @@ budget="${FOSSIL_WASM_MAX_GZIP:-880000}"
 
 umask 077
 secrets=$(mktemp)
-trap 'rm -f "$secrets"' EXIT INT TERM
+public_log=$(mktemp)
+trap 'rm -f "$secrets" "$public_log"' EXIT INT TERM
 node -e '
   const s = { BEARER_TOKEN: process.env.BEARER_TOKEN, OWNER_EMAIL: process.env.OWNER_EMAIL };
   if (process.env.NOTIFY_API_KEY) s.NOTIFY_API_KEY = process.env.NOTIFY_API_KEY;
@@ -45,4 +54,21 @@ node -e '
 # The blob bucket (wrangler.jsonc, BLOBS) must exist before a Worker that binds it.
 bucket=html-artifact-publisher-blobs
 npx wrangler r2 bucket info "$bucket" >/dev/null 2>&1 || npx wrangler r2 bucket create "$bucket"
-npx wrangler deploy --secrets-file "$secrets" --var "APP_ORIGIN:$APP_ORIGIN" --var "EMAIL_FROM:$EMAIL_FROM" --var 'TEST_MAIL_TRANSPORT:'
+# Deploy static serving first; it has only R2, never app secrets or account bindings.
+if ! npx wrangler deploy --config wrangler.public.jsonc >"$public_log" 2>&1; then
+  cat "$public_log" >&2
+  exit 1
+fi
+cat "$public_log"
+if [ -z "${PUBLIC_ORIGIN:-}" ]; then
+  PUBLIC_ORIGIN=$(node -e '
+    const log = require("node:fs").readFileSync(process.argv[1], "utf8");
+    const url = log.match(/https:\/\/[A-Za-z0-9.-]+\.workers\.dev\b/);
+    if (!url) { console.error("deploy: cannot discover public Worker origin; set PUBLIC_ORIGIN"); process.exit(1); }
+    process.stdout.write(url[0]);
+  ' "$public_log")
+fi
+[ "$PUBLIC_ORIGIN" != "$APP_ORIGIN" ] || { printf '%s\n' 'deploy: public and app origins must differ' >&2; exit 1; }
+npx wrangler deploy --secrets-file "$secrets" --var "APP_ORIGIN:$APP_ORIGIN" --var "PUBLIC_ORIGIN:$PUBLIC_ORIGIN" --var "EMAIL_FROM:$EMAIL_FROM" --var 'TEST_MAIL_TRANSPORT:'
+# CI must not mistake the first (public) Worker URL for the signed-in app.
+printf 'APP_URL=%s\nPUBLIC_URL=%s\n' "$APP_ORIGIN" "$PUBLIC_ORIGIN"

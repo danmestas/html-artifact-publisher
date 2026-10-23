@@ -392,7 +392,9 @@ async function handleViewer(req: Request, env: Env): Promise<Response> {
       'X-Frame-Options': 'DENY',
       'Content-Security-Policy': [
         "default-src 'none'",
-        `script-src 'self' 'nonce-${nonce}'`,
+        // Pages may compile their own WebAssembly (sql.js, image codecs, ...). It
+        // gains them no network access: everything else here still applies.
+        `script-src 'self' 'nonce-${nonce}' 'wasm-unsafe-eval'`,
         `style-src 'self' 'nonce-${nonce}'`,
         "style-src-attr 'unsafe-inline'",
         `img-src data: blob: ${blobs}`,

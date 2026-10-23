@@ -10,6 +10,10 @@ you run  →  publish-html.mjs page.html  →  https://<host>/v/<id>#<readToken>
 
 The design, the spike that proved it and the alternatives that were set aside are written up in [the design document](https://claude.ai/artifact/Bf1cJt7wSt7iV9QAn2mst1).
 
+## Run your own
+
+Everything runs on your own Cloudflare account: a Worker, Durable Objects, R2 and Email Service, with no other service required. It costs Cloudflare's Workers Paid plan, **$5 a month**, which covers most personal and team use. **[docs/self-hosting.md](docs/self-hosting.md)** takes you, or an agent working for you, from a fresh clone to a working publisher: costs with examples, the credentials to create, deploying, checking it works, a custom domain, automatic deploys, and pointing your agents at it. Agents can load the `self-host-publisher` skill, which follows the same guide.
+
 ## Architecture
 
 ```mermaid
@@ -71,7 +75,7 @@ Account and management API shapes are documented in [`docs/accounts-library-spec
 
 ### Cost
 
-On the Workers Paid plan ($5/month) a modest deployment stays inside the included usage: 1M Durable Object requests, 400k GB-s, 25B rows read, 50M rows written and 5 GB stored per month. 1,000 artifacts of about 1 MB with 100k views and 5k updates a month fit with room to spare. The design document has the details.
+On the Workers Paid plan ($5/month) a modest deployment stays inside the included usage: 1M Durable Object requests, 400k GB-s, 25B rows read, 50M rows written and 5 GB stored per month, plus 10 GB of R2 storage for images and large files. 1,000 artifacts of about 1 MB with 100k views and 5k updates a month fit with room to spare. See [docs/self-hosting.md](docs/self-hosting.md#what-it-costs) for rates beyond the included usage and worked examples.
 
 ## Prerequisites
 
@@ -81,10 +85,13 @@ On the Workers Paid plan ($5/month) a modest deployment stays inside the include
 
 ## Quick start
 
+The full walkthrough is [docs/self-hosting.md](docs/self-hosting.md). In short:
+
 ```bash
 npm ci
 npm run build:wasm                 # fossil/ → src/fossil.wasm, about 0.85 MB gzipped
-npm run deploy:prod                # secrets from Doppler (see Deploying)
+npm test
+npm run deploy:prod                # secrets from Doppler; or export them and run sh scripts/deploy.sh
 
 export HTML_PUBLISHER_URL=https://html-artifact-publisher.<your-subdomain>.workers.dev
 export HTML_PUBLISHER_TOKEN=<your-bearer-token>
@@ -196,7 +203,8 @@ Inside the viewer, a page can use `window.artifact` (every call returns a promis
 | Call | Does |
 |------|------|
 | `canWrite()` | `true` when opened with the edit link |
-| `files()`, `read(path)` | The files of the version being shown |
+| `files()`, `read(path)` | The files of the version being shown (text) |
+| `bytes(path)` | A file's raw bytes, including blobs in R2: hand a `.wasm` module or a SQLite database to a library such as sql.js. Pages may compile WebAssembly |
 | `history()` | All check-ins, newest first |
 | `publish({ path: text }, message)` | Check in changed files. Rejects if someone else published first; calling again builds on the newer version |
 | `data.get(name)`, `data.set(name, value)`, `data.list()` | Small JSON values stored with the artifact but outside its history; last writer wins |
@@ -305,6 +313,6 @@ type image/jpeg
 ├── AGENTS.md, CLAUDE.md       Build, test and deploy rules for agents working on this repo
 ├── skills/, agent-harnesses/, docs/   Instructions for agents (publish-html-page,
 │                                      artifact-design, -runtime, -diagrams, -dataviz,
-│                                      pikchr)
+│                                      pikchr, self-host-publisher); docs/self-hosting.md
 └── wrangler.jsonc
 ```

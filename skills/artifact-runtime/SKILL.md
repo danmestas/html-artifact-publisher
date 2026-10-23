@@ -37,6 +37,7 @@ Never publish on load, on a timer, or per keystroke.
 | `canWrite()` | `true` / `false` | `true` only when the viewer was opened with the edit link |
 | `files()` | `string[]` | file names of the check-in being shown |
 | `read(path)` | file text | from the shown check-in; this is the original source, before the viewer inlined anything |
+| `bytes(path)` | `Uint8Array` | a file's raw bytes, for binary files: `.wasm` modules, SQLite databases, images to process. Works for files stored in R2 too; `read` returns a binary file's pointer instead |
 | `history()` | `[{uuid, comment, user, time, parents}]` | newest first; `time` is a date string (`new Date(time)` works) |
 | `publish({path: string \| Uint8Array}, message)` | `{uuid}` | new check-in on top of the latest; edit link only |
 | `data.get(name)` | JSON value or `null` | works with either link |
@@ -294,6 +295,34 @@ schedule();
 Skip a refresh while the person is mid-edit (a focused input, a pending save), or
 merge carefully, so polling never overwrites what they are typing. For pages built
 on `publish`, do not poll at all: the viewer already watches for new versions.
+
+### 5.6 WebAssembly and data files (a SQLite database in the page)
+
+Pages may run their own WebAssembly. The page can't `fetch` files, so get the
+module's bytes, and any data file's, from `artifact.bytes()` and hand them to
+the library. Binary files (`.wasm`, `.sqlite`) are stored in R2 automatically;
+publish them in the directory like any other file.
+
+```html
+<script src="vendor/sql-wasm.js"></script>  <!-- sql.js, classic build: defines initSqlJs -->
+<script>
+(async () => {
+  const [wasm, file] = await Promise.all([artifact.bytes('vendor/sql-wasm.wasm'), artifact.bytes('data.sqlite')]);
+  const SQL = await initSqlJs({ wasmBinary: wasm });   // no fetch: the bytes are passed in
+  const db = new SQL.Database(file);
+  const [res] = db.exec('SELECT cone, peak FROM firings ORDER BY peak');
+  // render res.columns / res.values with textContent
+})();
+</script>
+```
+
+- The database is a read-only snapshot for each viewer. To save changes, either
+  publish a new version (`artifact.publish({'data.sqlite': db.export()}, 'Add firing')`,
+  edit link only) or keep small edits in `artifact.data`.
+- Most Emscripten builds accept `wasmBinary`; others take a `WebAssembly.Module`:
+  `await WebAssembly.compile(bytes)`. Avoid builds that load extra files at
+  runtime or need `eval`.
+- Show a loading state: the module and the data arrive before anything renders.
 
 ## 6. Seeding data and checking after publish
 

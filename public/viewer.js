@@ -85,6 +85,7 @@ const RUNTIME = `(function(){
     canWrite: function () { return call('canWrite'); },
     files: function () { return call('files'); },
     read: function (path) { return call('read', path); },
+    bytes: function (path) { return call('bytes', path); },
     history: function () { return call('history'); },
     publish: function (files, message) { return call('publish', files, message); },
     pikchr: function (source) { return call('pikchr', source); },
@@ -365,6 +366,13 @@ const ops = {
   read: path => {
     if (!(path in shown.files)) throw new Error(`${path} is not in this version`);
     return dec.decode(shown.files[path]);
+  },
+  // A file's raw bytes, for binary files such as .wasm modules or SQLite
+  // databases: blobs (stored in R2) are fetched through their signed link.
+  async bytes(path) {
+    if (!(path in shown.files)) throw new Error(`${path} is not in this version`);
+    const blob = shown.blobs?.[path];
+    return blob ? art.blob(blob) : shown.files[path].slice();
   },
   history: () => info.timeline,
   // Renders Pikchr source to SVG: {light, dark, width, height}.

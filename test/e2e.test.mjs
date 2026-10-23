@@ -300,6 +300,8 @@ test('viewer shell', async () => {
   const nonce = /'nonce-([^']+)'/.exec(csp)?.[1];
   assert.ok(nonce, csp);
   assert.ok((await r.text()).includes(`content="${nonce}"`));
+  assert.match(csp, /script-src [^;]*'wasm-unsafe-eval'/, 'pages may run their own WebAssembly');
+  assert.match(csp, /connect-src 'self'/, 'but still connect nowhere else');
 });
 
 test('CLI', async () => {

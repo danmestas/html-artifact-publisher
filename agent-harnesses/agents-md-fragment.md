@@ -11,7 +11,7 @@ Both must be set before running the script. If either is missing, tell the user 
 
 ### Procedure
 
-1. Confirm the HTML file starts with `<!doctype html` or `<html`. Reject anything that does not. Files over about 1.99 MB compressed are refused. Keep it self-contained: the viewer blocks all network requests, so external URLs will not load.
+1. Confirm the HTML file starts with `<!doctype html` or `<html`. Reject anything that does not. Images, video, audio, fonts, PDFs and other binary files, and any file over 256 KB, are stored in R2 instead of Fossil (the CLI uploads them automatically, up to 100 MB each); smaller text files must compress under about 1.99 MB. Keep it self-contained: the viewer blocks all network requests, so external URLs will not load.
 2. Run the publisher in machine-readable mode (a directory publishes a multi-file page):
    ```bash
    node scripts/publish-html.mjs --json --title "<descriptive title>" [options] <file.html | dir>

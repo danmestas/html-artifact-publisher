@@ -68,4 +68,4 @@ node scripts/publish-html.mjs delete "<editUrl>"
 
 ## Size and TTL limits
 
-Maximum payload: 10 MB per request; a file whose compressed size exceeds about 1.99 MB is refused (HTTP 413, "too large to store"). Default TTL: 7 days. Maximum TTL: 30 days. Pass `--ttl never` for no expiry.
+Maximum payload: 10 MB per request. Images, video, audio, fonts, PDFs and other binary files, and any file over 256 KB, are stored in R2 instead of Fossil (the CLI uploads them automatically, up to 100 MB each); smaller text files must compress under about 1.99 MB. Default TTL: 7 days. Maximum TTL: 30 days. Pass `--ttl never` for no expiry.

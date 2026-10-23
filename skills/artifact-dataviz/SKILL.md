@@ -314,14 +314,15 @@ arrow plus text carries the direction - never colour alone.
 It is possible: put the library's `.js` file in the published directory and reference it
 with `<script src="vendor/lib.min.js">`; the viewer inlines it. Conditions:
 
-- the file must compress under ~1.99 MB and should be far smaller;
+- it should be as small as the job allows (a file over 256 KB is stored in R2 and fetched by the viewer before inlining, which slows the first view);
 - it must be a classic script (UMD/IIFE global). ES-module builds that `import` relative
   files are not resolved by the viewer;
-- it must not use `eval` / `new Function` / WebAssembly - the CSP blocks them. Libraries
-  that compile templates, expressions or specs at runtime (some Vega/Vega-Lite paths,
-  template-based renderers, older Plotly bundles, Mermaid's heavier diagram types, anything
-  WASM-backed) tend to break; small SVG/canvas renderers such as uPlot or a D3 subset
-  (scale, shape, axis) usually work;
+- it must not use `eval` / `new Function` - the CSP blocks them. Libraries that compile
+  templates, expressions or specs at runtime (some Vega/Vega-Lite paths, template-based
+  renderers, older Plotly bundles, Mermaid's heavier diagram types) tend to break; small
+  SVG/canvas renderers such as uPlot or a D3 subset (scale, shape, axis) usually work.
+  WebAssembly is allowed: a WASM-backed library works if you pass it the module's bytes
+  from `artifact.bytes(path)` instead of letting it fetch them (see **artifact-runtime**);
 - it must not fetch fonts, tiles or data from the network, and its export/download buttons
   will not work - hide them.
 

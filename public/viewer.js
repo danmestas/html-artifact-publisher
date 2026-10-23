@@ -34,7 +34,7 @@ function viewerFragment(hash) {
 let art = null;      // the Artifact API client
 let link = null;     // { token, at } from the fragment
 let info = null;     // { title, role, tip, timeline } as last loaded
-let shown = null;    // { checkin, files } being shown
+let shown = null;    // { checkin, files, blobs } being shown
 let frameUrl = '';   // blob: URL of the rendered page, revoked on the next render
 let renders = 0;     // a newer render() supersedes one still awaiting diagrams or fonts
 
@@ -85,6 +85,7 @@ const RUNTIME = `(function(){
     canWrite: function () { return call('canWrite'); },
     files: function () { return call('files'); },
     read: function (path) { return call('read', path); },
+    bytes: function (path) { return call('bytes', path); },
     history: function () { return call('history'); },
     publish: function (files, message) { return call('publish', files, message); },
     pikchr: function (source) { return call('pikchr', source); },
@@ -126,6 +127,9 @@ async function render() {
   };
   const dataUrls = new Map();
   const dataUrl = path => {
+    // Images, media and fonts stored as blobs load through their signed links.
+    const blob = shown.blobs?.[path];
+    if (blob) return new URL(blob.url, location.origin).href;
     if (!dataUrls.has(path)) {
       const data = path.endsWith('.css') ? enc.encode(css(path)) : bytes(path);
       let bin = '';
@@ -363,6 +367,13 @@ const ops = {
     if (!(path in shown.files)) throw new Error(`${path} is not in this version`);
     return dec.decode(shown.files[path]);
   },
+  // A file's raw bytes, for binary files such as .wasm modules or SQLite
+  // databases: blobs (stored in R2) are fetched through their signed link.
+  async bytes(path) {
+    if (!(path in shown.files)) throw new Error(`${path} is not in this version`);
+    const blob = shown.blobs?.[path];
+    return blob ? art.blob(blob) : shown.files[path].slice();
+  },
   history: () => info.timeline,
   // Renders Pikchr source to SVG: {light, dark, width, height}.
   pikchr: source => renderPikchr(source),
@@ -422,10 +433,22 @@ $('toastShow').addEventListener('click', () => {
 // ─── Start ───────────────────────────────────────────────────────────────────
 
 /** Load the timeline, and with `show` the check-in the link names. */
+// A large script, stylesheet or document stored as a blob is fetched and then
+// handled like any other text file: scripts and styles must be inlined.
+const INLINED = /\.(css|m?js|html?|json|svg|txt|md)$/i;
+async function fetchTextBlobs(bundle) {
+  const text = Object.entries(bundle.blobs ?? {}).filter(([path]) => INLINED.test(path));
+  await Promise.all(text.map(async ([path, entry]) => {
+    bundle.files[path] = await art.blob(entry);
+    delete bundle.blobs[path];
+  }));
+}
+
 async function reload(show) {
   info = await art.info();
   if (show) {
     shown = await art.bundle(link.at);
+    await fetchTextBlobs(shown);
     if (shown.missing?.length) console.warn('missing from this version:', shown.missing.join(', '));
     await render();
   } else {

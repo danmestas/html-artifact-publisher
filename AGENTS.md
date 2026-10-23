@@ -1,7 +1,8 @@
 # Working on html-artifact-publisher
 
 Instructions for agents changing this repository. To publish pages with it instead,
-use the skills in `skills/` (start with `skills/publish-html-page`).
+use the skills in `skills/` (start with `skills/publish-html-page`). To set up a new
+instance on someone's own Cloudflare account, follow `docs/self-hosting.md`.
 
 ## Build
 

@@ -28,4 +28,4 @@ Needs the edit link (a read link fails). Exit code 3 = version conflict (someone
 - Keep `editUrl` (can update and delete) and `cloneUrl` (`https://editor:<writeToken>@<host>/r/<id>`, for `fossil clone`/`push`) private; never print them into PRs, issues, commits, channels, or logs.
 - Keep pages self-contained: the viewer blocks all network requests, so external URLs will not load.
 
-**TTL options:** `1h`, `6h`, `24h`, `7d`, `30d`, `never` (default `7d`). Max payload: 10 MB; files over about 1.99 MB compressed are refused (HTTP 413).
+**TTL options:** `1h`, `6h`, `24h`, `7d`, `30d`, `never` (default `7d`). Max payload: 10 MB. Images, video, audio, fonts, PDFs and other binary files, and any file over 256 KB, are stored in R2 instead of Fossil (the CLI uploads them automatically, up to 100 MB each); smaller text files must compress under about 1.99 MB.

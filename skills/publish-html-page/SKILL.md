@@ -68,8 +68,9 @@ Environment (must be set before running):
 
 ## Step-by-step
 
-1. Confirm the HTML file starts with `<!doctype html` or `<html`. Files whose
-   compressed size exceeds about 1.99 MB are refused ("too large to store").
+1. Confirm the HTML file starts with `<!doctype html` or `<html`. To include
+   images, video, fonts or other files, publish a directory and reference them
+   by relative path. Images, video, audio, fonts, PDFs and other binary files, and any file over 256 KB, are stored in R2 instead of Fossil (the CLI uploads them automatically, up to 100 MB each); smaller text files must compress under about 1.99 MB.
 2. Run the script with `--title` matching the artifact's purpose.
    If the page has Pikchr diagrams (`<pre class="pikchr">`), the script renders them
    first and refuses to publish on a Pikchr error (exit 1, with the diagram's line).

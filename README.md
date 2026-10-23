@@ -98,7 +98,7 @@ Merging a pull request into `main` deploys it. `.github/workflows/ci.yml` runs o
 Secrets live in [Doppler](https://www.doppler.com). The deploy job reads them with `doppler run` and uploads the Worker's own secrets with the deploy itself (`wrangler deploy --secrets-file`), so a new version never runs without them. One-time setup:
 
 1. In Doppler, create the project `html-artifact-publisher` with a `prd` config holding:
-   - `CLOUDFLARE_API_TOKEN`: a Cloudflare API token from the **Edit Cloudflare Workers** template
+   - `CLOUDFLARE_API_TOKEN`: a Cloudflare API token from the **Edit Cloudflare Workers** template, with **Workers R2 Storage: Edit** (the first deploy creates the `html-artifact-publisher-blobs` bucket)
    - `CLOUDFLARE_ACCOUNT_ID`
    - `BEARER_TOKEN`: the owner token, e.g. `openssl rand -hex 32`
    - `OWNER_EMAIL`: the explicitly approved instance owner's real email (required secret; never a default/demo identity)
@@ -226,7 +226,10 @@ An update sent with the header `X-Wake: <kind>` asks the Worker to tell an agent
 | `GET /api/artifacts/:id` | read | `{title, role, tip, timeline, expiresAt}`; `?tip` returns only the tip |
 | `PUT /api/artifacts/:id` | write | `{parent, files, message?, title?}` → `{tip, parent}`; `409` when `parent` is not the tip |
 | `DELETE /api/artifacts/:id` | write | Delete |
-| `GET /api/artifacts/:id/bundle?at=` | read | `{checkin, files: {path: base64}, missing}` |
+| `GET /api/artifacts/:id/bundle?at=` | read | `{checkin, files: {path: base64}, missing, blobs: {path: {sha256, size, type, url}}}`; a blob's `files` entry is its pointer |
+| `PUT /api/artifacts/:id/blobs/:sha256` | write | Upload a blob (raw body, `Content-Length` required) before committing its pointer; `HEAD` says whether it is stored |
+| `PUT /api/blobs/:sha256` | owner or account | The same, for a new artifact |
+| `GET /b/:id/:sha256?exp=&sig=` | signed link | A blob's bytes, with `Range` support |
 | `GET /api/artifacts/:id/files/<path>?at=` | read | One file's bytes |
 | `GET /api/artifacts/:id/data[/<name>]` | read | Page data names, or one value (`null` when unset) |
 | `PUT /api/artifacts/:id/data/<name>` | write | Store a JSON value |
@@ -237,12 +240,30 @@ An update sent with the header `X-Wake: <kind>` asks the Worker to tell an agent
 
 | Limit | Value | Why |
 |-------|-------|-----|
-| One file, compressed | about 1.99 MB | A Durable Object's SQLite holds at most 2 MB per value, and Fossil stores each file in one row. Larger files are refused with `413` (API) or a sync error (`fossil push`) |
+| One blob (images, media, binary files, any file over 256 KB) | 100 MB | `MAX_BLOB_BYTES`; Workers accept request bodies up to 100 MB. Stored in R2, not Fossil |
+| One text file in Fossil, compressed | about 1.99 MB | A Durable Object's SQLite holds at most 2 MB per value, and Fossil stores each file in one row. Larger files are refused with `413` (API) or a sync error (`fossil push`); the CLI sends any file over 256 KB to R2, so this only applies to files pushed with `fossil` or posted to the API directly |
 | Request body | 10 MB | `MAX_PAYLOAD_BYTES` |
 | Default / max TTL | 7 days / 30 days, or `--ttl never` | `DEFAULT_TTL_SECONDS`, `MAX_TTL_SECONDS`; expiry is a Durable Object alarm |
 | Repository | 10 GB | Per Durable Object |
 
-A `fossil push` that includes an oversized file is refused, but if Fossil sent the check-in in an earlier round than the file, that check-in arrives without the file. The viewer then shows the other files, and the bundle lists the gap under `missing`. Storing large files in pieces belongs in go-libfossil and is planned.
+A `fossil push` that includes an oversized file is refused, but if Fossil sent the check-in in an earlier round than the file, that check-in arrives without the file. The viewer then shows the other files, and the bundle lists the gap under `missing`.
+
+## Images and large files (blobs)
+
+Images, video, audio, fonts, PDFs and other binary files, and any file over 256 KB, are stored in R2 (binding `BLOBS`) by their SHA-256, not in Fossil. Fossil keeps a small pointer file at the file's own path, so pages still say `<img src="img/hero.jpg">` and history stays correct:
+
+```
+artifact-blob 1
+sha256 9f2c41…d7e1
+size 4718231
+type image/jpeg
+```
+
+- **Publishing.** `public/client.js` (the CLI, and pages that save themselves) uploads each such file first, to `PUT /api/blobs/<sha256>` (new artifact; owner or account) or `PUT /api/artifacts/<id>/blobs/<sha256>` (edit link), then commits the pointer. The Worker hashes the bytes as they stream in and refuses a mismatch; a commit naming a blob R2 doesn't have is refused with `missing_blob`. Identical bytes are stored once.
+- **Viewing.** The bundle lists each blob with a signed link, `/b/<id>/<sha256>?exp=&sig=`, signed with a key derived from `BEARER_TOKEN`. A link stays the same for a day (so browsers cache what it serves) and is never valid for more than 48 hours. The viewer points images, media and fonts at these links (the page CSP allows `/b/` and nothing else), and fetches and inlines large scripts and stylesheets. Links support `Range`, so video can stream.
+- **Cleanup.** The Registry records which artifacts point at which blobs; a blob is deleted from R2 with the last artifact that points at it. Pointers pushed with `fossil` are recorded when the artifact is next viewed.
+- **`fossil clone`** gets the pointer files, not the bytes. `publish-html.mjs read <url> --out <dir>` writes the real files.
+
 
 ## Safety model
 
@@ -266,6 +287,7 @@ A `fossil push` that includes an oversized file is refused, but if Fossil sent t
 │   ├── index.ts               Worker: routes, access, viewer
 │   ├── repo.ts                Repo Durable Object (one per artifact)
 │   ├── registry.ts            Registry Durable Object
+│   ├── blobs.ts               Blobs in R2: upload, signed links, pointer checks
 │   ├── fossil.ts              Loads the wasm; one transaction per call
 │   └── util.ts
 ├── fossil/                    go-libfossil server program (Go module)
@@ -276,7 +298,8 @@ A `fossil push` that includes an oversized file is refused, but if Fossil sent t
 │   ├── cmd/fsclient/          Native Fossil client for the e2e tests
 │   └── build.sh               TinyGo (default) or Go build
 ├── public/                    Viewer shell, the shared API client, Pikchr (pikchr/,
-│                              diagrams.js) and the house fonts (fonts/, fonts.js)
+│                              diagrams.js), the house fonts (fonts/, fonts.js) and
+│                              blobs.js (which files go to R2; the pointer format)
 ├── scripts/                   publish-html.mjs (CLI), pikchr.mjs (diagram check), deploy.sh
 ├── test/                      End-to-end and Pikchr tests
 ├── AGENTS.md, CLAUDE.md       Build, test and deploy rules for agents working on this repo

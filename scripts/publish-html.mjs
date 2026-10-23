@@ -255,8 +255,10 @@ async function read() {
   const [rawUrl] = positional;
   if (!rawUrl) die('usage: read <url> [--out <dir>]');
   const link = parseLink(rawUrl);
-  const { files, missing } = await link.art.bundle(link.at);
+  const { files, missing, blobs = {} } = await link.art.bundle(link.at);
   const names = Object.keys(files);
+  // Images and other large files are stored as blobs: fetch their real bytes.
+  for (const [name, entry] of Object.entries(blobs)) files[name] = await link.art.blob(entry);
   const out = flagValue('--out');
   if (!out) {
     const entry = names.includes('index.html') ? 'index.html' : names.find(n => /\.html?$/i.test(n));

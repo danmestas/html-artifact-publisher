@@ -5,7 +5,8 @@
 #   doppler run --project html-artifact-publisher --config prd -- sh scripts/deploy.sh
 #
 # Needs CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID and BEARER_TOKEN;
-# NOTIFY_API_KEY is optional. Secrets ride the deploy (--secrets-file), so the
+# NOTIFY_API_KEY is optional. The API token also needs R2 edit permission (the
+# blob bucket is created on first deploy). Secrets ride the deploy (--secrets-file), so the
 # new version never runs without them. Expects src/fossil.wasm (npm run build:wasm).
 set -eu
 : "${CLOUDFLARE_API_TOKEN:?CLOUDFLARE_API_TOKEN is not set}"
@@ -41,4 +42,7 @@ node -e '
   if (process.env.NOTIFY_API_KEY) s.NOTIFY_API_KEY = process.env.NOTIFY_API_KEY;
   process.stdout.write(JSON.stringify(s));
 ' > "$secrets"
+# The blob bucket (wrangler.jsonc, BLOBS) must exist before a Worker that binds it.
+bucket=html-artifact-publisher-blobs
+npx wrangler r2 bucket info "$bucket" >/dev/null 2>&1 || npx wrangler r2 bucket create "$bucket"
 npx wrangler deploy --secrets-file "$secrets" --var "APP_ORIGIN:$APP_ORIGIN" --var "EMAIL_FROM:$EMAIL_FROM" --var 'TEST_MAIL_TRANSPORT:'

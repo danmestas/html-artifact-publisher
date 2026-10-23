@@ -58,9 +58,11 @@ navigate the viewer, read the URL fragment, or reach the parent. Camera, mic,
 geolocation and clipboard-read are unavailable; take files through
 `<input type="file">` instead.
 
-**Size.** Each file must compress (zlib) to under about 1.99 MB, and one
-publish request is at most 10 MB. Optimize images, subset fonts, split large
-data into separate files, and do not vendor a large library for a small job.
+**Size.** Images, video, audio, fonts and other binary files, and any file
+over 256 KB, are stored outside Fossil (in R2) and load through signed links;
+the CLI handles this, up to 100 MB per file. Reference them by relative path as
+usual. Still optimize images, subset fonts and don't vendor a large library for
+a small job: readers download every byte.
 
 **Write a full document.** The viewer renders your entry file as is: include
 `<!doctype html>`, `<meta charset="utf-8">`, a viewport meta, and a `<title>`.

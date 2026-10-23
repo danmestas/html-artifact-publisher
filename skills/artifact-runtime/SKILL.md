@@ -56,7 +56,7 @@ Facts that shape every design:
   restoring an old version, not included when someone clones the repo, and kept
   across later publishes. Writing `null` stores `null`; there is no delete.
 - **Size.** Keep each value small, well under 100 KB; one stored value has the same
-  roughly 2 MB ceiling as a file, and a request body is capped at 10 MB. Many
+  roughly 2 MB ceiling as a text file, and a request body is capped at 10 MB. Many
   small names beat one big blob, and they also reduce write races.
 - **Last writer wins, per name.** Two viewers who `get`, modify and `set` the same
   name at the same moment: one change is lost. Design keys so that each person's

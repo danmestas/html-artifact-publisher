@@ -314,7 +314,7 @@ arrow plus text carries the direction - never colour alone.
 It is possible: put the library's `.js` file in the published directory and reference it
 with `<script src="vendor/lib.min.js">`; the viewer inlines it. Conditions:
 
-- the file must compress under ~1.99 MB and should be far smaller;
+- it should be as small as the job allows (a file over 256 KB is stored in R2 and fetched by the viewer before inlining, which slows the first view);
 - it must be a classic script (UMD/IIFE global). ES-module builds that `import` relative
   files are not resolved by the viewer;
 - it must not use `eval` / `new Function` / WebAssembly - the CSP blocks them. Libraries

@@ -34,7 +34,7 @@ function viewerFragment(hash) {
 let art = null;      // the Artifact API client
 let link = null;     // { token, at } from the fragment
 let info = null;     // { title, role, tip, timeline } as last loaded
-let shown = null;    // { checkin, files } being shown
+let shown = null;    // { checkin, files, blobs } being shown
 let frameUrl = '';   // blob: URL of the rendered page, revoked on the next render
 let renders = 0;     // a newer render() supersedes one still awaiting diagrams or fonts
 
@@ -126,6 +126,9 @@ async function render() {
   };
   const dataUrls = new Map();
   const dataUrl = path => {
+    // Images, media and fonts stored as blobs load through their signed links.
+    const blob = shown.blobs?.[path];
+    if (blob) return new URL(blob.url, location.origin).href;
     if (!dataUrls.has(path)) {
       const data = path.endsWith('.css') ? enc.encode(css(path)) : bytes(path);
       let bin = '';
@@ -422,10 +425,22 @@ $('toastShow').addEventListener('click', () => {
 // ─── Start ───────────────────────────────────────────────────────────────────
 
 /** Load the timeline, and with `show` the check-in the link names. */
+// A large script, stylesheet or document stored as a blob is fetched and then
+// handled like any other text file: scripts and styles must be inlined.
+const INLINED = /\.(css|m?js|html?|json|svg|txt|md)$/i;
+async function fetchTextBlobs(bundle) {
+  const text = Object.entries(bundle.blobs ?? {}).filter(([path]) => INLINED.test(path));
+  await Promise.all(text.map(async ([path, entry]) => {
+    bundle.files[path] = await art.blob(entry);
+    delete bundle.blobs[path];
+  }));
+}
+
 async function reload(show) {
   info = await art.info();
   if (show) {
     shown = await art.bundle(link.at);
+    await fetchTextBlobs(shown);
     if (shown.missing?.length) console.warn('missing from this version:', shown.missing.join(', '));
     await render();
   } else {

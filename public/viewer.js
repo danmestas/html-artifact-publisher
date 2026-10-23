@@ -449,7 +449,7 @@ $('restoreBtn').addEventListener('click', async () => {
 
 $('deleteBtn').addEventListener('click', async () => {
   closePopovers();
-  if (!confirm(`Delete “${info.title}” and its whole history? Its links stop working.`)) return;
+  if (!confirm(`Delete the private artifact “${info.title}” and its whole history? Private collaboration links will stop working. Published public snapshots remain available until explicitly unpublished.`)) return;
   try {
     await art.remove();
     $('bar').hidden = true;

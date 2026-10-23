@@ -19,7 +19,10 @@
  *   PUT    /api/artifacts/:id                New check-in; `parent` must be the tip (write)
  *   DELETE /api/artifacts/:id                Delete (write)
  *   GET    /api/artifacts/:id/bundle?at=     Every file of a check-in (read)
- *   GET    /api/artifacts/:id/files/<path>   One file (read)
+ *   GET    /api/artifacts/:id/files/<path>   One file (read); a blob's pointer file, for blobs
+ *   PUT    /api/artifacts/:id/blobs/:sha256  Upload a blob before committing its pointer (write)
+ *   PUT    /api/blobs/:sha256                Upload a blob for a new artifact (owner or account)
+ *   GET    /b/:id/:sha256?exp=&sig=          A blob, through a signed link from the bundle
  *   GET    /api/artifacts/:id/data[/<name>]  Page data (read)
  *   PUT    /api/artifacts/:id/data/<name>    Page data (write)
  *   POST   /r/:id                            Fossil sync: `fossil clone https://editor:<writeToken>@host/r/<id>`
@@ -30,6 +33,7 @@ import { Repo } from './repo';
 import { preview } from './preview';
 import { accountRoutes, artifactCaller, csrf, identity, readBody } from './accounts';
 import { Registry } from './registry';
+import { blobLinks, getBlob, missingBlobs, pointersIn, putBlob } from './blobs';
 import type { FossilReply } from './fossil';
 import { b64decode, b64encode, clampTtl, genId, genToken, isoOrNull } from './util';
 
@@ -49,7 +53,7 @@ function secHeaders(): Record<string, string> {
 function corsHeaders(): Record<string, string> {
   return {
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, HEAD, POST, PUT, DELETE, OPTIONS',
     'Access-Control-Allow-Headers': 'Authorization, Content-Type, X-Wake',
     'Access-Control-Max-Age': '86400',
   };
@@ -70,6 +74,22 @@ const STATUS: Record<string, number> = {
 function reply(r: FossilReply<unknown>): Response {
   if (r.ok) return json(r.result);
   return json({ error: r.error, code: r.code }, STATUS[r.code ?? 'internal'] ?? 500);
+}
+
+function missingReply(paths: string[]): Response {
+  return json({ error: `upload these files before committing them: ${paths.join(', ')}`, code: 'missing_blob', missing: paths }, 400);
+}
+
+type Actor = Awaited<ReturnType<typeof identity>>;
+/** Who an upload counts for: the instance owner's bearer token, or an account. */
+const principal = (actor: Actor) => (actor.user ? `user:${actor.user.id}` : 'owner');
+/** Uploads a commit to artifact `id` may use: its edit link's, and the caller's own. */
+const uploaders = (id: string, actor: Actor) => [`artifact:${id}`, ...(actor.legacy || actor.user ? [principal(actor)] : [])];
+
+function withCors(res: Response): Response {
+  const out = new Response(res.body, res);
+  for (const [k, v] of Object.entries({ ...corsHeaders(), ...secHeaders() })) out.headers.set(k, v);
+  return out;
 }
 
 // ─── Requests ────────────────────────────────────────────────────────────────
@@ -142,6 +162,10 @@ async function handleCreate(req: Request, env: Env): Promise<Response> {
   if (b.slug != null && !/^[a-z0-9-]{1,64}$/.test(b.slug)) {
     return json({ error: 'slug must be 1-64 chars: lowercase letters, digits, hyphens' }, 400);
   }
+  const pointers = pointersIn(b.files);
+  const shas = Object.values(pointers).map(p => p.sha256);
+  const missing = await missingBlobs(env, pointers, await registry(env).allowedBlobs('', [principal(actor)], shas));
+  if (missing.length) return missingReply(missing);
   const title = String(b.title ?? '').slice(0, 300) || 'Untitled';
   const ttl = b.ttlSeconds === null ? null : clampTtl(b.ttlSeconds, parseInt(env.DEFAULT_TTL_SECONDS, 10), parseInt(env.MAX_TTL_SECONDS, 10));
   const now = Math.floor(Date.now() / 1000);
@@ -162,6 +186,7 @@ async function handleCreate(req: Request, env: Env): Promise<Response> {
     return reply(r);
   }
   await registry(env).touch(id, r.result.tip);
+  await registry(env).refBlobs(id, shas);
   await registry(env).audit(actor.user?.id ?? 'instance-owner', 'publish', id, title);
 
   const origin = new URL(req.url).origin;
@@ -224,6 +249,13 @@ async function handleArtifact(req: Request, env: Env, ctx: ExecutionContext, id:
         return json({ error: 'Body must be JSON with parent (the check-in you started from) and files' }, 400);
       }
       if (b.title !== undefined && actor.user && !canManage) return json({ error: 'Artifact owner required to rename' }, 403);
+      if ((await stub.role(who)) !== 'write') return reply(await stub.op(who, { op: 'commit' }));
+      const pointers = pointersIn(b.files);
+      const allowed = await registry(env).allowedBlobs(id, uploaders(id, actor), Object.values(pointers).map(p => p.sha256));
+      // Record the references before checking R2, so no other artifact's deletion removes these blobs mid-commit.
+      await registry(env).refBlobs(id, allowed);
+      const missing = await missingBlobs(env, pointers, allowed);
+      if (missing.length) return missingReply(missing);
       const r = (await stub.op(who, {
         op: 'commit', parent: b.parent, files: b.files,
         comment: String(b.message ?? 'Update').slice(0, 1000), user: String(b.user ?? 'web').slice(0, 64),
@@ -244,7 +276,28 @@ async function handleArtifact(req: Request, env: Env, ctx: ExecutionContext, id:
     }
   }
 
-  if (rest === '/bundle' && method === 'GET') return reply(await stub.op(who, { op: 'bundle', at }));
+  if (rest === '/bundle' && method === 'GET') {
+    const r = (await stub.op(who, { op: 'bundle', at })) as FossilReply<{ files: Record<string, string> }>;
+    if (!r.ok || !r.result) return reply(r);
+    const pointers = pointersIn(r.result.files);
+    // Pointers pushed with fossil never passed through a commit here: link only
+    // blobs this artifact already uses or that were uploaded with its edit link.
+    const allowed = await registry(env).allowedBlobs(id, [`artifact:${id}`], Object.values(pointers).map(p => p.sha256));
+    await registry(env).refBlobs(id, allowed);
+    const linked = Object.fromEntries(Object.entries(pointers).filter(([, p]) => allowed.includes(p.sha256)));
+    const missing = [...(r.result as { missing?: string[] }).missing ?? [], ...Object.keys(pointers).filter(path => !(path in linked))];
+    return json({ ...r.result, missing, blobs: await blobLinks(env, id, linked) });
+  }
+
+  const blob = /^\/blobs\/([^/]+)$/.exec(rest);
+  if (blob && (method === 'PUT' || method === 'HEAD')) {
+    if ((await stub.role(who)) !== 'write') return json({ error: 'the edit link is required to upload files' }, 403);
+    const sha = blob[1]!, reg = registry(env);
+    return withCors(await putBlob(req, env, sha, {
+      known: async () => (await reg.allowedBlobs(id, uploaders(id, actor), [sha])).length > 0,
+      record: () => reg.recordUpload(sha, `artifact:${id}`),
+    }));
+  }
 
   if (rest.startsWith('/files/') && method === 'GET') {
     const path = decodeURIComponent(rest.slice('/files/'.length));
@@ -324,6 +377,8 @@ async function errorReply(message: string): Promise<Response> {
  * this CSP: only nonce-stamped scripts and styles run, nothing connects out.
  */
 async function handleViewer(req: Request, env: Env): Promise<Response> {
+  // Pages may load blobs (images, media, fonts) through signed links, and nothing else.
+  const blobs = `${new URL(req.url).origin}/b/`;
   const shell = await env.ASSETS.fetch(new URL('/viewer', req.url));
   if (!shell.ok) return shell;
   const nonce = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(16))));
@@ -337,12 +392,14 @@ async function handleViewer(req: Request, env: Env): Promise<Response> {
       'X-Frame-Options': 'DENY',
       'Content-Security-Policy': [
         "default-src 'none'",
-        `script-src 'self' 'nonce-${nonce}'`,
+        // Pages may compile their own WebAssembly (sql.js, image codecs, ...). It
+        // gains them no network access: everything else here still applies.
+        `script-src 'self' 'nonce-${nonce}' 'wasm-unsafe-eval'`,
         `style-src 'self' 'nonce-${nonce}'`,
         "style-src-attr 'unsafe-inline'",
-        'img-src data: blob:',
-        'font-src data: blob:',
-        'media-src data: blob:',
+        `img-src data: blob: ${blobs}`,
+        `font-src data: blob: ${blobs}`,
+        `media-src data: blob: ${blobs}`,
         "connect-src 'self'",
         'frame-src blob:',
         "object-src 'none'",
@@ -370,6 +427,23 @@ export default {
     if (method === 'GET' && (path === '/' || path === '/login')) {
       const shell = await env.ASSETS.fetch(new URL('/index.html', req.url));
       return new Response(shell.body, { status: shell.status, headers: { ...secHeaders(), 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Frame-Options': 'DENY', 'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'" } });
+    }
+
+    const newBlob = /^\/api\/blobs\/([^/]+)$/.exec(path);
+    if (newBlob && (method === 'PUT' || method === 'HEAD')) {
+      const actor = await identity(req, env);
+      if (!actor.legacy && !actor.user) return json({ error: 'Unauthorized' }, 401);
+      const sha = newBlob[1]!, reg = registry(env), who = principal(actor);
+      return withCors(await putBlob(req, env, sha, {
+        known: async () => (await reg.allowedBlobs('', [who], [sha])).length > 0,
+        record: () => reg.recordUpload(sha, who),
+      }));
+    }
+
+    const blobLink = /^\/b\/([A-Za-z0-9_-]{1,64})\/([0-9a-f]{64})$/.exec(path);
+    if (blobLink && (method === 'GET' || method === 'HEAD')) {
+      const reg = registry(env);
+      return getBlob(req, env, blobLink[1]!, blobLink[2]!, async (id, sha) => (await reg.resolve(id)) === id && reg.hasBlob(id, sha));
     }
 
     if (path === '/api/artifacts') {

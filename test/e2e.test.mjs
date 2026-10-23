@@ -7,8 +7,9 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
-import { randomBytes } from 'node:crypto';
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
+import { Artifact, createArtifact } from '../public/client.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -145,6 +146,91 @@ test('multi-file asset updates, history and sync remain usable', async () => {
   assert.deepEqual(bundle.json.files, { ...files, 'index.html': b64('<h1>after asset sync</h1>') });
 });
 
+test('blobs: upload, commit, signed links, ranges, sharing and cleanup', async () => {
+  const bytes = randomBytes(300000);
+  const sha = createHash('sha256').update(bytes).digest('hex');
+  const put = (path, body, auth = owner) => fetch(base + path, { method: 'PUT', headers: { Authorization: `Bearer ${auth}`, 'Content-Type': 'image/png' }, body });
+  const head = path => fetch(base + path, { method: 'HEAD', headers: { Authorization: `Bearer ${owner}` } });
+  const pointer = `artifact-blob 1\nsha256 ${sha}\nsize ${bytes.length}\ntype image/png\n`;
+
+  assert.equal((await fetch(`${base}/api/blobs/${sha}`, { method: 'PUT', body: bytes })).status >= 400, true, 'anonymous upload refused');
+  assert.equal((await put(`/api/blobs/${'0'.repeat(64)}`, bytes)).status, 400, 'bytes must match their name');
+  assert.equal((await head(`/api/blobs/${'0'.repeat(64)}`)).status, 404, 'a refused upload leaves nothing');
+  const missing = await api('/api/artifacts', { method: 'POST', bearer: owner, body: { files: { 'index.html': b64('<img src="p.png">'), 'p.png': b64(pointer) } } });
+  assert.equal(missing.status, 400);
+  assert.equal(missing.json.code, 'missing_blob');
+  assert.deepEqual(missing.json.missing, ['p.png']);
+
+  assert.equal((await put(`/api/blobs/${sha}`, bytes)).status, 201);
+  assert.equal((await put(`/api/blobs/${sha}`, bytes)).status, 200, 'a second upload of the same bytes is a no-op');
+  const a = await create({ 'index.html': b64('<img src="p.png">'), 'p.png': b64(pointer) });
+
+  const bundle = await api(`/api/artifacts/${a.id}/bundle`, { token: a.read });
+  const link = bundle.json.blobs['p.png'];
+  assert.equal(link.sha256, sha);
+  assert.equal(fromB64(bundle.json.files['p.png']), pointer, 'Fossil holds the pointer');
+  const got = await fetch(base + link.url);
+  assert.equal(got.status, 200);
+  assert.equal(got.headers.get('content-type'), 'image/png');
+  assert.ok(Buffer.from(await got.arrayBuffer()).equals(bytes));
+  const part = await fetch(base + link.url, { headers: { Range: 'bytes=100-199' } });
+  assert.equal(part.status, 206);
+  assert.equal(part.headers.get('content-range'), `bytes 100-199/${bytes.length}`);
+  assert.ok(Buffer.from(await part.arrayBuffer()).equals(bytes.subarray(100, 200)));
+  const tampered = link.url.replace(/sig=(.)/, (m, c) => `sig=${c === 'A' ? 'B' : 'A'}`);
+  assert.equal((await fetch(base + tampered)).status, 403, 'a changed signature is refused');
+  const expired = link.url.replace(/exp=\d+/, 'exp=1');
+  assert.equal((await fetch(base + expired)).status, 403, 'an expired link is refused');
+
+  const readUpload = await fetch(`${base}/api/artifacts/${a.id}/blobs/${sha}`, { method: 'PUT', headers: { Authorization: `Token ${a.read}` }, body: bytes });
+  assert.equal(readUpload.status, 403, 'the read link cannot upload');
+
+  // The shared client turns binary files into blobs on its own: create, then update with the edit token.
+  const b = await createArtifact(base, owner, { title: 'Blob client', files: { 'index.html': '<img src="same.png">', 'same.png': new Uint8Array(bytes) } });
+  const art = new Artifact(base, b.id, tokenOf(b.editUrl));
+  const other = randomBytes(5000);
+  const { tip } = await art.info();
+  await art.publish(tip, { 'clip.mp4': new Uint8Array(other) }, 'Add a clip');
+  const bb = await art.bundle();
+  assert.equal(bb.blobs['same.png'].sha256, sha, 'identical bytes are stored once');
+  assert.ok(Buffer.from(await art.blob(bb.blobs['clip.mp4'])).equals(other));
+
+  // Knowing a hash isn't enough: an artifact that never had the bytes can't point at them.
+  const otherSha = bb.blobs['clip.mp4'].sha256;
+  const c = await create({ 'index.html': b64('<p>c</p>') });
+  const cTip = (await api(`/api/artifacts/${c.id}`, { token: c.read })).json.tip;
+  const stolen = `artifact-blob 1\nsha256 ${otherSha}\nsize ${other.length}\ntype video/mp4\n`;
+  const steal = await api(`/api/artifacts/${c.id}`, { method: 'PUT', token: c.write, body: { parent: cTip, files: { 'v.mp4': b64(stolen) } } });
+  assert.equal(steal.status, 400, steal.text);
+  assert.equal(steal.json.code, 'missing_blob');
+  assert.equal((await fetch(`${base}/api/artifacts/${c.id}/blobs/${otherSha}`, { method: 'HEAD', headers: { Authorization: `Token ${c.write}` } })).status, 404,
+    "HEAD doesn't reveal blobs the caller hasn't uploaded");
+  const cArt = new Artifact(base, c.id, c.write);
+  await cArt.publish(cTip, { 'v.mp4': new Uint8Array(other) }, 'Upload the bytes themselves');
+  assert.ok(Buffer.from(await cArt.blob((await cArt.bundle()).blobs['v.mp4'])).equals(other), 'with the bytes, the same blob is shared');
+  await cArt.remove();
+
+  // A blob lives as long as some artifact points at it.
+  assert.equal((await api(`/api/artifacts/${a.id}`, { method: 'DELETE', token: a.write })).status, 204);
+  assert.equal((await fetch(base + link.url)).status, 403, "a deleted artifact's links stop working");
+  assert.equal((await head(`/api/blobs/${sha}`)).status, 200, 'still used by the second artifact');
+  await art.remove();
+  assert.equal((await head(`/api/blobs/${sha}`)).status, 404, 'deleted with its last artifact');
+
+  // The CLI: a binary file goes to R2, and read --out brings back the real bytes.
+  const dir = join(work, 'blob-site');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'index.html'), '<!doctype html><img src="photo.webp">');
+  writeFileSync(join(dir, 'photo.webp'), bytes);
+  const pub = cli('publish', '--json', '--no-clipboard', dir);
+  assert.equal(pub.code, 0, pub.out);
+  const out = JSON.parse(pub.out);
+  const back = join(work, 'blob-back');
+  assert.equal(cli('read', out.viewerUrl, '--out', back).code, 0);
+  assert.ok(readFileSync(join(back, 'photo.webp')).equals(bytes));
+  assert.equal(cli('delete', out.editUrl).code, 0);
+});
+
 test('access control', async () => {
   const a = await create({ 'index.html': b64('<p>private</p>') });
   assert.equal((await api(`/api/artifacts/${a.id}`)).status, 404, 'anonymous');
@@ -239,6 +325,8 @@ test('viewer shell', async () => {
   const nonce = /'nonce-([^']+)'/.exec(csp)?.[1];
   assert.ok(nonce, csp);
   assert.ok((await r.text()).includes(`content="${nonce}"`));
+  assert.match(csp, /script-src [^;]*'wasm-unsafe-eval'/, 'pages may run their own WebAssembly');
+  assert.match(csp, /connect-src 'self'/, 'but still connect nowhere else');
 });
 
 test('CLI', async () => {

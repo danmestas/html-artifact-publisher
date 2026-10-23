@@ -13,7 +13,9 @@ test('production deployment gates reject missing owner, unsafe origins, invalid 
     const fake=join(dir,'npx');
     writeFileSync(fake,`#!/usr/bin/env node
 import fs from 'node:fs';
-const args=process.argv.slice(2),path=args[args.indexOf('--secrets-file')+1];
+const args=process.argv.slice(2);
+if(args[1]==='r2'){fs.appendFileSync(process.env.DEPLOY_TEST_MARKER+'.r2',args.join(' ')+'\\n');process.exit(0);}
+const path=args[args.indexOf('--secrets-file')+1];
 const secrets=JSON.parse(fs.readFileSync(path,'utf8'));
 fs.writeFileSync(process.env.DEPLOY_TEST_MARKER,JSON.stringify({args,path,mode:fs.statSync(path).mode&511,keys:Object.keys(secrets),owner:secrets.OWNER_EMAIL}));
 `);
@@ -33,5 +35,6 @@ fs.writeFileSync(process.env.DEPLOY_TEST_MARKER,JSON.stringify({args,path,mode:f
     assert.ok(call.args.includes('EMAIL_FROM:artifacts@example.com'));
     assert.ok(call.args.includes('TEST_MAIL_TRANSPORT:'));
     assert.equal(existsSync(call.path),false,'secret scratch file must be removed');
+    assert.match(readFileSync(marker+'.r2','utf8'),/r2 bucket info html-artifact-publisher-blobs/,'the blob bucket is checked before deploying');
   } finally {rmSync(dir,{recursive:true,force:true});}
 });

@@ -226,10 +226,11 @@ of the part that matters would serve better). The page can't reach the network, 
 
 - **Runs in the page:** vendor the library's classic (UMD) build as a file in the published
   directory (`<script src="vendor/lib.min.js">`; the viewer inlines it). It must not need
-  `eval`, `new Function`, WebAssembly or network access, and its file must stay under about
-  1.99 MB compressed. Ship only the build you use. Open the read link and check that it
+  `eval`, `new Function` or network access; WebAssembly is fine if the library accepts the
+  module's bytes (`artifact.bytes(path)`). A file over 256 KB is stored in R2 and
+  fetched before the page runs, so keep it small. Ship only the build you use. Open the read link and check that it
   actually draws before sharing.
-- **Can't run in the page** (for example a Graphviz build that needs WebAssembly): render
+- **Can't run in the page** (for example a build that insists on fetching its own files): render
   to SVG with the tool's own CLI when you write the page, inline the SVG, and replace its
   hard-coded colours with theme tokens. Publish the source next to it (e.g.
   `diagrams/deps.dot`) so it can be edited and re-rendered later.

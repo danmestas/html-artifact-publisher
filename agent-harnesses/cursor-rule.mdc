@@ -17,7 +17,7 @@ If either is missing, tell the user what to export and stop.
 
 ## Steps
 
-1. Confirm the file starts with `<!doctype html` or `<html`, and is self-contained (the viewer blocks all network requests). Files over about 1.99 MB compressed are refused.
+1. Confirm the file starts with `<!doctype html` or `<html`, and is self-contained (the viewer blocks all network requests). Images, video, audio, fonts, PDFs and other binary files, and any file over 256 KB, are stored in R2 instead of Fossil (the CLI uploads them automatically, up to 100 MB each); smaller text files must compress under about 1.99 MB.
 2. Run (a directory publishes a multi-file page):
    ```bash
    node scripts/publish-html.mjs --json --title "<title>" <file.html | dir>

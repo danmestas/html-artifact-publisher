@@ -29,8 +29,12 @@ The CLI warns about any `http(s)` URL it finds; treat that warning as an error.
   (see Typography).
 - A library is a vendored file in the directory, loaded with a plain
   `<script src>`, using its UMD/global build. It must not need `eval`,
-  `new Function`, string `setTimeout`, or WebAssembly (all blocked). Skip
-  template compilers and expression evaluators. Most pages need no library.
+  `new Function` or string `setTimeout` (all blocked). Skip template
+  compilers and expression evaluators. Most pages need no library.
+- WebAssembly works: ship the `.wasm` file in the directory and hand its
+  bytes to the library with `await artifact.bytes('vendor/x.wasm')` (the page
+  can't `fetch` it). The same goes for data files such as a SQLite database.
+  See **artifact-runtime**, "WebAssembly and data files".
 
 **What the viewer does not resolve.** ES module `import` of relative files,
 `fetch()`/XHR of relative files, `srcset`, CSS `@import`, `<iframe src>`, and
@@ -58,9 +62,11 @@ navigate the viewer, read the URL fragment, or reach the parent. Camera, mic,
 geolocation and clipboard-read are unavailable; take files through
 `<input type="file">` instead.
 
-**Size.** Each file must compress (zlib) to under about 1.99 MB, and one
-publish request is at most 10 MB. Optimize images, subset fonts, split large
-data into separate files, and do not vendor a large library for a small job.
+**Size.** Images, video, audio, fonts and other binary files, and any file
+over 256 KB, are stored outside Fossil (in R2) and load through signed links;
+the CLI handles this, up to 100 MB per file. Reference them by relative path as
+usual. Still optimize images, subset fonts and don't vendor a large library for
+a small job: readers download every byte.
 
 **Write a full document.** The viewer renders your entry file as is: include
 `<!doctype html>`, `<meta charset="utf-8">`, a viewport meta, and a `<title>`.

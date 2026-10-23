@@ -23,7 +23,10 @@ export class Registry extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS grants (artifact_id TEXT NOT NULL, user_id TEXT NOT NULL, permission TEXT NOT NULL, PRIMARY KEY(artifact_id,user_id));
       CREATE TABLE IF NOT EXISTS stars (artifact_id TEXT NOT NULL, user_id TEXT NOT NULL, PRIMARY KEY(artifact_id,user_id));
       CREATE TABLE IF NOT EXISTS activity (id TEXT PRIMARY KEY, actor_id TEXT NOT NULL, action TEXT NOT NULL, artifact_id TEXT, artifact_title TEXT, created_at INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS rate_limits (key TEXT PRIMARY KEY, count INTEGER NOT NULL, expires INTEGER NOT NULL);`);
+      CREATE TABLE IF NOT EXISTS rate_limits (key TEXT PRIMARY KEY, count INTEGER NOT NULL, expires INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS blob_refs (sha TEXT NOT NULL, artifact_id TEXT NOT NULL, PRIMARY KEY(sha,artifact_id));
+      CREATE INDEX IF NOT EXISTS blob_refs_artifact ON blob_refs(artifact_id,sha);
+      CREATE TABLE IF NOT EXISTS blob_uploads (sha TEXT NOT NULL, principal TEXT NOT NULL, PRIMARY KEY(sha,principal));`);
     const cols = sql.exec<{ name: string }>('PRAGMA table_info(artifacts)').toArray();
     if (!cols.some(c => c.name === 'owner_id')) sql.exec('ALTER TABLE artifacts ADD COLUMN owner_id TEXT');
     if (!cols.some(c => c.name === 'archived')) sql.exec('ALTER TABLE artifacts ADD COLUMN archived INTEGER NOT NULL DEFAULT 0');
@@ -66,11 +69,40 @@ export class Registry extends DurableObject<Env> {
   async touch(id: string, tip: string, title?: string): Promise<void> {
     this.ctx.storage.sql.exec('UPDATE artifacts SET tip = ?, updated_at = ?, title = COALESCE(?,title) WHERE id = ?',tip,now(),title ?? null,id);
   }
+  /** Delete an artifact's listing, and the R2 blobs no other artifact points at. */
   async remove(id: string): Promise<void> {
-    this.ctx.storage.transactionSync(() => {
-      for (const table of ['grants','stars']) this.ctx.storage.sql.exec(`DELETE FROM ${table} WHERE artifact_id = ?`,id);
-      this.ctx.storage.sql.exec('DELETE FROM artifacts WHERE id = ?',id);
+    const orphans = this.ctx.storage.transactionSync(() => {
+      const sql = this.ctx.storage.sql;
+      for (const table of ['grants','stars']) sql.exec(`DELETE FROM ${table} WHERE artifact_id = ?`,id);
+      sql.exec('DELETE FROM artifacts WHERE id = ?',id);
+      const shas = sql.exec<{ sha: string }>('SELECT sha FROM blob_refs WHERE artifact_id = ?',id).toArray().map(r => r.sha);
+      sql.exec('DELETE FROM blob_refs WHERE artifact_id = ?',id);
+      sql.exec('DELETE FROM blob_uploads WHERE principal = ?',`artifact:${id}`);
+      return shas.filter(sha => !sql.exec('SELECT 1 FROM blob_refs WHERE sha = ? LIMIT 1',sha).toArray().length);
     });
+    for (let i = 0; i < orphans.length; i += 1000) await this.env.BLOBS.delete(orphans.slice(i, i + 1000).map(sha => `b/${sha}`));
+  }
+  /** Record that artifact `id` points at these blobs (idempotent). */
+  async refBlobs(id: string, shas: string[]): Promise<void> {
+    for (const sha of new Set(shas)) this.ctx.storage.sql.exec('INSERT OR IGNORE INTO blob_refs VALUES (?,?)',sha,id);
+  }
+  /** `principal` (artifact:<id>, user:<id> or owner) sent these exact bytes. */
+  async recordUpload(sha: string, principal: string): Promise<void> {
+    this.ctx.storage.sql.exec('INSERT OR IGNORE INTO blob_uploads VALUES (?,?)',sha,principal);
+  }
+  /**
+   * The blobs among `shas` that artifact `id` may point at: ones it already
+   * points at, or ones one of `principals` uploaded. Knowing a hash is not
+   * enough to reach someone else's bytes.
+   */
+  async allowedBlobs(id: string, principals: string[], shas: string[]): Promise<string[]> {
+    const sql = this.ctx.storage.sql;
+    return [...new Set(shas)].filter(sha =>
+      sql.exec('SELECT 1 FROM blob_refs WHERE sha = ? AND artifact_id = ?',sha,id).toArray().length ||
+      principals.some(p => sql.exec('SELECT 1 FROM blob_uploads WHERE sha = ? AND principal = ?',sha,p).toArray().length));
+  }
+  async hasBlob(id: string, sha: string): Promise<boolean> {
+    return this.ctx.storage.sql.exec('SELECT 1 FROM blob_refs WHERE sha = ? AND artifact_id = ?',sha,id).toArray().length > 0;
   }
   async list(limit: number): Promise<Entry[]> {
     return this.ctx.storage.sql.exec<Row>(`SELECT * FROM artifacts WHERE ${LIVE} ORDER BY updated_at DESC LIMIT ?`,now(),limit).toArray().map(toEntry);

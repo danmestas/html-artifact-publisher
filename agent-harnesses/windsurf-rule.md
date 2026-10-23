@@ -15,7 +15,7 @@ If either variable is absent, tell the user what to set and stop. Do not attempt
 
 ## Steps
 
-1. Confirm the HTML file starts with `<!doctype html` or `<html`. If it does not, explain that the publisher only accepts standalone HTML documents. Keep it self-contained: the viewer blocks all network requests, so external URLs will not load. Files over about 1.99 MB compressed are refused.
+1. Confirm the HTML file starts with `<!doctype html` or `<html`. If it does not, explain that the publisher only accepts standalone HTML documents. Keep it self-contained: the viewer blocks all network requests, so external URLs will not load. Images, video, audio, fonts, PDFs and other binary files, and any file over 256 KB, are stored in R2 instead of Fossil (the CLI uploads them automatically, up to 100 MB each); smaller text files must compress under about 1.99 MB.
 
 2. Run the publisher script in machine-readable mode:
    ```bash

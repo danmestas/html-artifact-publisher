@@ -39,6 +39,10 @@
 
   "send_email": [{ "name": "EMAIL" }],
 
+  // Images, video and other large or binary files, by SHA-256 (src/blobs.ts).
+  // scripts/deploy.sh creates the bucket if it doesn't exist.
+  "r2_buckets": [{ "binding": "BLOBS", "bucket_name": "html-artifact-publisher-blobs" }],
+
   "vars": {
     // Installation-specific values are supplied by scripts/deploy.sh from Doppler.
     "APP_ORIGIN": "",
@@ -51,6 +55,8 @@
     "DEFAULT_TTL_SECONDS": "604800",
     // Maximum request body in bytes (10 MB)
     "MAX_PAYLOAD_BYTES": "10485760",
+    // Maximum size of one blob upload in bytes (Workers accept request bodies up to 100 MB)
+    "MAX_BLOB_BYTES": "100000000",
     // Optional agent wake-up through notify (see README).
     "NOTIFY_URL": "",
     "NOTIFY_AGENT": "",

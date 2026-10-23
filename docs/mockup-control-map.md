@@ -18,7 +18,7 @@ The source prototype is the interactive Artifact Library Preview. Its later mobi
 | Private / Shared by you / Can view / Can edit | Visible access signifiers based on actual ownership and grants; instance-owner authority is not misrepresented as creator ownership. |
 | Star / Unstar | Persistent per-account toggle; not a shared mock-data flag. |
 | Manage access and recipient selector | Creator/instance owner can add active members, choose read/write, change or remove grants. The instance owner's inherent access is not a removable grant. |
-| Publish artifact | Real HTML upload; CLI guidance and personal credentials also available. Upload errors allow correction without losing the flow. |
+| Publish artifact | Real upload of an HTML page alone, with several files, or as a folder (images and data files go to R2); CLI guidance and personal credentials also available. Upload errors allow correction without losing the flow. |
 | People & invitations | Owner-only membership management, including owner/member/pending states. |
 | Invite someone | Real member invitation by email. A member-only role chooser may be omitted because there is no alternate invitation role. |
 | Every artifact | Owner-only inventory across accounts, including private and archived work. |

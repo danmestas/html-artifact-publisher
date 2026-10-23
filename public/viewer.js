@@ -3,9 +3,10 @@
 // in the sandboxed iframe. The page inside gets a small `window.artifact` API
 // over postMessage; the access token never enters the iframe.
 
-import { Artifact, ConflictError, parseFragment, fragment } from './client.js';
+import { Artifact, ConflictError, parseFragment, fragment, readFileList } from './client.js';
 import { renderDiagrams, renderPikchr } from './diagrams.js';
 import { embedFonts } from './fonts.js';
+import { zip } from './zip.js';
 
 const $ = id => document.getElementById(id);
 const NONCE = document.querySelector('meta[name="artifact-nonce"]')?.content ?? '';
@@ -227,6 +228,7 @@ function renderChrome() {
   $('role').textContent = writer ? 'Can edit' : 'View only';
   $('role').className = `pill ${writer ? 'write' : 'read'}`;
   $('deleteBtn').hidden = !writer || (!link.token && !info.canManage);
+  $('uploadFilesBtn').hidden = $('uploadFolderBtn').hidden = !writer;
   $('backLibrary').hidden = !!link.token;
 
   $('oldStrip').hidden = latest;
@@ -358,6 +360,56 @@ $('deleteBtn').addEventListener('click', async () => {
   }
 });
 
+// Editors add or replace files: a new version on top of the latest, keeping
+// the files they didn't choose. A folder's files keep their paths inside it.
+for (const [btn, input] of [['uploadFilesBtn', 'uploadFiles'], ['uploadFolderBtn', 'uploadFolder']]) {
+  $(btn).addEventListener('click', () => { closePopovers(); $(input).value = ''; $(input).click(); });
+  $(input).addEventListener('change', async () => {
+    const chosen = await readFileList($(input).files);
+    const paths = Object.keys(chosen);
+    if (!paths.length) return;
+    const what = paths.length === 1 ? paths[0] : `${paths.length} files`;
+    notice(`Uploading ${what}…`);
+    try {
+      await art.publish(info.tip, chosen, `Upload ${what}`);
+      if (link.at) location.hash = fragment({ token: link.token });
+      else await reload(true);
+      notice(`Uploaded ${what}.`);
+    } catch (e) {
+      notice(e instanceof ConflictError
+        ? 'Someone published while you were looking. Open the latest version and upload again.'
+        : `Could not upload: ${e.message}`);
+    }
+  });
+}
+
+// Every file of the version shown, with the real bytes of images and other blobs.
+$('downloadBtn').addEventListener('click', async () => {
+  closePopovers();
+  notice('Preparing the download…');
+  try {
+    const files = {};
+    for (const [path, bytes] of Object.entries(shown.files)) files[path] = shown.blobs?.[path] ? await art.blob(shown.blobs[path]) : bytes;
+    const name = (info.title || 'artifact').replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '') || 'artifact';
+    const a = el('a', { href: URL.createObjectURL(zip(files)), download: `${name}-${shortId(shown.checkin)}.zip` });
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 60_000);
+    notice(`Downloaded ${a.download}.`);
+  } catch (e) {
+    notice(`Could not download: ${e.message}`);
+  }
+});
+
+/** A short message in the toast, without its "Show it" button. One still in progress (…) stays. */
+let noticeTimer;
+function notice(text) {
+  clearTimeout(noticeTimer);
+  $('toastText').textContent = text;
+  $('toastShow').hidden = true;
+  $('toast').hidden = false;
+  if (!text.endsWith('…')) noticeTimer = setTimeout(() => { $('toast').hidden = true; }, 6000);
+}
+
 // ─── The page's window.artifact API ──────────────────────────────────────────
 
 const ops = {
@@ -420,6 +472,8 @@ async function watch() {
     if ((await art.tip()) === info.tip) return;
     const by = (await art.info()).timeline[0]?.user;
     $('toastText').textContent = by ? `${by} published a new version` : 'A new version was published';
+    clearTimeout(noticeTimer);
+    $('toastShow').hidden = false;
     $('toast').hidden = false;
   } catch { /* offline: try again next time */ }
 }

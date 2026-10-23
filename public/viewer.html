@@ -49,6 +49,9 @@
       </button>
       <div id="moreMenu" class="popover more" role="menu" hidden>
         <button id="openLatest" type="button" role="menuitem">Open the latest version</button>
+        <button id="uploadFilesBtn" type="button" role="menuitem" hidden>Upload files…</button>
+        <button id="uploadFolderBtn" type="button" role="menuitem" hidden>Upload a folder…</button>
+        <button id="downloadBtn" type="button" role="menuitem">Download this version (.zip)</button>
         <button id="deleteBtn" class="danger" type="button" role="menuitem" hidden>Delete artifact</button>
       </div>
     </div>
@@ -70,6 +73,9 @@
   sandbox="allow-scripts allow-forms allow-modals allow-popups"
   referrerpolicy="no-referrer"
   title="Artifact"></iframe>
+
+<input id="uploadFiles" type="file" multiple hidden>
+<input id="uploadFolder" type="file" webkitdirectory hidden>
 
 <div id="toast" role="status" hidden><span id="toastText"></span><button id="toastShow" type="button">Show it</button></div>
 <script type="module" src="/viewer.js"></script>

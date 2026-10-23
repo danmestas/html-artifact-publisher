@@ -115,16 +115,16 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
     }
     // Publish using actual file chooser/form, including literal hostile title.
     run('set','viewport','390','844'); run('open',base+'/'); wait('.artifact-title');
-    click('#page-action'); wait('#upload-file');
+    click('#page-action'); wait('#upload-files');
     const invalid=join(output,'not-html.txt');writeFileSync(invalid,'Not an HTML upload');
-    run('upload','#upload-file',invalid);run('fill','#upload-title','Invalid upload');
+    run('upload','#upload-files',invalid);run('fill','#upload-title','Invalid upload');
     click('#dialog-body button[type=submit]');wait('#dialog-error:not([hidden])');
-    assert.ok(evaluate('document.getElementById("dialog-error").textContent.includes("Choose an HTML file")'));
+    assert.ok(evaluate('document.getElementById("dialog-error").textContent.includes("Choose an HTML page")'));
     assert.equal(evaluate('document.querySelector("#dialog-body button[type=submit]").disabled'),false);
     run('screenshot',join(output,'upload-error-phone.png'));
     const html=join(output,'upload.html');
     writeFileSync(html,'<!doctype html><h1>Browser upload verified</h1><script>window.fixtureLoaded=true</script>');
-    run('upload','#upload-file',html);
+    run('upload','#upload-files',html);
     run('fill','#upload-title','<img src=x onerror=alert(1)> Browser upload');
     click('#dialog-body button[type=submit]'); run('wait','--fn','!document.getElementById("dialog").open'); run('wait','[aria-busy="false"]');
     assert.equal(evaluate('!!document.querySelector(".artifact-title img")'),false);

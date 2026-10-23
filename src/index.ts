@@ -31,6 +31,7 @@
 
 import { Repo } from './repo';
 import { preview } from './preview';
+import { publicationRoutes } from './publications';
 import { accountRoutes, artifactCaller, csrf, identity, readBody } from './accounts';
 import { Registry } from './registry';
 import { blobLinks, getBlob, missingBlobs, pointersIn, putBlob } from './blobs';
@@ -424,6 +425,8 @@ export default {
     if (path.startsWith('/api/') && !csrf(req)) return json({ error: 'Matching Origin required' }, 403);
     const accountResponse = await accountRoutes(req, env);
     if (accountResponse) return accountResponse;
+    const publicationResponse = await publicationRoutes(req, env);
+    if (publicationResponse) return withCors(publicationResponse);
     if (method === 'GET' && (path === '/' || path === '/login')) {
       const shell = await env.ASSETS.fetch(new URL('/index.html', req.url));
       return new Response(shell.body, { status: shell.status, headers: { ...secHeaders(), 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Frame-Options': 'DENY', 'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'" } });

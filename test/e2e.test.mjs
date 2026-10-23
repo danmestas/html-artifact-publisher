@@ -349,8 +349,12 @@ test('pages with Pikchr: broken diagrams are refused, renderer and fonts are ser
   assert.equal(cli('delete', JSON.parse(good.out).editUrl).code, 0);
 
   for (const path of ['/pikchr/worker.js', '/pikchr/pikchr.js', '/pikchr/pikchr.wasm', '/fonts/instrument-sans.woff2', '/diagrams.js', '/fonts.js']) {
-    const r = await fetch(base + path);
-    assert.equal(r.status, 200, path);
-    await r.arrayBuffer();
+    try {
+      const r = await fetch(base + path);
+      assert.equal(r.status, 200, path);
+      await r.arrayBuffer();
+    } catch (cause) {
+      throw new Error(`Asset fetch failed for ${path} (wrangler exit=${server.exitCode}, signal=${server.signalCode})`, { cause });
+    }
   }
 });

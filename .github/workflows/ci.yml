@@ -115,14 +115,16 @@ jobs:
           fi
           set -o pipefail
           doppler run -- sh scripts/deploy.sh | tee deploy.log
-          url=$(grep -oE 'https://[A-Za-z0-9.-]+\.workers\.dev' deploy.log | head -1)
+          url=$(grep '^APP_URL=' deploy.log | cut -d= -f2-)
+          public_url=$(grep '^PUBLIC_URL=' deploy.log | cut -d= -f2-)
+          echo "public_url=$public_url" >> "$GITHUB_OUTPUT"
           echo "url=$url" >> "$GITHUB_OUTPUT"
 
       - name: Smoke test
         if: steps.deploy.outputs.url != ''
         run: |
           for i in 1 2 3 4 5; do
-            curl -sSf "${{ steps.deploy.outputs.url }}/healthz" && exit 0
+            if curl -sSf "${{ steps.deploy.outputs.url }}/healthz" && curl -sSf "${{ steps.deploy.outputs.public_url }}/healthz"; then exit 0; fi
             sleep 5
           done
           exit 1

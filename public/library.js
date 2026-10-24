@@ -14,6 +14,7 @@ const VIEWS = {
   people: ['People & invitations', 'Invite people to create their own library.'],
   activity: ['Activity', 'Recent administrative changes in this instance.'],
   credentials: ['API credentials', 'Publish from the CLI using a credential tied to your account.'],
+  publications: ['Published links', 'Manage public copies of exact artifact versions, separately from your private library.'],
 };
 let user = null;
 let people = [];
@@ -26,6 +27,7 @@ let page = 1;
 let toastTimer;
 let searchTimer;
 let loginToken = '';
+let publicationCleanupResult = '';
 let preferences = {};
 try { preferences = JSON.parse(localStorage.getItem('artifact-library-preferences') || '{}') || {}; } catch { /* Optional per-browser preferences. */ }
 let layout = preferences.layout === 'list' ? 'list' : 'grid';
@@ -154,6 +156,7 @@ $('logout').addEventListener('click', async () => {
     await api('/api/auth/logout', { method: 'POST' });
     user = null;
     people = [];
+    publicationCleanupResult = '';
     ++loadSequence;
     $('content').replaceChildren();
     $('dialog').close();
@@ -284,12 +287,13 @@ async function loadPage() {
   $('owner-filter').hidden = !inventory;
   $('status-filter').hidden = !inventory;
   $('admin-notice').hidden = !inventory;
+  $('privacy-note').hidden = view === 'publications';
   clearPreviews();
   $('sort').value = state.sort;
   $('search').value = state.q;
   $('status-filter').value = state.status;
   document.querySelectorAll('[data-layout]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.layout === layout)));
-  const action = library && view !== 'archived' ? ['Publish artifact', openUpload] : view === 'people' ? ['Invite someone', openInvite] : view === 'credentials' ? ['Create credential', openCreateCredential] : null;
+  const action = library && view !== 'archived' ? ['Publish artifact', openUpload] : view === 'people' ? ['Invite someone', openInvite] : view === 'credentials' ? ['Create credential', openCreateCredential] : view === 'publications' && user.role === 'owner' ? ['Clean up unpublished files', openPublicationCleanup] : null;
   $('page-action').hidden = !action;
   $('page-action').onclick = action ? action[1] : null;
   $('page-action').textContent = action?.[0] || '';
@@ -321,6 +325,18 @@ async function loadPage() {
       $('pagination').hidden = !state.cursor && !nextCursor;
       $('page-number').textContent = `Page ${page}${state.cursor && !previousCursors.length ? ' (linked page)' : ''}`;
       $('result-status').textContent = `${data.artifacts.length} of ${data.total} artifacts · ${state.sort === 'name' ? 'Name A–Z' : 'Recently updated first'}`;
+    } else if (view === 'publications') {
+      const p = new URLSearchParams();
+      if (state.cursor) p.set('cursor', state.cursor);
+      const data = await api('/api/publications' + (p.size ? `?${p}` : ''));
+      if (seq !== loadSequence) return;
+      renderPublications(data.publications);
+      nextCursor = data.nextCursor;
+      $('previous').disabled = !state.cursor;
+      $('next').disabled = !nextCursor;
+      $('pagination').hidden = !state.cursor && !nextCursor;
+      $('page-number').textContent = `Page ${page}${state.cursor && !previousCursors.length ? ' (linked page)' : ''}`;
+      $('result-status').textContent = `${data.publications.length} published link${data.publications.length === 1 ? '' : 's'} on this page · ${user.role === 'owner' ? 'Every account' : 'Created by you'}`;
     } else if (view === 'people') {
       const users = await loadPeople();
       if (seq !== loadSequence) return;
@@ -449,6 +465,78 @@ function renderArtifacts(items, inventory) {
     ...['Artifact / access', 'Owner', 'Visibility / status', 'Updated', ''].map(textContent => node('span', { textContent })));
   $('content').replaceChildren(...(grid ? [list] : [headings, list]));
   loadPreviews();
+}
+function publicationUrl(value) {
+  try {
+    const url = new URL(value);
+    return ['https:', 'http:'].includes(url.protocol) && !url.username && !url.password ? url.href : null;
+  } catch { return null; }
+}
+function publicationSize(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) return 'Unknown size';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+function renderPublications(publications) {
+  const notice = node('p', { className: 'notice', textContent: 'Public files are independent copies. Deleting or expiring a private source does not unpublish them. Use this screen to unpublish a link and delete its copied files; the original artifact and its history stay untouched.' });
+  const feedback = node('p', { className: 'notice', role: 'status', textContent: publicationCleanupResult, hidden: !publicationCleanupResult });
+  if (!publications.length) {
+    $('content').replaceChildren(notice, feedback, empty('No published links on this page', state.cursor ? 'Go back to an earlier page to find published links.' : 'Public copies published from an artifact’s viewer will appear here.'));
+    return;
+  }
+  const list = node('div', { className: 'record-list publication-list', role: 'list' });
+  for (const item of publications) {
+    const title = item.title || 'Untitled artifact';
+    const version = String(item.checkin || '');
+    const status = node('span', { className: `badge publication-status ${item.status === 'failed' ? 'publication-failed' : ''}`, textContent: { building: 'Building', live: 'Live', failed: 'Failed', deleted: 'Unpublished' }[item.status] || 'Unavailable' });
+    const details = node('div', { className: 'publication-details' },
+      node('h2', { textContent: title }), status,
+      node('div', { className: 'publication-meta' },
+        node('span', {}, 'Source version ', node('code', { textContent: version ? version.slice(0, 12) : 'Unknown', title: version })),
+        node('span', { textContent: `${item.files} file${item.files === 1 ? '' : 's'} · ${publicationSize(item.bytes)}` }),
+        node('time', { dateTime: item.createdAt, textContent: `Published ${dateText(item.createdAt)}`, title: item.createdAt })),
+      user.role === 'owner' ? node('p', { className: 'publication-owner', textContent: `Owner: ${item.ownerName || item.ownerId}` }) : null);
+    const actions = node('div', { className: 'record-actions' }, node('a', {
+      className: 'button-link', href: `${viewerUrl({ id: item.artifactId })}#@${encodeURIComponent(version)}`, textContent: 'View source version',
+    }));
+    const url = item.status === 'live' ? publicationUrl(item.url) : null;
+    if (url) {
+      details.append(node('a', { className: 'publication-url', href: url, target: '_blank', rel: 'noopener noreferrer', textContent: url, ariaLabel: `Open public link for ${title}` }));
+      const copy = button('Copy public link', async () => {
+        copy.disabled = true;
+        try { await navigator.clipboard.writeText(url); notify('Public link copied.'); }
+        catch { notify('Clipboard unavailable. Select and copy the public link.'); }
+        finally { copy.disabled = false; }
+      });
+      actions.prepend(copy);
+    } else {
+      details.append(node('p', { className: 'publication-hint', textContent: item.status === 'building' ? 'Preparing copied files. Refresh to check progress.' : item.status === 'failed' ? 'Publishing failed. No public link is available.' : item.status === 'deleted' ? 'This public link has been unpublished.' : 'No public link is available.' }));
+    }
+    if (item.status === 'failed' && item.error) details.append(node('p', { className: 'error', textContent: item.error }));
+    if (item.status !== 'deleted') actions.append(button(item.status === 'live' ? 'Unpublish…' : 'Remove publication…', () => openUnpublish(item), 'danger'));
+    list.append(node('article', { className: 'record publication-record', role: 'listitem' }, details, actions));
+  }
+  const refresh = button('Refresh published links', loadPage);
+  $('content').replaceChildren(notice, feedback, list, node('div', { className: 'actions' }, refresh));
+}
+function openUnpublish(item) {
+  const live = item.status === 'live';
+  confirmAction(live ? 'Unpublish this public link?' : 'Remove this publication?',
+    live ? `Unpublish “${item.title || 'Untitled artifact'}” and delete its copied public files? The public link will stop working. The original artifact and its history stay untouched. Copies already downloaded by others cannot be recalled.`
+      : `Remove the ${item.status} publication for “${item.title || 'Untitled artifact'}” and delete any copied public files? The original artifact and its history stay untouched.`,
+    live ? 'Unpublish and delete copied files' : 'Remove publication', async () => {
+      await api(`/api/publications/${encodeURIComponent(item.id)}`, { method: 'DELETE' });
+      notify('Publication removed. The public link is unavailable; the original artifact and history are unchanged.');
+    }, true);
+}
+function openPublicationCleanup() {
+  if (user?.role !== 'owner') return;
+  confirmAction('Clean up unpublished files?', 'Delete leftover copied files from failed or unpublished records, and builds older than one hour. Live public snapshots are never deleted. Original artifacts and their history stay untouched.', 'Clean up unpublished files', async () => {
+    const result = await api('/api/publications/cleanup', { method: 'POST', body: {} });
+    publicationCleanupResult = `Cleaned ${result.cleaned} publication${result.cleaned === 1 ? '' : 's'}.${result.remaining ? ' More publication records remain to check. Run cleanup again to continue.' : ' Cleanup complete.'}`;
+    notify(publicationCleanupResult);
+  });
 }
 function renderPeople(users) {
   const list = node('div', { className: 'record-list' });
@@ -669,7 +757,7 @@ async function openTransfer(item) {
 }
 function openDelete(item) {
   const form = node('form');
-  form.append(node('p', { textContent: `Permanently delete “${item.title}” and its entire history? All links will stop working. This cannot be undone.` }));
+  form.append(node('p', { textContent: `Permanently delete “${item.title}” and its entire history? Private source links will stop working. Independent public copies remain published; unpublish them from Published links. This cannot be undone.` }));
   const input = formField(form, 'Type DELETE to confirm', node('input', { id: 'delete-confirm', required: true, autocomplete: 'off', pattern: 'DELETE' }));
   const cancel = button('Keep artifact', () => $('dialog').close());
   form.append(cancel);

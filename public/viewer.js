@@ -7,6 +7,7 @@ import { Artifact, ConflictError, parseFragment, fragment, readFileList } from '
 import { renderDiagrams, renderPikchr } from './diagrams.js';
 import { embedFonts } from './fonts.js';
 import { zip } from './zip.js';
+import { preparePublication } from './export.js';
 
 const $ = id => document.getElementById(id);
 const NONCE = document.querySelector('meta[name="artifact-nonce"]')?.content ?? '';
@@ -229,6 +230,8 @@ function renderChrome() {
   $('role').className = `pill ${writer ? 'write' : 'read'}`;
   $('deleteBtn').hidden = !writer || (!link.token && !info.canManage);
   $('uploadFilesBtn').hidden = $('uploadFolderBtn').hidden = !writer;
+  $('openLatest').hidden = latest;
+  // The menu always has Download, so the ⋯ button always shows.
   $('backLibrary').hidden = !!link.token;
 
   $('oldStrip').hidden = latest;
@@ -282,7 +285,104 @@ function shareRow(id, label, hint, value, { secret = false } = {}) {
     el('div', { className: 'copy' }, input, copy));
 }
 
+let publications = [];
+let publicationCursor = '';
+let publicationBusy = false;
+let publicationLoading = false;
+
+async function publicationRequest(path, { method = 'GET', body } = {}) {
+  const headers = art.auth ? { Authorization: art.auth } : {};
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  const response = await fetch(path, {
+    method, headers, credentials: 'same-origin', cache: 'no-store',
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!response.ok) {
+    const detail = await response.json().catch(() => null);
+    throw new Error(typeof detail?.error === 'string' ? detail.error : `Publication request failed (HTTP ${response.status}).`);
+  }
+  return response.status === 204 ? null : response.json();
+}
+
+function publicationStatus(message, error = false) {
+  $('publicationStatus').textContent = message;
+  $('publicationStatus').className = error ? 'hint danger' : 'hint';
+}
+
+function renderPublications() {
+  $('publicationList').replaceChildren(...publications.map(publication => {
+    const label = `Version ${shortId(publication.checkin)}`;
+    const hint = `${publication.status} · ${new Date(publication.createdAt).toLocaleDateString()}`;
+    const live = publication.status === 'live' && typeof publication.url === 'string' && publication.url;
+    const row = live ? shareRow(`public-${publication.id}`, label, hint, publication.url)
+      : el('div', { className: 'share-row' }, el('strong', { textContent: label }), el('span', { className: 'hint', textContent: hint }));
+    const actions = el('div', { className: 'publication-actions' });
+    if (live) actions.append(el('a', { textContent: 'Open', href: publication.url, target: '_blank', rel: 'noopener noreferrer' }));
+    const remove = el('button', { type: 'button', className: 'danger', textContent: 'Delete', disabled: publicationBusy });
+    remove.addEventListener('click', async () => {
+      if (publicationBusy || !info.canManage) return;
+      if (!confirm(`Unpublish snapshot ${shortId(publication.checkin)}? Its public link will stop working. The private artifact and history will not change. Copies already downloaded cannot be recalled.`)) return;
+      publicationBusy = true;
+      renderShare();
+      renderPublications();
+      publicationStatus('Deleting public snapshot…');
+      try {
+        await publicationRequest(`/api/publications/${encodeURIComponent(publication.id)}`, { method: 'DELETE' });
+        publications = publications.filter(item => item.id !== publication.id);
+        publicationStatus('Public snapshot deleted. The private artifact is unchanged.');
+      } catch (e) { publicationStatus(e.message, true); }
+      finally { publicationBusy = false; renderShare(); renderPublications(); }
+    });
+    actions.append(remove);
+    row.append(actions);
+    return row;
+  }));
+  if (!publications.length) $('publicationList').append(el('p', { className: 'hint', textContent: publicationLoading ? 'Loading snapshots…' : 'No published snapshots.' }));
+  $('publicationMore').hidden = !publicationCursor;
+  $('publicationMore').disabled = publicationLoading || publicationBusy;
+}
+
+async function loadPublications(append = false) {
+  if (!info?.canManage || publicationLoading) return;
+  publicationLoading = true;
+  renderPublications();
+  try {
+    const query = new URLSearchParams({ artifactId: art.id });
+    if (append && publicationCursor) query.set('cursor', publicationCursor);
+    const result = await publicationRequest(`/api/publications?${query}`);
+    publications = append ? [...publications, ...result.publications] : result.publications;
+    publicationCursor = result.nextCursor || '';
+  } catch (e) { publicationStatus(e.message, true); }
+  finally { publicationLoading = false; renderPublications(); }
+}
+
+$('publicationMore').addEventListener('click', () => loadPublications(true));
+$('publishPublic').addEventListener('click', async () => {
+  if (publicationBusy || !info.canManage) return;
+  const at = shown.checkin;
+  if (!confirm(`Make version ${shortId(at)} PUBLIC? Every file in this version, including images, scripts, and supporting files, will be available to anyone without signing in. Other versions and private page data are not included.`)) return;
+  publicationBusy = true;
+  renderShare();
+  renderPublications();
+  publicationStatus('Preparing standalone snapshot…');
+  try {
+    const bundle = await art.bundle(at);
+    if (bundle.checkin !== at) throw new Error('The selected version could not be loaded exactly. Please reload and try again.');
+    const documents = await preparePublication(art, bundle);
+    publicationStatus('Publishing public snapshot…');
+    const publication = await publicationRequest(`${art.base}/publications`, { method: 'POST', body: { at, documents } });
+    publications = [publication, ...publications.filter(item => item.id !== publication.id)];
+    publicationStatus(publication.status === 'live' && publication.url
+      ? 'Published. Copy or open the public link below.' : `Snapshot status: ${publication.status}. Reopen Share to refresh.`);
+  } catch (e) { publicationStatus(e.message, true); }
+  finally { publicationBusy = false; renderShare(); renderPublications(); }
+});
+
 function renderShare() {
+  $('publicationSection').hidden = !info.canManage;
+  $('publishPublic').disabled = publicationBusy;
+  $('publishPublic').textContent = publicationBusy ? 'Working…' : `Publish version ${shortId(shown.checkin)}`;
+  $('shareMenu').querySelector('.collaboration').open = !info.canManage;
   if (!link.token) {
     $('shareRows').replaceChildren(shareRow('libraryLink', 'Library link',
       'Only the owner, instance owner, and people with named access can open this link after signing in.',
@@ -320,6 +420,7 @@ for (const [btn, menu] of popovers) {
     closePopovers(menu);
     $(menu).hidden = !open;
     $(btn).setAttribute('aria-expanded', String(open));
+    if (open && menu === 'shareMenu') loadPublications();
   });
   $(menu).addEventListener('click', e => e.stopPropagation());
 }
@@ -349,7 +450,7 @@ $('restoreBtn').addEventListener('click', async () => {
 
 $('deleteBtn').addEventListener('click', async () => {
   closePopovers();
-  if (!confirm(`Delete “${info.title}” and its whole history? Its links stop working.`)) return;
+  if (!confirm(`Delete the private artifact “${info.title}” and its whole history? Private collaboration links will stop working. Published public snapshots remain available until explicitly unpublished.`)) return;
   try {
     await art.remove();
     $('bar').hidden = true;

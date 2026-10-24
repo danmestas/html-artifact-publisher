@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"runtime"
 	"strings"
 	"syscall/js"
 	"time"
@@ -142,6 +143,9 @@ var (
 )
 
 func exec(q string, args []driver.Value) (out *res, err error) {
+	// database/sql cancels row/transaction cleanup goroutines between queries.
+	// TinyGo's cooperative scheduler must run them before their stacks accumulate.
+	runtime.Gosched()
 	if bridge.Type() != js.TypeFunction {
 		bridge = js.Global().Get("__dosql")
 	}

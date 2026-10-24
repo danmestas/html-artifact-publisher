@@ -1,0 +1,9 @@
+{
+  "name": "artifact-pages",
+  "main": "src/public-site.ts",
+  "compatibility_date": "2026-06-23",
+  "workers_dev": true,
+  "observability": { "enabled": true },
+  // Only independent publication copies are read by this Worker. No app bindings or secrets.
+  "r2_buckets": [{ "binding": "BLOBS", "bucket_name": "html-artifact-publisher-blobs" }]
+}

@@ -54,9 +54,10 @@ export function fontsUsed(cssText) {
  * Adds @font-face rules for the fonts the page names to the parsed document
  * `doc`, before its own styles. Italic faces only ship when the page can show
  * italic text, and separate bold files only when it can show bold. A font
- * that fails to load is skipped; the page falls back.
+ * that fails to load is skipped; the page falls back. Static exports pass
+ * { strict: true } to reject instead of publishing an incomplete rendering.
  */
-export async function embedFonts(doc, nonce) {
+export async function embedFonts(doc, nonce, { strict = false } = {}) {
   const cssText = [...doc.querySelectorAll('style')].map(s => s.textContent)
     .concat([...doc.querySelectorAll('[style]')].map(e => e.getAttribute('style'))).join('\n');
   const families = fontsUsed(cssText);
@@ -71,6 +72,7 @@ export async function embedFonts(doc, nonce) {
       return `@font-face{font-family:"${x.family}";src:url("${await dataUrl(x.file)}") format("woff2");` +
         `font-weight:${x.weight};font-style:${x.style};font-display:swap}`;
     } catch (e) {
+      if (strict) throw new Error(`Cannot embed font ${x.family}: ${e.message}`);
       console.warn(e.message);
       return '';
     }

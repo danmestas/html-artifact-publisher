@@ -39,8 +39,21 @@
       </button>
       <div id="shareMenu" class="popover share" role="dialog" aria-label="Share" hidden>
         <div class="popover-head"><strong>Share this artifact</strong></div>
-        <div id="shareRows"></div>
-        <div id="shareFoot" class="popover-foot muted"></div>
+        <section id="publicationSection" class="publication-section" hidden aria-labelledby="publicationHeading">
+          <h2 id="publicationHeading">Publish this version</h2>
+          <p class="hint">Create a public, standalone snapshot with no sign-in required. Every file in this version becomes public, including images, scripts, and supporting files. Other versions and private page data are not included.</p>
+          <button id="publishPublic" class="primary" type="button">Publish this version</button>
+          <p id="publicationStatus" class="hint" role="status" aria-live="polite"></p>
+          <h3>Published snapshots</h3>
+          <div id="publicationList"></div>
+          <button id="publicationMore" type="button" hidden>Load more snapshots</button>
+        </section>
+        <details class="collaboration">
+          <summary>Collaboration links · full history</summary>
+          <p class="hint collaboration-hint">These links open the private collaboration viewer, not a public snapshot. Anyone granted access can browse the full version history.</p>
+          <div id="shareRows"></div>
+          <div id="shareFoot" class="popover-foot muted"></div>
+        </details>
       </div>
     </div>
     <div class="menu-anchor">

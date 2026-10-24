@@ -46,6 +46,8 @@
   "vars": {
     // Installation-specific values are supplied by scripts/deploy.sh from Doppler.
     "APP_ORIGIN": "",
+    // Separate static publication Worker; never use the signed-in app origin here.
+    "PUBLIC_ORIGIN": "",
     "EMAIL_FROM": "",
     // Never enable outside an isolated localhost test server.
     "TEST_MAIL_TRANSPORT": "",

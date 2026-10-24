@@ -1,4 +1,5 @@
-import { encodeFiles } from './client.js';
+import { encodeFiles, readFileList, withBlobs } from './client.js';
+import { isBlob } from './blobs.js';
 
 const $ = id => document.getElementById(id);
 const LIBRARY_VIEWS = ['all', 'mine', 'shared', 'starred', 'archived'];
@@ -434,7 +435,7 @@ function renderArtifacts(items, inventory) {
   }
   if (!items.length) {
     $('content').replaceChildren(empty(state.q || state.ownerId || state.status !== 'all' ? 'No matching artifacts' : state.view === 'starred' ? 'Keep your favorites close' : 'Your shelf is ready',
-      state.q || state.ownerId || state.status !== 'all' ? 'Try a different search or clear your filters.' : state.view === 'starred' ? 'Open an artifact’s menu and choose Star artifact.' : 'Publish a self-contained HTML file, or find work shared with you here.'));
+      state.q || state.ownerId || state.status !== 'all' ? 'Try a different search or clear your filters.' : state.view === 'starred' ? 'Open an artifact’s menu and choose Star artifact.' : 'Publish an HTML page and the files it uses, or find work shared with you here.'));
     return;
   }
   const grid = !inventory && layout === 'grid';
@@ -790,26 +791,50 @@ function openInvite() {
   openDialog('Invite someone', form);
   email.focus();
 }
+// A page's files: index.html, or a lone top-level HTML file renamed to it.
+function withEntry(files) {
+  if ('index.html' in files) return files;
+  const pages = Object.keys(files).filter(p => /\.html?$/i.test(p) && !p.includes('/'));
+  if (pages.length !== 1) throw new Error(pages.length ? 'Several HTML files were chosen: name the page index.html.' : 'Choose an HTML page (.html), with any files it uses.');
+  const { [pages[0]]: page, ...rest } = files;
+  return { 'index.html': page, ...rest };
+}
 function openUpload() {
   const form = node('form');
-  form.append(node('p', { className: 'muted', textContent: 'Upload one self-contained HTML file. Include its styles, scripts, and images inside the file. It will be private to you and the instance owner, with no expiration.' }));
-  const file = formField(form, 'HTML file (up to 7 MB)', node('input', { id: 'upload-file', type: 'file', accept: '.html,.htm,text/html', required: true }));
+  form.append(node('p', { className: 'muted', textContent: 'Choose an HTML page, or the page with the files it uses: images, styles, scripts, fonts, video, and data such as .wasm modules or SQLite databases. The page must be index.html or the only HTML file. It will be private to you and the instance owner, with no expiration.' }));
+  const files = formField(form, 'Files', node('input', { id: 'upload-files', type: 'file', multiple: true }));
+  const folder = formField(form, 'Or a whole folder', node('input', { id: 'upload-folder', type: 'file' }));
+  folder.webkitdirectory = true;
+  const chosen = node('p', { className: 'tiny', role: 'status' });
+  form.append(chosen);
   const title = formField(form, 'Artifact title', node('input', { id: 'upload-title', required: true, maxLength: 200 }));
-  file.addEventListener('change', () => { if (!title.value && file.files[0]) title.value = file.files[0].name.replace(/\.html?$/i, '').slice(0, 200); });
+  let selection = [];
+  for (const [input, other] of [[files, folder], [folder, files]]) input.addEventListener('change', () => {
+    other.value = '';
+    selection = [...input.files];
+    const size = selection.reduce((n, f) => n + f.size, 0);
+    chosen.textContent = selection.length ? `${selection.length} file${selection.length === 1 ? '' : 's'}, ${size < 1048576 ? `${Math.ceil(size / 1024)} KB` : `${(size / 1048576).toFixed(1)} MB`}` : '';
+    const first = selection[0];
+    if (!title.value && first) title.value = (first.webkitRelativePath ? first.webkitRelativePath.split('/')[0] : first.name.replace(/\.[^.]*$/, '')).slice(0, 200);
+  });
   submit(form, 'Publish artifact', async () => {
-    const selected = file.files[0];
-    if (!selected || !/\.html?$/i.test(selected.name)) throw new Error('Choose an HTML file (.html or .htm).');
-    // Base64 and the JSON envelope must also fit the server's 10 MB body cap.
-    if (selected.size > 7 * 1024 * 1024) throw new Error('The HTML file must be no larger than 7 MB.');
-    if (!selected.size) throw new Error('The HTML file is empty.');
+    if (!selection.length) throw new Error('Choose the files to publish.');
     const trimmed = title.value.trim();
     if (!trimmed) throw new Error('Enter an artifact title.');
-    await api('/api/artifacts', { method: 'POST', body: { title: trimmed, ttlSeconds: null, files: encodeFiles({ 'index.html': new Uint8Array(await selected.arrayBuffer()) }) } });
+    const picked = withEntry(await readFileList(selection));
+    if (!picked['index.html'].length) throw new Error('The HTML page is empty.');
+    // Images, data and large files go to storage first; the rest travels as
+    // base64 in one JSON request, which must fit the server's 10 MB body cap.
+    const inline = Object.entries(picked).reduce((n, [path, bytes]) => n + (isBlob(path, bytes) ? 0 : bytes.length), 0);
+    if (inline > 7 * 1024 * 1024) throw new Error('The HTML, CSS and other text files must be no larger than 7 MB together.');
+    const stored = await withBlobs(picked, '/api/blobs', '', path => { chosen.textContent = `Uploading ${path}…`; });
+    chosen.textContent = 'Publishing…';
+    await api('/api/artifacts', { method: 'POST', body: { title: trimmed, ttlSeconds: null, files: encodeFiles(stored) } });
     state.view = 'mine'; state.q = ''; resetPagination(); writeUrl();
     notify('Artifact published. Find it in Created by me.');
   });
   openDialog('Publish artifact', form);
-  file.focus();
+  files.focus();
 }
 function openCreateCredential() {
   const form = node('form');

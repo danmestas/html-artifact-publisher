@@ -46,8 +46,9 @@ const asBytes = v => (v instanceof Uint8Array ? v : enc.encode(String(v)));
 /**
  * Upload each file that should be a blob to `uploadBase`/<sha256> (skipping
  * ones the server already has) and return the files with pointers in their place.
+ * `onUpload(path)` is called before each upload.
  */
-export async function withBlobs(files, uploadBase, auth) {
+export async function withBlobs(files, uploadBase, auth, onUpload) {
   const out = {};
   for (const [path, value] of Object.entries(files)) {
     const bytes = asBytes(value);
@@ -57,10 +58,25 @@ export async function withBlobs(files, uploadBase, auth) {
     const headers = auth ? { Authorization: auth } : {};
     const known = await fetch(url, { method: 'HEAD', headers, cache: 'no-store' });
     if (known.status !== 200) {
+      onUpload?.(path);
       const res = await fetch(url, { method: 'PUT', headers: { ...headers, 'Content-Type': pointer.blob.type }, body: bytes });
       if (!res.ok) throw new ApiError(res.status, { error: `could not upload ${path}: ${(await res.json().catch(() => ({}))).error ?? `HTTP ${res.status}`}` });
     }
     out[path] = pointer.bytes;
+  }
+  return out;
+}
+
+/**
+ * The files chosen in a browser file input, as { path: bytes }. A folder keeps
+ * its layout, without the folder's own name; hidden files (.DS_Store, .git/…) are left out.
+ */
+export async function readFileList(list) {
+  const out = {};
+  for (const file of list) {
+    const path = file.webkitRelativePath ? file.webkitRelativePath.split('/').slice(1).join('/') : file.name;
+    if (!path || /(^|\/)\./.test(path)) continue;
+    out[path] = new Uint8Array(await file.arrayBuffer());
   }
   return out;
 }

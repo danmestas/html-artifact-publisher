@@ -46,7 +46,7 @@ All JSON errors `{error: string}`, no-store. Browser fetch uses same-origin cook
 - GET `/api/credentials` -> `{credentials:[{id,name,createdAt}]}` own credentials only.
 - POST `/api/credentials` body `{name}` -> `{id,name,token}` one-time display.
 - DELETE `/api/credentials/:id` -> `{ok:true}` own credentials only.
-- Existing POST `/api/artifacts` accepts personal bearer credentials or session and attributes owner server-side; browser UI supports single self-contained HTML file upload (base64 files), title, persistent ttlSeconds:null. Existing CLI default TTL remains unchanged.
+- Existing POST `/api/artifacts` accepts personal bearer credentials or session and attributes owner server-side; browser UI uploads an HTML page alone or with its files (several files or a folder; binary and large files go to R2 through `PUT /api/blobs/:sha256` first), title, persistent ttlSeconds:null. Existing CLI default TTL remains unchanged.
 
 Frontend paths `/` and `/login` serve new application shell. Worker first for `/`, `/login`, `/api/*`, existing viewer/sync/health routes. `/v/:id` without fragment uses session; existing fragment-token links retain explicit token access. UI can link directly to viewer. Sharing dialog distinguishes named people from existing capability links; do not promise link revocation unless fully implemented across API and Fossil sync.
 

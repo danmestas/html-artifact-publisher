@@ -121,6 +121,31 @@ test('publish, read, update, history and conflicts', async () => {
   assert.deepEqual(hist.json.timeline.map(c => c.comment), ['v2', 'Publish']);
 });
 
+test('multi-file asset updates, history and sync remain usable', async () => {
+  const original = b64('<h1>before assets</h1>');
+  const a = await create({ 'index.html': original });
+  const files = Object.fromEntries(Array.from({ length: 8 }, (_, i) => [`assets/image-${i}.bin`, randomBytes(40000).toString('base64')]));
+  let parent = a.tip;
+  for (let version = 0; version < 6; version++) {
+    files['index.html'] = b64(`<h1>assets ${version}</h1>`);
+    const update = await api(`/api/artifacts/${a.id}`, { method: 'PUT', token: a.write, body: { parent, message: `Assets ${version}`, files } });
+    assert.equal(update.status, 200, update.text);
+    parent = update.json.tip;
+    const bundle = await api(`/api/artifacts/${a.id}/bundle`, { token: a.read });
+    assert.equal(bundle.status, 200, bundle.text);
+    assert.deepEqual(bundle.json.files, files);
+  }
+  assert.equal((await api(`/api/artifacts/${a.id}/files/index.html?at=${a.tip}`, { token: a.read })).text, '<h1>before assets</h1>');
+  const clone = join(work, `${a.id}-assets.fossil`);
+  const cloned = fossil('clone', a.cloneUrl, clone);
+  assert.ok(cloned.ok, cloned.out);
+  const pushed = fossil('push', clone, a.cloneUrl, 'index.html', '<h1>after asset sync</h1>', 'Asset sync recovery');
+  assert.ok(pushed.ok, pushed.out);
+  const bundle = await api(`/api/artifacts/${a.id}/bundle`, { token: a.read });
+  assert.equal(bundle.status, 200, bundle.text);
+  assert.deepEqual(bundle.json.files, { ...files, 'index.html': b64('<h1>after asset sync</h1>') });
+});
+
 test('blobs: upload, commit, signed links, ranges, sharing and cleanup', async () => {
   const bytes = randomBytes(300000);
   const sha = createHash('sha256').update(bytes).digest('hex');

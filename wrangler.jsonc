@@ -35,7 +35,7 @@
   ],
 
   // BEARER_TOKEN is a secret — set it with: wrangler secret put BEARER_TOKEN
-  // NOTIFY_API_KEY (optional) is a secret too.
+  // WAKE_SINK_SECRET and NOTIFY_API_KEY (both optional) are secrets too.
 
   "send_email": [{ "name": "EMAIL" }],
 
@@ -59,7 +59,11 @@
     "MAX_PAYLOAD_BYTES": "10485760",
     // Maximum size of one blob upload in bytes (Workers accept request bodies up to 100 MB)
     "MAX_BLOB_BYTES": "100000000",
-    // Optional agent wake-up through notify (see README).
+    // Optional wake sink: webhook, notify, nats or none (see README, Wake sinks).
+    // Empty kind keeps the NOTIFY_* configuration below. WAKE_SINK_SECRET is a secret.
+    "WAKE_SINK_KIND": "",
+    "WAKE_SINK_URL": "",
+    // Notify addressing; NOTIFY_URL and NOTIFY_API_KEY apply only while WAKE_SINK_KIND is empty.
     "NOTIFY_URL": "",
     "NOTIFY_AGENT": "",
     "NOTIFY_SUBSCRIBER": ""

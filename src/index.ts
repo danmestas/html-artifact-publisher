@@ -16,7 +16,7 @@
  *   GET    /healthz
  *   POST   /api/artifacts                    Create (owner)
  *   GET    /api/artifacts                    List (owner)
- *   GET    /api/artifacts/:id                Tip, title, timeline (read)
+ *   GET    /api/artifacts/:id                Tip, title, timeline, attached responder (read)
  *   PUT    /api/artifacts/:id                New check-in; `parent` must be the tip (write)
  *   DELETE /api/artifacts/:id                Delete (write)
  *   GET    /api/artifacts/:id/bundle?at=     Every file of a check-in (read)
@@ -41,6 +41,7 @@ import { Registry } from './registry';
 import { blobLinks, getBlob, missingBlobs, pointersIn, putBlob } from './blobs';
 import type { FossilReply } from './fossil';
 import { b64decode, b64encode, clampTtl, genId, genToken, isoOrNull } from './util';
+import { ATTACHED_FILE, attachedFrom } from './attached';
 import { ticketAuthor } from './ticket-author';
 import { TICKET_BODY, ticketChange } from './ticket-body';
 
@@ -248,9 +249,13 @@ async function handleArtifact(req: Request, env: Env, ctx: ExecutionContext, id:
       if (url.searchParams.has('tip')) return reply(await stub.op(who, { op: 'tip' }));
       const r = (await stub.op(who, { op: 'info' })) as FossilReply<Record<string, unknown>>;
       if (!r.ok) return reply(r);
-      const [meta, role, readToken, commentToken] = await Promise.all([stub.info(), stub.role(who), stub.readToken(who), stub.commentToken(who)]);
+      const [meta, role, readToken, commentToken, flag] = await Promise.all([
+        stub.info(), stub.role(who), stub.readToken(who), stub.commentToken(who),
+        stub.op(who, { op: 'uvGet', name: ATTACHED_FILE }) as Promise<FossilReply<{ data: string | null }>>,
+      ]);
       return json({
         id, title: meta?.title, role, expiresAt: isoOrNull(meta?.expiresAt ?? null), ...r.result, canManage,
+        attached: attachedFrom(flag.ok ? flag.result?.data : null),
         ...(readToken ? { readToken } : {}), ...(commentToken ? { commentToken } : {}),
       });
     }

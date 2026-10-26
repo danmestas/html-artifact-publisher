@@ -65,6 +65,7 @@ func fail(code, format string, a ...any) error { return coded{code, fmt.Sprintf(
 const (
 	editorLogin = "editor"
 	viewerLogin = "viewer"
+	editorCaps  = "giyo"
 )
 
 func handle(req request, body []byte) (any, error) {
@@ -202,6 +203,9 @@ func handle(req request, body []byte) (any, error) {
 		return names, nil
 
 	case "sync":
+		if err := grantUnversioned(r); err != nil {
+			return nil, err
+		}
 		reply, err := r.HandleSyncWithOpts(context.Background(), body, libfossil.HandleOpts{LoginCookie: req.Cookie})
 		if err != nil {
 			return nil, err
@@ -215,6 +219,18 @@ func handle(req request, body []byte) (any, error) {
 		return result, err
 	}
 	return nil, fail("bad_request", "unknown op %q", req.Op)
+}
+
+// grantUnversioned gives the editor login the unversioned-push capability (y)
+// that repositories made before attached.json lack. Editors can already write
+// unversioned files through uvSet, so this widens nothing; it lets a clone's
+// `fossil uv sync` do the same.
+func grantUnversioned(r *libfossil.Repo) error {
+	var caps string
+	if err := r.DB().QueryRow("SELECT cap FROM user WHERE login=?", editorLogin).Scan(&caps); err != nil || strings.Contains(caps, "y") {
+		return nil
+	}
+	return r.SetCaps(editorLogin, editorCaps)
 }
 
 func create(req request) (any, error) {
@@ -235,7 +251,7 @@ func create(req request) (any, error) {
 	for login, pw := range map[string]string{editorLogin: req.WriteToken, viewerLogin: req.ReadToken} {
 		caps := "go" // clone, check out
 		if login == editorLogin {
-			caps = "gio" // and check in
+			caps = editorCaps // and check in, and push unversioned files (attached.json)
 		}
 		if err := r.CreateUser(libfossil.UserOpts{Login: login, Password: pw, Caps: caps}); err != nil {
 			return nil, err

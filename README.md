@@ -44,6 +44,8 @@ flowchart LR
 
 **Comments** open in a panel beside the page (a sheet on a phone) from the bar's Comments button. Every link holder sees the threads, open ones first and resolved ones collapsed; the comment and edit links also get a comment box, a reply box and Resolve or Reopen on each thread. A new comment is anchored to the text selected in the page: the element's id when the selection is that element's whole text, else the quoted text. The page draws a numbered pin at each anchor it finds (the id first, else the quote, whitespace ignored) and the pin opens its thread; an anchor the version shown no longer has leaves its thread marked "Not found in this version", with no pin. A reply naming a check-in as `@<hash>` links that version. The page is told only each pin's anchor, number and whether it is resolved: no ticket text and no token.
 
+**Attached responder.** Whoever answers comments says so by setting an unversioned file, `attached.json`, in the artifact's repository: `{"responder": "local session", "since": "2026-10-26T12:00:00Z", "contact": "dan@example.com"}`. From a clone: `fossil uv add attached.json -R clone.fossil && fossil uv sync <cloneUrl> -R clone.fossil`; `fossil uv rm attached.json` and a sync clears it. It never makes a check-in. The thread panel then says "A responder is attached" and its name; with no file it says "Comments are recorded; nothing is listening right now". Every link holder sees it, the read link included, because it is state about the artifact. Only an edit link can push it. The file is untrusted, so `GET /api/artifacts/:id` returns `attached` as `{responder, since, contact}` only when the file is JSON of at most 4096 bytes whose `responder` is one line of 1 to 100 characters; `since` must be an ISO 8601 time with a zone and `contact` one line of up to 200 characters, and either is `null` otherwise. Anything else, and no file, is `attached: null`. The viewer shows the fields as text, never as markup or a link.
+
 ### Access
 
 | Who | How | Can |
@@ -257,7 +259,7 @@ An update sent with the header `X-Wake: <kind>` asks the Worker to tell an agent
 |-------|--------|------|
 | `POST /api/artifacts` | owner | Create: `{title, files: {path: base64}, slug?, ttlSeconds?, message?}` → `{id, tip, viewerUrl, editUrl, commentUrl, cloneUrl, expiresAt}` |
 | `GET /api/artifacts` | owner | List, most recently updated first |
-| `GET /api/artifacts/:id` | read | `{title, role, tip, timeline, expiresAt}` (`role` is `read`, `comment` or `write`); `?tip` returns only the tip |
+| `GET /api/artifacts/:id` | read | `{title, role, tip, timeline, expiresAt, attached}` (`attached` is the responder flag or `null`; `role` is `read`, `comment` or `write`); `?tip` returns only the tip |
 | `PUT /api/artifacts/:id` | write | `{parent, files, message?, title?}` → `{tip, parent}`; `409` when `parent` is not the tip |
 | `DELETE /api/artifacts/:id` | write | Delete |
 | `GET /api/artifacts/:id/bundle?at=` | read | `{checkin, files: {path: base64}, missing, blobs: {path: {sha256, size, type, url}}}`; a blob's `files` entry is its pointer |

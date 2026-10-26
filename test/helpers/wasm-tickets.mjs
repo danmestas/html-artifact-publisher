@@ -70,6 +70,17 @@ assert.equal(statusOf(byId[second.ticketUuid]), 'Open', JSON.stringify(tickets))
 const changes = ok({ op: 'ticketChanges', ticketUuid: first.ticketUuid });
 assert.equal(changes.length, 2, JSON.stringify(changes));
 
+// Threads in one call, newest-changed first, capped by limit.
+const threads = ok({ op: 'ticketThreads', limit: 1 });
+assert.equal(threads.truncated, true, JSON.stringify(threads));
+assert.equal(threads.limit, 1);
+assert.equal(threads.tickets.length, 1);
+assert.equal(threads.tickets[0].uuid, first.ticketUuid, 'the most recently changed');
+assert.equal(threads.tickets[0].changes.length, 2);
+const all = ok({ op: 'ticketThreads', limit: 200 });
+assert.equal(all.truncated, false);
+assert.deepEqual(all.tickets.map(t => t.uuid).sort(), [first.ticketUuid, second.ticketUuid].sort());
+
 const since = ok({ op: 'timelineSince', hash: tip, types: ['t'] });
 assert.equal(since.length, 3, JSON.stringify(since));
 assert.ok(since.every(e => e.type === 't'), JSON.stringify(since));

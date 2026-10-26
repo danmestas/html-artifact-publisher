@@ -7,7 +7,8 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, readdirSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomBytes } from 'node:crypto';
 import { Artifact, createArtifact } from '../public/client.js';
 import { controls, thread } from '../public/comments.js';
@@ -369,6 +370,8 @@ test('comment link: tickets through the API, a stock fossil clone and a terminal
 
   const listed = await tickets();
   assert.equal(listed.status, 200, listed.text);
+  assert.equal(listed.json.truncated, false);
+  assert.equal(listed.json.limit, 100, 'the default cap');
   const [t] = listed.json.tickets;
   assert.equal(t.uuid, first.json.ticketUuid);
   assert.equal(t.status, 'Closed');
@@ -417,6 +420,18 @@ test('comment link: tickets through the API, a stock fossil clone and a terminal
   assert.ok(terminal, JSON.stringify(after));
   assert.equal(terminal.changes[0].user, 'editor');
 
+  // One capped read: the newest-changed threads, and whether there are more.
+  const capped = await api(`/api/artifacts/${a.id}/tickets?limit=1`, { token: a.read });
+  assert.equal(capped.status, 200, capped.text);
+  assert.equal(capped.json.tickets.length, 1);
+  assert.equal(capped.json.truncated, true);
+  assert.equal(capped.json.limit, 1);
+  assert.equal(capped.json.tickets[0].fields.title, 'From the terminal', 'newest first');
+  for (const limit of ['0', '201', 'x', '1.5', '-1']) {
+    assert.equal((await api(`/api/artifacts/${a.id}/tickets?limit=${limit}`, { token: a.read })).status, 400, `limit=${limit}`);
+  }
+  assert.equal((await api(`/api/artifacts/${a.id}/tickets?limit=200`, { token: a.read })).json.tickets.length, 2);
+
   // Tickets that arrived since a check-in.
   const since = await api(`/api/artifacts/${a.id}/timeline?since=${a.tip}&type=t`, { token: a.read });
   assert.equal(since.status, 200, since.text);
@@ -451,6 +466,54 @@ test('comment link: commenting is all it can do, and delete revokes it', async (
   assert.equal((await api(`/api/artifacts/${a.id}`, { method: 'DELETE', token: a.write })).status, 204);
   assert.equal((await api(`/api/artifacts/${a.id}`, { token: a.comment })).status, 404);
   assert.equal((await api(`/api/artifacts/${a.id}/tickets`, { method: 'POST', token: a.comment, body: { text: 'still here?' } })).status, 404);
+});
+
+// Old-state fixtures edit only this suite's throwaway Durable Object storage:
+// the database whose _artifact row is artifact `id`.
+function repoSQL(id, sql) {
+  const state = join(work, 'state');
+  for (const file of readdirSync(state, { recursive: true })) {
+    if (!String(file).endsWith('.sqlite')) continue;
+    const db = new DatabaseSync(join(state, String(file)));
+    try {
+      if (db.prepare("SELECT 1 FROM sqlite_master WHERE name = '_artifact'").get() && db.prepare('SELECT 1 FROM _artifact WHERE id = ?').get(id)) {
+        return db.prepare(sql).all();
+      }
+    } finally { db.close(); }
+  }
+  throw new Error(`no repository database for ${id}`);
+}
+
+test('comment link: an artifact from before comment links gets one from its editor, once', async () => {
+  const a = await create({ 'index.html': b64('<p>old</p>') });
+  const columns = () => repoSQL(a.id, "SELECT name FROM pragma_table_info('_artifact')").map(c => c.name);
+  const stored = () => ({ ...repoSQL(a.id, 'SELECT comment_hash, comment_token FROM _artifact')[0] });
+  // The shape an artifact stored before comment links has.
+  repoSQL(a.id, 'ALTER TABLE _artifact DROP COLUMN comment_hash');
+  repoSQL(a.id, 'ALTER TABLE _artifact DROP COLUMN comment_token');
+  assert.ok(!columns().includes('comment_hash'));
+  const info = token => api(`/api/artifacts/${a.id}`, { token });
+
+  const read = await info(a.read);
+  assert.equal(read.status, 200, read.text);
+  assert.equal(read.json.commentToken, undefined);
+  assert.ok(columns().includes('comment_hash') && columns().includes('comment_token'), 'ensureTable adds the columns');
+  assert.deepEqual(stored(), { comment_hash: '', comment_token: '' }, 'a read link mints nothing');
+
+  const first = (await info(a.write)).json.commentToken;
+  assert.match(first, /^[0-9a-f]{64}$/);
+  assert.notEqual(first, a.comment, 'the token from before the columns were dropped is gone');
+  assert.deepEqual(stored(), { comment_hash: createHash('sha256').update(first).digest('hex'), comment_token: first });
+  assert.equal((await info(a.write)).json.commentToken, first, 'a second open keeps it');
+  assert.equal((await info(first)).json.role, 'comment');
+  assert.equal((await info(a.comment)).status, 404);
+
+  const page = join(work, 'old-artifact.html');
+  writeFileSync(page, '<!doctype html><p>updated</p>');
+  const up = cli('update', '--json', '--no-clipboard', a.editUrl, page);
+  assert.equal(up.code, 0, up.out);
+  assert.equal(JSON.parse(up.out).commentUrl, `${a.editUrl.split('#')[0]}#${first}`, 'update returns the same one');
+  assert.equal(stored().comment_token, first);
 });
 
 test('viewer shell', async () => {

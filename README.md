@@ -265,7 +265,7 @@ An update sent with the header `X-Wake: <kind>` asks the Worker to tell an agent
 | `GET /api/artifacts/:id/files/<path>?at=` | read | One file's bytes |
 | `GET /api/artifacts/:id/data[/<name>]` | read | Page data names, or one value (`null` when unset) |
 | `PUT /api/artifacts/:id/data/<name>` | write | Store a JSON value |
-| `GET /api/artifacts/:id/tickets` | read | Comment threads: `{tickets: [{uuid, status, changed, fields, changes: [{artifact, user, time, comment, fields}]}]}`, most recently changed first, changes oldest first |
+| `GET /api/artifacts/:id/tickets?limit=` | read | The `limit` (1-200, default 100) most recently changed comment threads: `{tickets: [{uuid, status, changed, fields, changes: [{artifact, user, time, comment, fields}]}], limit, truncated}`, changes oldest first; `truncated` says there are more |
 | `POST /api/artifacts/:id/tickets` | comment | New thread `{text, anchor?}` → `201 {ticketUuid, artifact}`; reply, resolve or reopen `{ticketUuid, text?, status?: "Open" \| "Closed"}` → `{ticketUuid, artifact}`. The author is the account's name, `owner`, `edit-link` or `comment-link`, never the body. Stored in Fossil's stock ticket schema: `title` (the text's first line), `comment` (the text), `status`, `type` `Comment`, the anchor in `subsystem`; a reply is the change's remark (`icomment`) |
 | `GET /api/artifacts/:id/timeline?since=<hash>&type=t` | read | `{timeline: [{uuid, type, comment, user, time, parents}]}`: entries that arrived after artifact `<hash>` (full hash), newest first; `type` repeats, one of `ci e f g t w` |
 | `POST /r/:id` | Fossil login | Fossil sync protocol |

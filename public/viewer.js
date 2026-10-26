@@ -231,7 +231,6 @@ function renderChrome() {
   $('role').textContent = writer ? 'Can edit' : can.commentBox ? 'Can comment' : 'View only';
   $('role').className = `pill ${writer ? 'write' : 'read'}`;
   $('commentForm').hidden = !can.commentBox;
-  $('commentsNote').textContent = can.commentBox ? '' : 'Read only';
   $('deleteBtn').hidden = !writer || (!link.token && !info.canManage);
   $('uploadFilesBtn').hidden = $('uploadFolderBtn').hidden = !writer;
   $('openLatest').hidden = latest;
@@ -255,9 +254,14 @@ function renderChrome() {
 // ─── Comments: each thread is a ticket in the artifact's repository ─────────
 
 let threads = [];
+let threadsTruncated = false;
 
 function renderThreads() {
-  $('commentCount').textContent = threads.length ? String(threads.length) : '';
+  $('commentCount').textContent = threads.length ? `${threads.length}${threadsTruncated ? '+' : ''}` : '';
+  $('commentsNote').textContent = [
+    threadsTruncated ? `Showing the newest ${threads.length}` : '',
+    controls(info).commentBox ? '' : 'Read only',
+  ].filter(Boolean).join(' · ');
   $('threadList').replaceChildren(...threads.map(t => el('article', { className: 'thread' },
     el('h3', {}, el('span', { textContent: t.title }), el('span', { className: 'tag', textContent: t.status })),
     ...t.messages.filter(m => m.text || m.status).map(m => el('div', {},
@@ -268,7 +272,9 @@ function renderThreads() {
 async function loadThreads() {
   if (!controls(info).threads) return;
   try {
-    threads = (await art.tickets()).tickets.map(thread);
+    const result = await art.tickets();
+    threads = result.tickets.map(thread);
+    threadsTruncated = result.truncated;
     renderThreads();
   } catch { /* offline or gone: keep what is shown */ }
 }

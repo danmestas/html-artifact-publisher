@@ -8,6 +8,15 @@ import (
 	libfossil "github.com/danmestas/go-libfossil"
 )
 
+// maxThreads bounds ticketThreads; the Worker validates limit to the same range.
+const maxThreads = 200
+
+// thread is a ticket with its changes, oldest first.
+type thread struct {
+	libfossil.Ticket
+	Changes []libfossil.TicketChange `json:"changes"`
+}
+
 // ticketOp handles the ticket and timeline ops; ok is false for any other op.
 // A reader comment is a Fossil ticket: ticketAdd opens a thread, ticketSet
 // replies to or resolves one, and the reads return plain JSON values.
@@ -38,6 +47,31 @@ func ticketOp(r *libfossil.Repo, req request) (result any, ok bool, err error) {
 			return nil, true, fail("not_found", "%v", err)
 		}
 		return changes, true, nil
+
+	case "ticketThreads":
+		// One call for the whole comment view, so its cost does not grow with
+		// a request per ticket: the limit most recently changed, and whether
+		// there are more.
+		if req.Limit < 1 || req.Limit > maxThreads {
+			return nil, true, fail("bad_request", "limit must be 1 to %d", maxThreads)
+		}
+		tickets, err := r.TicketList()
+		if err != nil {
+			return nil, true, err
+		}
+		truncated := len(tickets) > req.Limit
+		if truncated {
+			tickets = tickets[:req.Limit]
+		}
+		threads := make([]thread, len(tickets))
+		for i, t := range tickets {
+			changes, err := r.TicketChanges(t.UUID)
+			if err != nil {
+				return nil, true, err
+			}
+			threads[i] = thread{Ticket: t, Changes: changes}
+		}
+		return map[string]any{"tickets": threads, "truncated": truncated, "limit": req.Limit}, true, nil
 
 	case "timelineSince":
 		kinds := make([]libfossil.EventKind, len(req.Types))

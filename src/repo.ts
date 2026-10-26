@@ -41,7 +41,7 @@ export interface Meta {
 /** The ops a caller may run, by the role they need. */
 const NEEDS: Record<string, Role> = {
   tip: 'read', info: 'read', bundle: 'read', preview: 'read', raw: 'read', uvGet: 'read', uvList: 'read',
-  ticketList: 'read', ticketChanges: 'read', timelineSince: 'read',
+  ticketThreads: 'read', ticketChanges: 'read', timelineSince: 'read',
   ticketAdd: 'comment', ticketSet: 'comment',
   commit: 'write', uvSet: 'write',
 };

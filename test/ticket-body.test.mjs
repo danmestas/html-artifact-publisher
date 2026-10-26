@@ -1,0 +1,15 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { ticketTitle } from '../src/ticket-body.ts';
+
+// A thread's title is its text's first line, cut to 100 characters by code
+// point, so a cut never leaves half of a surrogate pair.
+test('ticket title: first line, cut by code point', () => {
+  assert.equal(ticketTitle('  Short heading  \nmore text'), 'Short heading');
+  const whole = `${'a'.repeat(99)}😀`;
+  assert.equal(ticketTitle(whole), whole, '100 code points are kept, though 101 UTF-16 units');
+  const cut = ticketTitle(`${'a'.repeat(98)}😀${'b'.repeat(5)}`);
+  assert.equal(cut, `${'a'.repeat(98)}😀…`);
+  assert.equal(Array.from(cut).length, 100);
+  assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(cut), 'no lone high surrogate');
+});

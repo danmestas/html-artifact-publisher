@@ -143,7 +143,7 @@ export class Artifact {
 
   remove() { return call(this.base, { method: 'DELETE', auth: this.auth }); }
 
-  /** Comment threads: { tickets: [{ uuid, status, changed, fields, changes }] }. */
+  /** The newest-changed comment threads: { tickets: [{ uuid, status, changed, fields, changes }], limit, truncated }. */
   tickets() { return call(`${this.base}/tickets`, { auth: this.auth }); }
   /** Open a thread ({ text, anchor? }) or change one ({ ticketUuid, text?, status? }). */
   comment(change) { return call(`${this.base}/tickets`, { method: 'POST', auth: this.auth, body: change }); }

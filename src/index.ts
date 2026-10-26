@@ -26,7 +26,7 @@
  *   GET    /b/:id/:sha256?exp=&sig=          A blob, through a signed link from the bundle
  *   GET    /api/artifacts/:id/data[/<name>]  Page data (read)
  *   PUT    /api/artifacts/:id/data/<name>    Page data (write)
- *   GET    /api/artifacts/:id/tickets        Comment threads with their changes (read)
+ *   GET    /api/artifacts/:id/tickets?limit= The newest-changed threads with their changes (read)
  *   POST   /api/artifacts/:id/tickets        Open, reply to, resolve or reopen a thread (comment)
  *   GET    /api/artifacts/:id/timeline?since=<hash>&type=t   Entries that arrived after <hash> (read)
  *   POST   /r/:id                            Fossil sync: `fossil clone https://editor:<writeToken>@host/r/<id>`
@@ -42,6 +42,7 @@ import { blobLinks, getBlob, missingBlobs, pointersIn, putBlob } from './blobs';
 import type { FossilReply } from './fossil';
 import { b64decode, b64encode, clampTtl, genId, genToken, isoOrNull } from './util';
 import { ticketAuthor } from './ticket-author';
+import { TICKET_BODY, ticketChange } from './ticket-body';
 
 export { Repo, Registry };
 
@@ -145,39 +146,6 @@ function wake(env: Env, ctx: ExecutionContext, req: Request, id: string, tip: st
       }),
     }).catch(() => undefined),
   );
-}
-
-// ─── Tickets ─────────────────────────────────────────────────────────────────
-//
-// A reader comment is a ticket in the stock Fossil ticket schema, so `fossil
-// ui` and `fossil ticket` show it as they show any other:
-//   new thread  title (the text's first line), comment (the text), status Open,
-//               type Comment, subsystem (the anchor: an element id or a quote)
-//   reply       the text as the change's remark (icomment)
-//   resolve     status Closed; reopen: status Open
-
-const TICKET_BODY = 'Body must be JSON: text (1-8000 characters), and optionally anchor (up to 500), '
-  + 'ticketUuid (a full ticket id, to reply) and status (Open or Closed, with ticketUuid)';
-const TICKET_KEYS = ['text', 'anchor', 'ticketUuid', 'status'];
-
-/** The ticket change a POST body asks for, or null when the body is not valid. */
-function ticketChange(b: Record<string, unknown>): { ticketUuid: string; fields: Record<string, string>; comment: string } | null {
-  if (Object.keys(b).some(k => !TICKET_KEYS.includes(k))) return null;
-  const { text = '', anchor = '', ticketUuid = '', status = '' } = b;
-  if (typeof text !== 'string' || typeof anchor !== 'string' || typeof ticketUuid !== 'string' || typeof status !== 'string') return null;
-  const body = text.trim();
-  if (body.length > 8000 || anchor.length > 500 || /\0/.test(text + anchor)) return null;
-  if (!ticketUuid) {
-    if (!body || status) return null;
-    const title = body.split('\n')[0]!.trim();
-    return {
-      ticketUuid: '',
-      fields: { title: title.length > 100 ? `${title.slice(0, 99)}…` : title, comment: body, status: 'Open', type: 'Comment', subsystem: anchor },
-      comment: '',
-    };
-  }
-  if (!/^[0-9a-f]{40}$/.test(ticketUuid) || anchor || (status && status !== 'Open' && status !== 'Closed') || (!body && !status)) return null;
-  return { ticketUuid, fields: status ? { status } : {}, comment: body };
 }
 
 // ─── Handlers ────────────────────────────────────────────────────────────────
@@ -352,12 +320,11 @@ async function handleArtifact(req: Request, env: Env, ctx: ExecutionContext, id:
   }
 
   if (rest === '/tickets' && method === 'GET') {
-    const r = (await stub.op(who, { op: 'ticketList' })) as FossilReply<{ uuid: string }[]>;
-    if (!r.ok || !r.result) return reply(r);
-    const changes = await Promise.all(r.result.map(async t => (await stub.op(who, { op: 'ticketChanges', ticketUuid: t.uuid })) as FossilReply<unknown[]>));
-    const failed = changes.find(c => !c.ok);
-    if (failed) return reply(failed);
-    return json({ tickets: r.result.map((t, i) => ({ ...t, changes: changes[i]!.result })) });
+    // One engine call however many tickets there are: a comment link can add
+    // tickets, and none can be deleted.
+    const limit = url.searchParams.get('limit') ?? '100';
+    if (!/^[1-9][0-9]{0,2}$/.test(limit) || Number(limit) > 200) return json({ error: 'limit must be 1 to 200' }, 400);
+    return reply(await stub.op(who, { op: 'ticketThreads', limit: Number(limit) }));
   }
   if (rest === '/tickets' && method === 'POST') {
     const b = await readBody(req, 65536);

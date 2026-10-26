@@ -5,7 +5,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHmac } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ticketKind as workerKind } from '../src/wake.ts';
@@ -115,6 +115,9 @@ test('verifySignature: HMAC-SHA256 of the exact bytes', () => {
 test('none sink: comment, watch prints it, the responder replies once and never to itself', async () => {
   const a = await createArtifact(worker.base, worker.owner, '<h1 id="intro">hello</h1>');
   const cache = join(work, 'cache-a');
+  const start = await watch(a.commentUrl, cache);
+  assert.equal(start.code, 0, start.stderr);
+  assert.equal(start.stdout, '', 'the first run starts now');
   const first = await comment(a, a.comment, { text: 'Please shorten the heading.\n$(touch pwned) `id`', anchor: 'intro' });
 
   const w1 = await watch(a.commentUrl, cache);
@@ -184,7 +187,12 @@ test('watch: HTTP without a fossil binary, a clone with one, the same lines; res
   const two = await comment(a, a.comment, { text: 'Second thread' });
 
   const httpCache = join(work, 'cache-http');
-  const http = await watch(a.editUrl, httpCache, { path: noFossilPath });
+  // The first run starts now: the comments already there are history, kept for --since.
+  const start = await watch(a.editUrl, httpCache, { path: noFossilPath });
+  assert.equal(start.code, 0, start.stderr);
+  assert.equal(start.stdout, '');
+  assert.ok(JSON.parse(readFileSync(join(httpCache, a.id, 'watch.json'), 'utf8')).http, 'the start is saved');
+  const http = await watch(a.editUrl, httpCache, '--since', a.tip, { path: noFossilPath });
   assert.equal(http.code, 0, http.stderr);
   quiet(http, a);
   assert.deepEqual(http.lines.map(l => [l.kind, l.author, l.text]), [
@@ -209,7 +217,10 @@ test('watch: HTTP without a fossil binary, a clone with one, the same lines; res
 
   if (!haveStockFossil) return;
   const fossilCache = join(work, 'cache-fossil');
-  const viaFossil = await watch(a.editUrl, fossilCache);
+  const fossilStart = await watch(a.editUrl, fossilCache);
+  assert.equal(fossilStart.code, 0, fossilStart.stderr);
+  assert.equal(fossilStart.stdout, '', 'the first run starts now on this path too');
+  const viaFossil = await watch(a.editUrl, fossilCache, '--since', a.tip);
   assert.equal(viaFossil.code, 0, viaFossil.stderr);
   quiet(viaFossil, a);
   assert.ok(existsSync(join(fossilCache, a.id, 'repo.fossil')), 'a fossil binary: pulled into the cache');
@@ -224,12 +235,14 @@ test('watch: HTTP without a fossil binary, a clone with one, the same lines; res
 
 test('watch: polls on an interval and stops cleanly on SIGINT', async () => {
   const a = await createArtifact(worker.base, worker.owner, '<p>loop</p>');
-  await comment(a, a.comment, { text: 'Polled' });
+  await comment(a, a.comment, { text: 'History' });
   const child = spawn(process.execPath, [join(root, 'scripts/publish-html.mjs'), 'watch', a.commentUrl, '--interval', '5s', '--cache', join(work, 'cache-loop')],
     { env: { ...process.env, HOME: work }, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '';
   child.stdout.on('data', d => { out += d; });
   const exited = new Promise(r => child.on('close', (code, signal) => r({ code, signal })));
+  for (let i = 0; i < 100 && !existsSync(join(work, 'cache-loop', a.id, 'watch.json')); i++) await new Promise(r => setTimeout(r, 100));
+  await comment(a, a.comment, { text: 'Polled' });
   for (let i = 0; i < 100 && !out.includes('\n'); i++) await new Promise(r => setTimeout(r, 100));
   assert.equal(JSON.parse(out.trim()).text, 'Polled');
   const second = await comment(a, a.comment, { text: 'Polled later' });
@@ -242,6 +255,45 @@ test('watch: polls on an interval and stops cleanly on SIGINT', async () => {
   const bad = await run('scripts/publish-html.mjs', ['watch', a.commentUrl, '--interval', '1s']);
   assert.notEqual(bad.code, 0);
   assert.match(bad.stderr, /interval/);
+});
+
+test('watch: a state file from the other path, or an older one, is never misread; switching paths neither repeats nor skips', needsFossil, async () => {
+  const a = await createArtifact(worker.base, worker.owner, '<p>switch</p>');
+  const cache = join(work, 'cache-switch');
+  const state = () => JSON.parse(readFileSync(join(cache, a.id, 'watch.json'), 'utf8'));
+  const viaFossil = () => watch(a.editUrl, cache);
+  const viaHttp = () => watch(a.editUrl, cache, { path: noFossilPath });
+  const changes = r => { assert.equal(r.code, 0, r.stderr); return r.lines.map(l => l.change); };
+
+  await comment(a, a.comment, { text: 'Before anyone watched' });
+  assert.deepEqual(changes(await viaFossil()), [], 'starts now');
+  assert.equal(state().http, null);
+  assert.match(state().fossil, /^[0-9a-f]{64}$/);
+  const c1 = await comment(a, a.comment, { text: 'one' });
+  assert.deepEqual(changes(await viaFossil()), [c1.artifact]);
+
+  // No fossil binary now: the HTTP path has no position of its own.
+  const c2 = await comment(a, a.comment, { text: 'two' });
+  assert.deepEqual(changes(await viaHttp()), [c2.artifact]);
+  const c3 = await comment(a, a.comment, { ticketUuid: c1.ticketUuid, text: 'three' });
+  assert.deepEqual(changes(await viaHttp()), [c3.artifact]);
+  assert.ok(state().fossil && state().http, 'one position per path');
+
+  // Back to the clone, whose own position is older: what HTTP printed is not printed again.
+  const c4 = await comment(a, a.comment, { text: 'four' });
+  assert.deepEqual(changes(await viaFossil()), [c4.artifact]);
+  const c5 = await comment(a, a.comment, { text: 'five' });
+  assert.deepEqual(changes(await viaHttp()), [c5.artifact]);
+  assert.deepEqual(changes(await viaFossil()), []);
+
+  // A state file in the old shape is not a position on either path: a fresh start.
+  const old = join(work, 'cache-old');
+  mkdirSync(join(old, a.id), { recursive: true });
+  writeFileSync(join(old, a.id, 'watch.json'), JSON.stringify({ last: c1.artifact }));
+  const fresh = await watch(a.editUrl, old, { path: noFossilPath });
+  assert.deepEqual(changes(fresh), []);
+  const c6 = await comment(a, a.comment, { text: 'six' });
+  assert.deepEqual(changes(await watch(a.editUrl, old, { path: noFossilPath })), [c6.artifact]);
 });
 
 test('responder: attached.json while it runs, cleared on exit and on SIGTERM, even within one second', needsFossil, async () => {

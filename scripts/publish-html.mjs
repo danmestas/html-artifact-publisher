@@ -44,9 +44,10 @@ A URL may end in @<check-in> to read that version.
 
 watch prints one JSON line per new comment, reply or resolve:
   {"artifact","ticket","change","kind","author","text","time"}
-It remembers the last change printed in <cache>/<id>/watch.json (cache:
---cache, HTML_PUBLISHER_CACHE or ~/.cache/html-artifact-publisher), so a
-restart prints only what is new; --since <hash> starts after that artifact.
+The first run starts now and prints nothing; --since <hash> replays every
+change after that artifact. Where it got to is kept in <cache>/<id>/watch.json
+(cache: --cache, HTML_PUBLISHER_CACHE or ~/.cache/html-artifact-publisher), so
+a restart prints only what is new.
 It polls every --interval (5s to 1h) until Ctrl-C; --once makes one pass.
 
 Environment variables:

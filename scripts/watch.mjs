@@ -169,29 +169,53 @@ export function ensureClone(bin, link, dir, name) {
   return repo;
 }
 
-/** The last change watch printed for this artifact, or null. */
+const SEEN_MAX = 1000;
+
+/**
+ * Where watch is for this artifact: a position on each path, since "arrived
+ * after" means the clone's arrival order on one and the Worker's on the other,
+ * and the changes printed lately on either, so a switch of path prints none
+ * twice. A file in any other shape is no state at all.
+ */
 export function loadState(dir) {
-  try {
-    const { last } = JSON.parse(readFileSync(join(dir, 'watch.json'), 'utf8'));
-    return HASH.test(last) ? last : null;
-  } catch {
-    return null;
-  }
+  const none = { fossil: null, http: null, seen: [] };
+  let s;
+  try { s = JSON.parse(readFileSync(join(dir, 'watch.json'), 'utf8')); } catch { return none; }
+  if (!s || typeof s !== 'object' || s.version !== 2) return none;
+  const pos = v => (typeof v === 'string' && HASH.test(v) ? v : null);
+  const seen = Array.isArray(s.seen) ? s.seen.filter(h => typeof h === 'string' && HASH.test(h)).slice(-SEEN_MAX) : [];
+  return { fossil: pos(s.fossil), http: pos(s.http), seen };
 }
 
-function saveState(dir, last) {
+function saveState(dir, state) {
   const tmp = join(dir, `watch.json.${process.pid}`);
-  writeFileSync(tmp, `${JSON.stringify({ last })}\n`, { mode: 0o600 });
+  const { fossil: f, http: h, seen } = state;
+  writeFileSync(tmp, `${JSON.stringify({ version: 2, fossil: f, http: h, seen: seen.slice(-SEEN_MAX) })}\n`, { mode: 0o600 });
   renameSync(tmp, join(dir, 'watch.json'));
 }
 
-// Ticket changes that arrived after `since` (all when null), oldest first, in
+// "Now" on each path: the artifact that arrived last, so the next pass prints
+// only what comes after it.
+function nowViaFossil(bin, link, repo) {
+  fossil(bin, ['pull', syncUrl(link), '-R', repo], link.token);
+  const sql = 'SELECT uuid FROM blob WHERE size >= 0 ORDER BY coalesce(rcvid, 0) DESC, rid DESC LIMIT 1';
+  return fossil(bin, ['sql', '-R', repo, sql], link.token).trim();
+}
+
+async function nowViaHttp(link) {
+  const first = link.timeline.at(-1)?.uuid;
+  if (!first) throw new Error('the artifact has no check-in to start from');
+  const { timeline } = await apiGet(link, `/timeline?since=${first}`);
+  return timeline[0]?.uuid ?? first;
+}
+
+// Ticket changes that arrived after `since`, oldest first, in
 // the clone's own arrival order: by receipt, then rid, as the Worker orders them.
 function viaFossil(bin, link, repo, since, max) {
   fossil(bin, ['pull', syncUrl(link), '-R', repo], link.token);
-  const after = since ? `(coalesce(b.rcvid, 0), b.rid) > (SELECT coalesce(rcvid, 0), rid FROM blob WHERE uuid = '${since}')` : '1';
+  const after = `(coalesce(b.rcvid, 0), b.rid) > (SELECT coalesce(rcvid, 0), rid FROM blob WHERE uuid = '${since}')`;
   const sql = `SELECT json_object(
-    'known', ${since ? `(SELECT count(*) FROM blob WHERE uuid = '${since}' AND size >= 0)` : 1},
+    'known', (SELECT count(*) FROM blob WHERE uuid = '${since}' AND size >= 0),
     'items', json((SELECT json_group_array(json_object('hash', uuid, 'content', CAST(content(uuid) AS TEXT), 'opens', opens)) FROM (
       SELECT b.uuid AS uuid, (SELECT x.rid FROM tagxref x WHERE x.tagid = tx.tagid ORDER BY x.mtime, x.rid LIMIT 1) = b.rid AS opens
       FROM event e JOIN blob b ON b.rid = e.objid JOIN tagxref tx ON tx.rid = b.rid
@@ -207,12 +231,9 @@ function viaFossil(bin, link, repo, since, max) {
   });
 }
 
-// The same, from the Worker. With no `since`, the first check-in is the start:
-// every ticket arrived after it.
+// The same, from the Worker, in its arrival order.
 async function viaHttp(link, since, max) {
-  const from = since ?? link.timeline.at(-1)?.uuid;
-  if (!from) return [];
-  const { timeline } = await apiGet(link, `/timeline?since=${from}&type=t`);
+  const { timeline } = await apiGet(link, `/timeline?since=${since}&type=t`);
   const entries = timeline.slice().reverse().slice(0, max);
   if (!entries.length) return [];
   const { tickets } = await apiGet(link, `/tickets?limit=${THREADS_LIMIT}`);
@@ -230,10 +251,11 @@ async function viaHttp(link, since, max) {
 }
 
 /**
- * `watch`: print each new ticket change as a JSON line, keep the last one
- * printed in <cache>/<id>/watch.json, and repeat every `interval` until
- * SIGINT or SIGTERM (or once). Resolves when it stops; rejects on a bad
- * argument, and on any failure when `once`.
+ * `watch`: print each new ticket change as a JSON line, keep where it got to
+ * in <cache>/<id>/watch.json, and repeat every `interval` until SIGINT or
+ * SIGTERM (or once). With no --since and no position yet it starts now and
+ * prints nothing for that pass; --since replays. Resolves when it stops;
+ * rejects on a bad argument, and on any failure when `once`.
  */
 export async function runWatch({ rawUrl, since, interval = '30s', once = false, cache, log = m => process.stderr.write(`watch: ${m}\n`) }) {
   if (since !== undefined && !HASH.test(since)) throw new Error('--since must be a full artifact hash (40 or 64 hex digits)');
@@ -241,7 +263,14 @@ export async function runWatch({ rawUrl, since, interval = '30s', once = false, 
   const link = await openLink(rawUrl);
   const dir = artifactDir(cacheRoot(cache), link.id);
   const bin = syncUrl(link) ? fossilBinary() : null;
-  let last = since ?? loadState(dir);
+  const path = bin ? 'fossil' : 'http', other = bin ? 'http' : 'fossil';
+  const state = loadState(dir);
+  const seen = new Set(state.seen);
+  // A replay prints what --since asks for, printed before or not; otherwise
+  // start at this path's own position, else where the other path got to (the
+  // changes it printed are in `seen`), else now.
+  let replay = since !== undefined;
+  let last = since ?? state[path] ?? state[other];
   let stopping = false, wake = () => {};
   const stop = () => { stopping = true; wake(); };
   process.on('SIGINT', stop);
@@ -252,15 +281,27 @@ export async function runWatch({ rawUrl, since, interval = '30s', once = false, 
     while (!stopping) {
       let n = 0;
       try {
-        const items = bin
-          ? viaFossil(bin, link, ensureClone(bin, link, dir, 'repo.fossil'), last, WATCH_MAX_ITEMS)
-          : await viaHttp(link, last, WATCH_MAX_ITEMS);
-        for (const it of items) {
-          if (it.missing) log(`skipped ${it.change.slice(0, 12)}: not a ticket change this link can read`);
-          else await print({ artifact: link.id, ticket: it.ticket, change: it.change, kind: it.kind, author: it.author, text: it.text, time: it.time });
-          last = it.change;
-          saveState(dir, last);
-          n++;
+        const repo = bin ? ensureClone(bin, link, dir, 'repo.fossil') : null;
+        if (!last) {
+          last = bin ? nowViaFossil(bin, link, repo) : await nowViaHttp(link);
+          if (!HASH.test(last)) throw new Error('could not find where the artifact is now');
+          saveState(dir, { ...state, [path]: last, seen: [...seen] });
+        } else {
+          const items = bin ? viaFossil(bin, link, repo, last, WATCH_MAX_ITEMS) : await viaHttp(link, last, WATCH_MAX_ITEMS);
+          for (const it of items) {
+            if (it.missing) log(`skipped ${it.change.slice(0, 12)}: not a ticket change this link can read`);
+            else if (replay || !seen.has(it.change)) {
+              await print({ artifact: link.id, ticket: it.ticket, change: it.change, kind: it.kind, author: it.author, text: it.text, time: it.time });
+              seen.delete(it.change);
+              seen.add(it.change);
+              if (seen.size > SEEN_MAX) seen.delete(seen.values().next().value);
+            }
+            last = it.change;
+            state[path] = last;
+            saveState(dir, { ...state, seen: [...seen] });
+            n++;
+          }
+          replay = false;
         }
       } catch (e) {
         if (once) throw e;

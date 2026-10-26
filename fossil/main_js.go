@@ -48,6 +48,7 @@ type request struct {
 	TicketUUID  string            `json:"ticketUuid"` // a ticket's id or a unique prefix of it
 	Hash        string            `json:"hash"`       // timelineSince: entries that arrived after this artifact
 	Types       []string          `json:"types"`      // timelineSince: ci, t, w, f; none is all
+	Limit       int               `json:"limit"`      // ticketThreads: at most this many tickets
 }
 
 // coded errors carry a machine-readable code to the Worker.

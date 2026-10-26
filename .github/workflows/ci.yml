@@ -59,6 +59,32 @@ jobs:
       - name: Build the Fossil engine (TinyGo)
         run: npm run build:wasm
 
+      # The comment-link tests clone, add a ticket and push with a stock fossil
+      # binary: the official release, pinned by checksum as go-libfossil's CI
+      # pins it, not the distro package, which lags several releases. The
+      # checksummed tarball is cached, so fossil-scm.org is needed only on a
+      # cache miss, not on every run.
+      - name: Cache pinned Fossil
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/fossil-release
+          key: fossil-linux-x64-2.28-c9d2bf9d150dff1076eae1b0b822ed3cde892e1273f78b040c4f8ace1b59dd40
+
+      - name: Install pinned Fossil
+        env:
+          FOSSIL_VERSION: "2.28"
+          FOSSIL_SHA256: "c9d2bf9d150dff1076eae1b0b822ed3cde892e1273f78b040c4f8ace1b59dd40"
+        run: |
+          tarball="$HOME/.cache/fossil-release/fossil-linux-x64-${FOSSIL_VERSION}.tar.gz"
+          if ! echo "${FOSSIL_SHA256}  ${tarball}" | sha256sum -c - >/dev/null 2>&1; then
+            mkdir -p "$(dirname "$tarball")"
+            curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o "$tarball" \
+              "https://fossil-scm.org/home/uv/fossil-linux-x64-${FOSSIL_VERSION}.tar.gz"
+          fi
+          echo "${FOSSIL_SHA256}  ${tarball}" | sha256sum -c -
+          sudo tar -xzf "$tarball" -C /usr/local/bin fossil
+          fossil version | grep -q "fossil version ${FOSSIL_VERSION} " || { fossil version; exit 1; }
+
       - name: End-to-end tests
         run: npm test
 

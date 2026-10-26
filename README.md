@@ -48,7 +48,8 @@ flowchart LR
 |-----|-----|-----|
 | Legacy owner credential | `Authorization: Bearer <BEARER_TOKEN>` | All artifact operations, including create and list; account administration uses an instance-owner login |
 | Read link | token after `#`, sent as `Authorization: Token <t>` | Read every version and the page data; `fossil clone` as `viewer` |
-| Edit link | token after `#` | Also publish versions, save page data, delete; `fossil push` as `editor` |
+| Comment link | token after `#` | Read, and open, reply to, resolve or reopen comment threads (tickets). Nothing else: no publishing, page data, uploads or Fossil sync |
+| Edit link | token after `#` | Also comment, publish versions, save page data, delete; `fossil push` as `editor` |
 | Anyone else | | No private artifact access: unknown and forbidden both answer 404, and anonymous clones are refused. Explicitly published snapshots on the separate public origin need no authentication |
 
 Tokens live in the URL fragment, which browsers send neither to servers nor in `Referer`. A link may end in `@<check-in>` (a hash prefix, tag or branch) to show that version. Content is not encrypted: anyone with access to the Cloudflare account can read it, as with any hosted service.
@@ -199,6 +200,7 @@ A single file is stored as `index.html`; a directory is stored as-is and needs a
   "id": "abc123XYZ_def",
   "viewerUrl": "https://<host>/v/abc123XYZ_def#<readToken>",
   "editUrl": "https://<host>/v/abc123XYZ_def#<writeToken>",
+  "commentUrl": "https://<host>/v/abc123XYZ_def#<commentToken>",
   "cloneUrl": "https://editor:<writeToken>@<host>/r/abc123XYZ_def",
   "checkin": "7d20a3563c541938…",
   "expiresAt": "2026-07-31T00:00:00.000Z",
@@ -207,7 +209,7 @@ A single file is stored as `index.html`; a directory is stored as-is and needs a
 }
 ```
 
-Share `viewerUrl`, after every publish and every update; `update` prints it too, and both check that it opens (`linkVerified`). Keep `editUrl` and `cloneUrl` private.
+Share `viewerUrl`, after every publish and every update; `update` prints it too, and both check that it opens (`linkVerified`). Keep `editUrl` and `cloneUrl` private. Hand out `commentUrl` to people who should comment without editing; deleting the artifact revokes all three links. An artifact published before comment links gets one the first time an edit-link holder opens it or runs `update`.
 
 ### Working with Fossil directly
 
@@ -251,9 +253,9 @@ An update sent with the header `X-Wake: <kind>` asks the Worker to tell an agent
 
 | Route | Access | Does |
 |-------|--------|------|
-| `POST /api/artifacts` | owner | Create: `{title, files: {path: base64}, slug?, ttlSeconds?, message?}` → `{id, tip, viewerUrl, editUrl, cloneUrl, expiresAt}` |
+| `POST /api/artifacts` | owner | Create: `{title, files: {path: base64}, slug?, ttlSeconds?, message?}` → `{id, tip, viewerUrl, editUrl, commentUrl, cloneUrl, expiresAt}` |
 | `GET /api/artifacts` | owner | List, most recently updated first |
-| `GET /api/artifacts/:id` | read | `{title, role, tip, timeline, expiresAt}`; `?tip` returns only the tip |
+| `GET /api/artifacts/:id` | read | `{title, role, tip, timeline, expiresAt}` (`role` is `read`, `comment` or `write`); `?tip` returns only the tip |
 | `PUT /api/artifacts/:id` | write | `{parent, files, message?, title?}` → `{tip, parent}`; `409` when `parent` is not the tip |
 | `DELETE /api/artifacts/:id` | write | Delete |
 | `GET /api/artifacts/:id/bundle?at=` | read | `{checkin, files: {path: base64}, missing, blobs: {path: {sha256, size, type, url}}}`; a blob's `files` entry is its pointer |
@@ -263,6 +265,9 @@ An update sent with the header `X-Wake: <kind>` asks the Worker to tell an agent
 | `GET /api/artifacts/:id/files/<path>?at=` | read | One file's bytes |
 | `GET /api/artifacts/:id/data[/<name>]` | read | Page data names, or one value (`null` when unset) |
 | `PUT /api/artifacts/:id/data/<name>` | write | Store a JSON value |
+| `GET /api/artifacts/:id/tickets?limit=` | read | The `limit` (1-200, default 100) most recently changed comment threads: `{tickets: [{uuid, status, changed, fields, changes: [{artifact, user, time, comment, fields}]}], limit, truncated}`, changes oldest first; `truncated` says there are more |
+| `POST /api/artifacts/:id/tickets` | comment | New thread `{text, anchor?}` → `201 {ticketUuid, artifact}`; reply, resolve or reopen `{ticketUuid, text?, status?: "Open" \| "Closed"}` → `{ticketUuid, artifact}`. The author is the account's name, `owner`, `edit-link` or `comment-link`, never the body. Stored in Fossil's stock ticket schema: `title` (the text's first line), `comment` (the text), `status`, `type` `Comment`, the anchor in `subsystem`; a reply is the change's remark (`icomment`) |
+| `GET /api/artifacts/:id/timeline?since=<hash>&type=t` | read | `{timeline: [{uuid, type, comment, user, time, parents}]}`: entries that arrived after artifact `<hash>` (full hash), newest first; `type` repeats, one of `ci e f g t w` |
 | `POST /r/:id` | Fossil login | Fossil sync protocol |
 | `GET /v/:id` | — | The viewer |
 | `POST /api/artifacts/:id/publications` | artifact owner or instance owner | Publish selected exact check-in: `{at: fullHash, documents: {htmlPath: preparedHtml}}`; copies every source file |

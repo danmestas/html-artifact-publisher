@@ -46,6 +46,7 @@ Environment variables:
 
 Links:
   https://<your-domain>/v/<id>#<readToken>    read link: share this
+  https://<your-domain>/v/<id>#<commentToken> comment link: can read and comment, not edit
   https://<your-domain>/v/<id>#<writeToken>   edit link: keep this; it can update and delete
   https://editor:<writeToken>@<your-domain>/r/<id>   fossil clone URL
   Tokens travel in the URL fragment, which browsers do not send to servers or put in Referer.
@@ -218,6 +219,7 @@ async function publish() {
     id: result.id,
     viewerUrl: result.viewerUrl,
     editUrl: result.editUrl,
+    commentUrl: result.commentUrl,
     cloneUrl: result.cloneUrl,
     checkin: result.tip,
     expiresAt: result.expiresAt ?? null,
@@ -242,8 +244,8 @@ async function update() {
   const link = parseLink(rawUrl);
   const { files, warnings } = readInput(filePath);
   await checkDiagrams(files);
-  const { tip, role, readToken } = await link.art.info();
-  if (role !== 'write') die('this is a read link; updating needs the edit link');
+  const { tip, role, readToken, commentToken } = await link.art.info();
+  if (role !== 'write') die(`this is a ${role} link; updating needs the edit link`);
   let result;
   try {
     result = await link.art.publish(tip, files, flagValue('--message') ?? `Update ${basename(filePath)}`, {
@@ -256,7 +258,8 @@ async function update() {
   // The read link: it opens the newest version, which is the one just saved.
   const viewerUrl = `${link.base}/v/${link.id}#${readToken}`;
   const linkVerified = await verifyLink(link.base, link.id, viewerUrl);
-  output({ id: link.id, viewerUrl, checkin: result.tip, linkVerified, warnings: warnings.length, warningMessages: warnings }, viewerUrl);
+  const commentUrl = commentToken ? `${link.base}/v/${link.id}#${commentToken}` : undefined;
+  output({ id: link.id, viewerUrl, commentUrl, checkin: result.tip, linkVerified, warnings: warnings.length, warningMessages: warnings }, viewerUrl);
 }
 
 async function read() {
@@ -338,6 +341,7 @@ function output(result, viewerUrl) {
     console.log(JSON.stringify(result, null, 2));
     console.log(`\nPublished: ${viewerUrl}`);
     console.log('   Post this link to the user: it opens the newest version.');
+    if (result.commentUrl) console.log(`   Comment link: ${result.commentUrl}`);
     if (result.editUrl) console.log(`   Edit link (keep private): ${result.editUrl}`);
     if (result.cloneUrl) console.log(`   Clone (keep private):     fossil clone ${result.cloneUrl}`);
     if (result.expiresAt) console.log(`   Expires:   ${new Date(result.expiresAt).toLocaleString()}`);

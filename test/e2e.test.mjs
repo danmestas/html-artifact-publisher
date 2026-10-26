@@ -7,9 +7,11 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, readdirSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomBytes } from 'node:crypto';
 import { Artifact, createArtifact } from '../public/client.js';
+import { controls, thread } from '../public/comments.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -40,7 +42,20 @@ const tokenOf = url => url.split('#')[1];
 async function create(files, extra = {}) {
   const r = await api('/api/artifacts', { method: 'POST', bearer: owner, body: { title: 'Test', files, ...extra } });
   assert.equal(r.status, 201, r.text);
-  return { ...r.json, read: tokenOf(r.json.viewerUrl), write: tokenOf(r.json.editUrl) };
+  return { ...r.json, read: tokenOf(r.json.viewerUrl), write: tokenOf(r.json.editUrl), comment: r.json.commentUrl && tokenOf(r.json.commentUrl) };
+}
+
+// A stock fossil binary, with its global state kept in the test's directory.
+const stockFossil = process.env.FOSSIL ?? 'fossil';
+const haveStockFossil = (() => {
+  try { execFileSync(stockFossil, ['version'], { stdio: 'ignore' }); return true; } catch { return false; }
+})();
+function stock(...args) {
+  try {
+    return { ok: true, out: execFileSync(stockFossil, args, { cwd: work, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, HOME: work, FOSSIL_HOME: work, FOSSIL_USER: 'editor' } }) };
+  } catch (e) {
+    return { ok: false, out: String(e.stderr) + String(e.stdout) };
+  }
 }
 
 function fossil(...args) {
@@ -317,6 +332,190 @@ test('fossil clone and push', async () => {
   assert.equal((await api(`/api/artifacts/${a.id}/files/index.html`, { token: a.read })).text, '<h1>pushed</h1>', 'previously stored content remains readable');
 });
 
+test('comment link: tickets through the API, a stock fossil clone and a terminal push', { skip: !haveStockFossil && !process.env.CI && 'stock fossil is not installed' }, async () => {
+  const a = await create({ 'index.html': b64('<h1 id="intro">comment on me</h1>') });
+  assert.match(a.commentUrl, new RegExp(`/v/${a.id}#[0-9a-f]{64}$`));
+  assert.ok(![a.read, a.write].includes(a.comment), 'a token of its own');
+  const tickets = (token = a.read) => api(`/api/artifacts/${a.id}/tickets`, { token });
+  const post = (token, body) => api(`/api/artifacts/${a.id}/tickets`, { method: 'POST', token, body });
+
+  // The comment link opens the page as a commenter: no publish or manage rights, no other link.
+  const seen = await api(`/api/artifacts/${a.id}`, { token: a.comment });
+  assert.equal(seen.status, 200, seen.text);
+  assert.equal(seen.json.role, 'comment');
+  assert.equal(seen.json.canManage, false);
+  assert.equal(seen.json.readToken, undefined);
+  assert.equal(seen.json.commentToken, undefined);
+  assert.equal((await api(`/api/artifacts/${a.id}`, { token: a.read })).json.commentToken, undefined, 'readers never see it');
+  assert.equal((await api(`/api/artifacts/${a.id}`, { token: a.write })).json.commentToken, a.comment, 'editors can share it');
+
+  // What the viewer shows each link, from the same replies.
+  const shows = async token => controls((await api(`/api/artifacts/${a.id}`, { token })).json);
+  assert.deepEqual(await shows(a.comment), { threads: true, commentBox: true, edit: false, publish: false, commentLink: false });
+  assert.deepEqual(await shows(a.read), { threads: true, commentBox: false, edit: false, publish: false, commentLink: false });
+  assert.deepEqual(await shows(a.write), { threads: true, commentBox: true, edit: true, publish: false, commentLink: true });
+
+  const opened = await post(a.comment, { text: 'The heading reads oddly.\nCan it be shorter?', anchor: 'intro', author: 'mallory', user: 'mallory' });
+  assert.equal(opened.status, 400, 'the body cannot name the author');
+  const first = await post(a.comment, { text: 'The heading reads oddly.\nCan it be shorter?', anchor: 'intro' });
+  assert.equal(first.status, 201, first.text);
+  assert.match(first.json.ticketUuid, /^[0-9a-f]{40}$/);
+  assert.match(first.json.artifact, /^[0-9a-f]{40,64}$/);
+  const reply = await post(a.write, { ticketUuid: first.json.ticketUuid, text: 'Shortened in the next version.' });
+  assert.equal(reply.status, 200, reply.text);
+  const resolved = await post(a.comment, { ticketUuid: first.json.ticketUuid, status: 'Closed' });
+  assert.equal(resolved.status, 200, resolved.text);
+  assert.equal((await post(a.read, { text: 'readers cannot comment' })).status, 403, 'the read link never writes');
+  assert.equal((await tickets()).json.tickets.length, 1, 'a refused write leaves nothing');
+
+  const listed = await tickets();
+  assert.equal(listed.status, 200, listed.text);
+  assert.equal(listed.json.truncated, false);
+  assert.equal(listed.json.limit, 100, 'the default cap');
+  const [t] = listed.json.tickets;
+  assert.equal(t.uuid, first.json.ticketUuid);
+  assert.equal(t.status, 'Closed');
+  assert.equal(t.fields.title, 'The heading reads oddly.');
+  assert.equal(t.fields.comment, 'The heading reads oddly.\nCan it be shorter?');
+  assert.equal(t.fields.subsystem, 'intro', 'the anchor');
+  assert.equal(t.fields.type, 'Comment');
+  assert.deepEqual(t.changes.map(c => c.user), ['comment-link', 'edit-link', 'comment-link']);
+  assert.equal(t.changes[1].comment, 'Shortened in the next version.');
+  assert.equal(t.changes[2].fields.status, 'Closed');
+  assert.equal((await tickets(a.comment)).status, 200, 'the comment link reads threads');
+  assert.deepEqual(thread(t), {
+    uuid: t.uuid, title: 'The heading reads oddly.', status: 'Closed', anchor: 'intro',
+    messages: [
+      { user: 'comment-link', time: t.changes[0].time, text: 'The heading reads oddly.\nCan it be shorter?', status: '' },
+      { user: 'edit-link', time: t.changes[1].time, text: 'Shortened in the next version.', status: '' },
+      { user: 'comment-link', time: t.changes[2].time, text: '', status: 'Closed' },
+    ],
+  });
+
+  // Bounded, validated input.
+  for (const [body, why] of [
+    [{}, 'no text'], [{ text: '   ' }, 'blank text'], [{ text: 'x'.repeat(8001) }, 'text too long'],
+    [{ text: 'x', anchor: 'a'.repeat(501) }, 'anchor too long'], [{ text: 'x', status: 'Closed' }, 'status on a new thread'],
+    [{ ticketUuid: first.json.ticketUuid, status: 'Fixed' }, 'unknown status'], [{ ticketUuid: first.json.ticketUuid }, 'nothing to change'],
+    [{ ticketUuid: 'abc', text: 'x' }, 'not a ticket id'], [{ text: 'x', fields: { title: 'y' } }, 'unknown key'], [{ text: 7 }, 'text not a string'],
+  ]) assert.equal((await post(a.comment, body)).status, 400, why);
+  assert.equal((await post(a.comment, { ticketUuid: 'f'.repeat(40), text: 'x' })).status, 404, 'unknown ticket');
+
+  // The ticket is in the repository: a stock fossil clone has it.
+  const clone = join(work, `${a.id}-tickets.fossil`);
+  const cloned = stock('clone', a.cloneUrl, clone);
+  assert.ok(cloned.ok, cloned.out);
+  const history = stock('ticket', 'history', first.json.ticketUuid, '-R', clone);
+  assert.ok(history.ok, history.out);
+  assert.match(history.out, /Shortened in the next version\./);
+  assert.match(stock('sql', '-R', clone, "SELECT status||' '||subsystem FROM ticket").out, /Closed intro/);
+
+  // A ticket made in a terminal and pushed appears with no Worker step.
+  const added = stock('ticket', 'add', 'title', 'From the terminal', 'status', 'Open', 'type', 'Comment', '-R', clone);
+  assert.ok(added.ok, added.out);
+  const pushed = stock('push', a.cloneUrl, '-R', clone);
+  assert.ok(pushed.ok, pushed.out);
+  const after = (await tickets()).json.tickets;
+  const terminal = after.find(x => x.fields.title === 'From the terminal');
+  assert.ok(terminal, JSON.stringify(after));
+  assert.equal(terminal.changes[0].user, 'editor');
+
+  // One capped read: the newest-changed threads, and whether there are more.
+  const capped = await api(`/api/artifacts/${a.id}/tickets?limit=1`, { token: a.read });
+  assert.equal(capped.status, 200, capped.text);
+  assert.equal(capped.json.tickets.length, 1);
+  assert.equal(capped.json.truncated, true);
+  assert.equal(capped.json.limit, 1);
+  assert.equal(capped.json.tickets[0].fields.title, 'From the terminal', 'newest first');
+  for (const limit of ['0', '201', 'x', '1.5', '-1']) {
+    assert.equal((await api(`/api/artifacts/${a.id}/tickets?limit=${limit}`, { token: a.read })).status, 400, `limit=${limit}`);
+  }
+  assert.equal((await api(`/api/artifacts/${a.id}/tickets?limit=200`, { token: a.read })).json.tickets.length, 2);
+
+  // Tickets that arrived since a check-in.
+  const since = await api(`/api/artifacts/${a.id}/timeline?since=${a.tip}&type=t`, { token: a.read });
+  assert.equal(since.status, 200, since.text);
+  assert.equal(since.json.timeline.length, 4);
+  assert.ok(since.json.timeline.every(e => e.type === 't'));
+  assert.equal(since.json.timeline[0].user, 'editor', 'newest first');
+  assert.equal((await api(`/api/artifacts/${a.id}/timeline`, { token: a.read })).status, 400, 'since is required');
+  assert.equal((await api(`/api/artifacts/${a.id}/timeline?since=${a.tip}&type=zz`, { token: a.read })).status, 400);
+
+  // Authors come from the credential: the owner's bearer token, or an account's name.
+  const byOwner = await api(`/api/artifacts/${a.id}/tickets`, { method: 'POST', bearer: owner, body: { text: 'From the owner' } });
+  assert.equal(byOwner.status, 201, byOwner.text);
+  assert.equal((await tickets()).json.tickets.find(x => x.uuid === byOwner.json.ticketUuid).changes[0].user, 'owner');
+});
+
+test('comment link: commenting is all it can do, and delete revokes it', async () => {
+  const a = await create({ 'index.html': b64('<p>only comments</p>') });
+  const commit = await api(`/api/artifacts/${a.id}`, { method: 'PUT', token: a.comment, body: { parent: a.tip, files: { 'index.html': b64('x') } } });
+  assert.equal(commit.status, 403, commit.text);
+  assert.equal((await api(`/api/artifacts/${a.id}/data/x`, { method: 'PUT', token: a.comment, body: 1 })).status, 403, 'no page data writes');
+  assert.equal((await api(`/api/artifacts/${a.id}`, { method: 'DELETE', token: a.comment })).status, 401, 'no delete');
+  const upload = await fetch(`${base}/api/artifacts/${a.id}/blobs/${'0'.repeat(64)}`, { method: 'PUT', headers: { Authorization: `Token ${a.comment}` }, body: 'x' });
+  assert.equal(upload.status, 403, 'no uploads');
+  assert.equal((await api(`/api/artifacts/${a.id}/publications`, { method: 'POST', token: a.comment, body: { at: a.tip, documents: {} } })).status, 401, 'no public snapshots');
+  for (const login of ['editor', 'viewer']) {
+    const url = a.cloneUrl.replace(/editor:[0-9a-f]+@/, `${login}:${a.comment}@`);
+    const r = fossil('clone', url, join(work, `${a.id}-${login}-comment.fossil`));
+    assert.ok(!r.ok && /not authorized|login failed/.test(r.out), `no sync as ${login}: ${r.out}`);
+  }
+  assert.equal((await api(`/api/artifacts/${a.id}`, { token: a.comment })).json.tip, a.tip, 'nothing changed');
+
+  assert.equal((await api(`/api/artifacts/${a.id}`, { method: 'DELETE', token: a.write })).status, 204);
+  assert.equal((await api(`/api/artifacts/${a.id}`, { token: a.comment })).status, 404);
+  assert.equal((await api(`/api/artifacts/${a.id}/tickets`, { method: 'POST', token: a.comment, body: { text: 'still here?' } })).status, 404);
+});
+
+// Old-state fixtures edit only this suite's throwaway Durable Object storage:
+// the database whose _artifact row is artifact `id`.
+function repoSQL(id, sql) {
+  const state = join(work, 'state');
+  for (const file of readdirSync(state, { recursive: true })) {
+    if (!String(file).endsWith('.sqlite')) continue;
+    const db = new DatabaseSync(join(state, String(file)));
+    try {
+      if (db.prepare("SELECT 1 FROM sqlite_master WHERE name = '_artifact'").get() && db.prepare('SELECT 1 FROM _artifact WHERE id = ?').get(id)) {
+        return db.prepare(sql).all();
+      }
+    } finally { db.close(); }
+  }
+  throw new Error(`no repository database for ${id}`);
+}
+
+test('comment link: an artifact from before comment links gets one from its editor, once', async () => {
+  const a = await create({ 'index.html': b64('<p>old</p>') });
+  const columns = () => repoSQL(a.id, "SELECT name FROM pragma_table_info('_artifact')").map(c => c.name);
+  const stored = () => ({ ...repoSQL(a.id, 'SELECT comment_hash, comment_token FROM _artifact')[0] });
+  // The shape an artifact stored before comment links has.
+  repoSQL(a.id, 'ALTER TABLE _artifact DROP COLUMN comment_hash');
+  repoSQL(a.id, 'ALTER TABLE _artifact DROP COLUMN comment_token');
+  assert.ok(!columns().includes('comment_hash'));
+  const info = token => api(`/api/artifacts/${a.id}`, { token });
+
+  const read = await info(a.read);
+  assert.equal(read.status, 200, read.text);
+  assert.equal(read.json.commentToken, undefined);
+  assert.ok(columns().includes('comment_hash') && columns().includes('comment_token'), 'ensureTable adds the columns');
+  assert.deepEqual(stored(), { comment_hash: '', comment_token: '' }, 'a read link mints nothing');
+
+  const first = (await info(a.write)).json.commentToken;
+  assert.match(first, /^[0-9a-f]{64}$/);
+  assert.notEqual(first, a.comment, 'the token from before the columns were dropped is gone');
+  assert.deepEqual(stored(), { comment_hash: createHash('sha256').update(first).digest('hex'), comment_token: first });
+  assert.equal((await info(a.write)).json.commentToken, first, 'a second open keeps it');
+  assert.equal((await info(first)).json.role, 'comment');
+  assert.equal((await info(a.comment)).status, 404);
+
+  const page = join(work, 'old-artifact.html');
+  writeFileSync(page, '<!doctype html><p>updated</p>');
+  const up = cli('update', '--json', '--no-clipboard', a.editUrl, page);
+  assert.equal(up.code, 0, up.out);
+  assert.equal(JSON.parse(up.out).commentUrl, `${a.editUrl.split('#')[0]}#${first}`, 'update returns the same one');
+  assert.equal(stored().comment_token, first);
+});
+
 test('viewer shell', async () => {
   const a = await create({ 'index.html': b64('<p>view</p>') });
   const r = await fetch(`${base}/v/${a.id}`);
@@ -339,7 +538,8 @@ test('CLI', async () => {
   const pub = cli('publish', '--json', '--no-clipboard', '--title', 'CLI', dir);
   assert.equal(pub.code, 0, pub.out);
   const out = JSON.parse(pub.out);
-  assert.ok(out.viewerUrl && out.editUrl && out.cloneUrl);
+  assert.ok(out.viewerUrl && out.editUrl && out.cloneUrl && out.commentUrl);
+  assert.equal(out.commentUrl.split('#')[0], out.viewerUrl.split('#')[0]);
 
   writeFileSync(join(dir, 'index.html'), '<!doctype html><link rel="stylesheet" href="style.css"><h1>v2</h1>');
   const up = cli('update', '--json', '--no-clipboard', '--message', 'second', out.editUrl, dir);
@@ -347,6 +547,7 @@ test('CLI', async () => {
   // The link printed after an update opens the artifact: it carries the read token.
   const upOut = JSON.parse(up.out);
   assert.equal(upOut.viewerUrl, out.viewerUrl);
+  assert.equal(upOut.commentUrl, out.commentUrl);
   assert.equal(upOut.linkVerified, true);
   assert.equal(out.linkVerified, true);
   assert.equal(cli('update', '--no-clipboard', out.editUrl, dir).code, 1, 'nothing changed');
@@ -358,6 +559,15 @@ test('CLI', async () => {
   assert.match(cli('read', `${out.viewerUrl}@${hist[1].uuid.slice(0, 12)}`).out, /<h1>v1<\/h1>/);
   assert.match(cli('list').out, /CLI/);
   assert.equal(cli('delete', out.editUrl).code, 0);
+
+  // Human output lists the comment link under the read link.
+  const human = cli('publish', '--no-clipboard', dir);
+  assert.equal(human.code, 0, human.out);
+  const lines = human.out.split('\n');
+  const published = lines.findIndex(l => l.startsWith('Published: '));
+  const comment = lines.findIndex(l => /^\s+Comment link: .*\/v\/.*#[0-9a-f]{64}$/.test(l));
+  assert.ok(published >= 0 && comment > published, human.out);
+  assert.equal(cli('delete', /Edit link \(keep private\): (\S+)/.exec(human.out)[1]).code, 0);
 });
 
 test('CLI --notes ships NOTES.md with the page (tracked in #22)', async () => {

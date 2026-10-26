@@ -5,9 +5,10 @@
  * Durable Object (src/repo.ts). go-libfossil runs inside the object as wasm
  * (fossil/, src/fossil.ts); the Registry object (src/registry.ts) lists them.
  *
- * Access: the owner's bearer token, or an artifact's read or write token,
- * sent as `Authorization: Token <t>`. Links carry the token in the fragment:
+ * Access: the owner's bearer token, or an artifact's read, comment or write
+ * token, sent as `Authorization: Token <t>`. Links carry the token in the fragment:
  *   /v/<id>#<readToken>      read link
+ *   /v/<id>#<commentToken>   comment link: read, and comment
  *   /v/<id>#<writeToken>     edit link
  *   ...@<check-in>           that check-in instead of the tip
  *
@@ -25,6 +26,9 @@
  *   GET    /b/:id/:sha256?exp=&sig=          A blob, through a signed link from the bundle
  *   GET    /api/artifacts/:id/data[/<name>]  Page data (read)
  *   PUT    /api/artifacts/:id/data/<name>    Page data (write)
+ *   GET    /api/artifacts/:id/tickets?limit= The newest-changed threads with their changes (read)
+ *   POST   /api/artifacts/:id/tickets        Open, reply to, resolve or reopen a thread (comment)
+ *   GET    /api/artifacts/:id/timeline?since=<hash>&type=t   Entries that arrived after <hash> (read)
  *   POST   /r/:id                            Fossil sync: `fossil clone https://editor:<writeToken>@host/r/<id>`
  *   GET    /v/:id                            Viewer
  */
@@ -37,6 +41,8 @@ import { Registry } from './registry';
 import { blobLinks, getBlob, missingBlobs, pointersIn, putBlob } from './blobs';
 import type { FossilReply } from './fossil';
 import { b64decode, b64encode, clampTtl, genId, genToken, isoOrNull } from './util';
+import { ticketAuthor } from './ticket-author';
+import { TICKET_BODY, ticketChange } from './ticket-body';
 
 export { Repo, Registry };
 
@@ -196,7 +202,11 @@ async function handleCreate(req: Request, env: Env): Promise<Response> {
     id,
     tip: r.result.tip,
     viewerUrl: actor.explicit ? `${page}#${readToken}` : page,
-    ...(actor.explicit ? { editUrl: `${page}#${writeToken}`, cloneUrl: `${origin.replace('://', `://editor:${writeToken}@`)}/r/${id}` } : {}),
+    ...(actor.explicit ? {
+      editUrl: `${page}#${writeToken}`,
+      commentUrl: `${page}#${await repo(env, id).commentToken({ owner: true, token: '' })}`,
+      cloneUrl: `${origin.replace('://', `://editor:${writeToken}@`)}/r/${id}`,
+    } : {}),
     expiresAt: isoOrNull(expiresAt),
   }, 201);
 }
@@ -238,10 +248,10 @@ async function handleArtifact(req: Request, env: Env, ctx: ExecutionContext, id:
       if (url.searchParams.has('tip')) return reply(await stub.op(who, { op: 'tip' }));
       const r = (await stub.op(who, { op: 'info' })) as FossilReply<Record<string, unknown>>;
       if (!r.ok) return reply(r);
-      const [meta, role, readToken] = await Promise.all([stub.info(), stub.role(who), stub.readToken(who)]);
+      const [meta, role, readToken, commentToken] = await Promise.all([stub.info(), stub.role(who), stub.readToken(who), stub.commentToken(who)]);
       return json({
         id, title: meta?.title, role, expiresAt: isoOrNull(meta?.expiresAt ?? null), ...r.result, canManage,
-        ...(readToken ? { readToken } : {}),
+        ...(readToken ? { readToken } : {}), ...(commentToken ? { commentToken } : {}),
       });
     }
     if (method === 'PUT') {
@@ -307,6 +317,41 @@ async function handleArtifact(req: Request, env: Env, ctx: ExecutionContext, id:
     return new Response(b64decode(r.result.data), {
       headers: { 'Content-Type': 'application/octet-stream', 'X-Checkin': r.result.checkin, 'Cache-Control': 'no-store', ...corsHeaders(), ...secHeaders() },
     });
+  }
+
+  if (rest === '/tickets' && method === 'GET') {
+    // One engine call however many tickets there are: a comment link can add
+    // tickets, and none can be deleted.
+    const limit = url.searchParams.get('limit') ?? '100';
+    if (!/^[1-9][0-9]{0,2}$/.test(limit) || Number(limit) > 200) return json({ error: 'limit must be 1 to 200' }, 400);
+    return reply(await stub.op(who, { op: 'ticketThreads', limit: Number(limit) }));
+  }
+  if (rest === '/tickets' && method === 'POST') {
+    const b = await readBody(req, 65536);
+    const change = b && ticketChange(b);
+    if (!change) return json({ error: TICKET_BODY }, 400);
+    const role = await stub.role(who);
+    // The credential names the author, never the body.
+    const user = ticketAuthor(role === 'comment' ? { kind: 'comment' }
+      : actor.user ? { kind: 'account', name: actor.user.name }
+      : actor.legacy ? { kind: 'owner' } : { kind: 'edit' });
+    if (!change.ticketUuid) {
+      const r = (await stub.op(who, { op: 'ticketAdd', fields: change.fields, user, comment: '' })) as FossilReply<{ ticketUuid: string; artifact: string }>;
+      return r.ok ? json(r.result, 201) : reply(r);
+    }
+    const known = (await stub.op(who, { op: 'ticketChanges', ticketUuid: change.ticketUuid })) as FossilReply<unknown[]>;
+    if (!known.ok) return reply(known);
+    const r = (await stub.op(who, { op: 'ticketSet', ticketUuid: change.ticketUuid, fields: change.fields, user, comment: change.comment })) as FossilReply<{ artifact: string }>;
+    return r.ok ? json({ ticketUuid: change.ticketUuid, ...r.result }) : reply(r);
+  }
+  if (rest === '/timeline' && method === 'GET') {
+    const since = url.searchParams.get('since') ?? '';
+    const types = url.searchParams.getAll('type');
+    if (!/^([0-9a-f]{40}|[0-9a-f]{64})$/.test(since) || types.length > 8 || types.some(t => !/^(ci|e|f|g|t|w)$/.test(t))) {
+      return json({ error: 'since must be a full artifact hash; type may be ci, e, f, g, t or w' }, 400);
+    }
+    const r = (await stub.op(who, { op: 'timelineSince', hash: since, types })) as FossilReply<unknown[]>;
+    return r.ok ? json({ timeline: r.result }) : reply(r);
   }
 
   if (rest === '/data' && method === 'GET') {

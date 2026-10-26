@@ -42,6 +42,8 @@ flowchart LR
 
 **The viewer** (`public/viewer.html`, `viewer.js`) loads the chosen check-in through the API and renders it inside a sandboxed iframe with a per-response CSP nonce. It has a History panel, notices when a newer version is published, and gives the page the `window.artifact` API below. The access token never enters the iframe.
 
+**Comments** open in a panel beside the page (a sheet on a phone) from the bar's Comments button. Every link holder sees the threads, open ones first and resolved ones collapsed; the comment and edit links also get a comment box, a reply box and Resolve or Reopen on each thread. A new comment is anchored to the text selected in the page: the element's id when the selection is that element's whole text, else the quoted text. The page draws a numbered pin at each anchor it finds (the id first, else the quote, whitespace ignored) and the pin opens its thread; an anchor the version shown no longer has leaves its thread marked "Not found in this version", with no pin. A reply naming a check-in as `@<hash>` links that version. The page is told only each pin's anchor, number and whether it is resolved: no ticket text and no token.
+
 ### Access
 
 | Who | How | Can |

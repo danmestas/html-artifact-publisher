@@ -384,7 +384,7 @@ test('comment link: tickets through the API, a stock fossil clone and a terminal
   assert.equal(t.changes[2].fields.status, 'Closed');
   assert.equal((await tickets(a.comment)).status, 200, 'the comment link reads threads');
   assert.deepEqual(thread(t), {
-    uuid: t.uuid, title: 'The heading reads oddly.', status: 'Closed', anchor: 'intro',
+    uuid: t.uuid, title: 'The heading reads oddly.', status: 'Closed', resolved: true, anchor: 'intro', checkins: [],
     messages: [
       { user: 'comment-link', time: t.changes[0].time, text: 'The heading reads oddly.\nCan it be shorter?', status: '' },
       { user: 'edit-link', time: t.changes[1].time, text: 'Shortened in the next version.', status: '' },
@@ -445,6 +445,35 @@ test('comment link: tickets through the API, a stock fossil clone and a terminal
   const byOwner = await api(`/api/artifacts/${a.id}/tickets`, { method: 'POST', bearer: owner, body: { text: 'From the owner' } });
   assert.equal(byOwner.status, 201, byOwner.text);
   assert.equal((await tickets()).json.tickets.find(x => x.uuid === byOwner.json.ticketUuid).changes[0].user, 'owner');
+});
+
+if (process.env.VIEWER_BROWSER_QA === '1') test('real browser: comment pins, thread panel, resolve and the read link', async () => {
+  const { viewerQA, XSS } = await import('./viewer-browser.mjs');
+  const a = await create({ 'index.html': b64('<!doctype html><h1 id="intro">Heading text</h1><p>The quick brown <em>fox</em> jumps over the lazy dog.</p>') });
+  const post = async (token, body) => {
+    const r = await api(`/api/artifacts/${a.id}/tickets`, { method: 'POST', token, body });
+    assert.ok(r.status === 200 || r.status === 201, r.text);
+    return r.json.ticketUuid;
+  };
+  const heading = await post(a.comment, { text: 'About the heading', anchor: 'intro' });
+  await post(a.write, { ticketUuid: heading, text: `Shortened in @${a.tip.slice(0, 12)}.` });
+  await post(a.comment, { text: 'About the fox', anchor: 'brown fox jumps' });
+  await post(a.comment, { text: 'Where did it go', anchor: 'a sentence that is gone' });
+  await post(a.comment, { text: 'No anchor at all' });
+  await post(a.comment, { text: XSS.text, anchor: XSS.anchor });
+  // An author is whatever a clone's user was: push one named like markup.
+  let authorXss = false;
+  if (haveStockFossil) {
+    const clone = join(work, `${a.id}-qa.fossil`);
+    assert.ok(stock('clone', a.cloneUrl, clone).ok);
+    assert.ok(stock('user', 'new', XSS.author, '', 'x', '-R', clone).ok);
+    const added = stock('ticket', 'add', 'title', 'From a clone', 'status', 'Open', 'type', 'Comment', '-R', clone, '-U', XSS.author);
+    assert.ok(added.ok, added.out);
+    assert.ok(stock('push', a.cloneUrl, '-R', clone).ok);
+    authorXss = (await api(`/api/artifacts/${a.id}/tickets`, { token: a.read })).json.tickets.some(t => t.changes[0].user === XSS.author);
+    assert.ok(authorXss, 'the pushed ticket carries the markup-like author');
+  }
+  await viewerQA({ base, a: { ...a, authorXss }, api, output: join(root, '.wrangler/viewer-browser-qa') });
 });
 
 test('comment link: commenting is all it can do, and delete revokes it', async () => {

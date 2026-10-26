@@ -354,9 +354,10 @@ publish them in the directory like any other file.
 Asking the agent from inside the page is not available yet. Comment threads
 anchored to page elements, with a "Send to Claude" action and replies in the
 thread, are planned in the viewer. What exists today: any write to the artifact
-that carries the header `X-Wake: <kind>` (for example `comment`) makes the server
-notify the agent that "Artifact <id> has a new <kind> at check-in <short id>".
-The notification contains ids only. Page code cannot set this header; the
+that carries the header `X-Wake: <kind>` (`comment`, `reply`, `resolve` or
+`publish`) makes the server wake whatever sink the host configured (a webhook,
+notify or NATS; README, Wake sinks) with the artifact id, check-in, ticket,
+author and kind. The wake contains ids only. Page code cannot set this header; the
 runtime's `publish` does not send it.
 
 When woken:

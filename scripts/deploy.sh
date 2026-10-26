@@ -5,7 +5,8 @@
 #   doppler run --project html-artifact-publisher --config prd -- sh scripts/deploy.sh
 #
 # Needs CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID and BEARER_TOKEN;
-# NOTIFY_API_KEY is optional. The API token also needs R2 edit permission (the
+# NOTIFY_API_KEY and the wake sink (WAKE_SINK_KIND, WAKE_SINK_URL,
+# WAKE_SINK_SECRET; README, Wake sinks) are optional. The API token also needs R2 edit permission (the
 # blob bucket is created on first deploy). Secrets ride the deploy (--secrets-file), so the
 # new version never runs without them. Expects src/fossil.wasm (npm run build:wasm).
 set -eu
@@ -49,6 +50,7 @@ trap 'rm -f "$secrets" "$public_log"' EXIT INT TERM
 node -e '
   const s = { BEARER_TOKEN: process.env.BEARER_TOKEN, OWNER_EMAIL: process.env.OWNER_EMAIL };
   if (process.env.NOTIFY_API_KEY) s.NOTIFY_API_KEY = process.env.NOTIFY_API_KEY;
+  if (process.env.WAKE_SINK_SECRET) s.WAKE_SINK_SECRET = process.env.WAKE_SINK_SECRET;
   process.stdout.write(JSON.stringify(s));
 ' > "$secrets"
 # The blob bucket (wrangler.jsonc, BLOBS) must exist before a Worker that binds it.
@@ -69,6 +71,10 @@ if [ -z "${PUBLIC_ORIGIN:-}" ]; then
   ' "$public_log")
 fi
 [ "$PUBLIC_ORIGIN" != "$APP_ORIGIN" ] || { printf '%s\n' 'deploy: public and app origins must differ' >&2; exit 1; }
-npx wrangler deploy --secrets-file "$secrets" --var "APP_ORIGIN:$APP_ORIGIN" --var "PUBLIC_ORIGIN:$PUBLIC_ORIGIN" --var "EMAIL_FROM:$EMAIL_FROM" --var 'TEST_MAIL_TRANSPORT:'
+# The wake sink rides the deploy only when set; unset keeps wrangler.jsonc's empty values.
+set --
+[ -z "${WAKE_SINK_KIND:-}" ] || set -- "$@" --var "WAKE_SINK_KIND:$WAKE_SINK_KIND"
+[ -z "${WAKE_SINK_URL:-}" ] || set -- "$@" --var "WAKE_SINK_URL:$WAKE_SINK_URL"
+npx wrangler deploy --secrets-file "$secrets" --var "APP_ORIGIN:$APP_ORIGIN" --var "PUBLIC_ORIGIN:$PUBLIC_ORIGIN" --var "EMAIL_FROM:$EMAIL_FROM" --var 'TEST_MAIL_TRANSPORT:' "$@"
 # CI must not mistake the first (public) Worker URL for the signed-in app.
 printf 'APP_URL=%s\nPUBLIC_URL=%s\n' "$APP_ORIGIN" "$PUBLIC_ORIGIN"

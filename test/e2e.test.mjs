@@ -9,7 +9,8 @@ import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, readdirSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, createHmac, randomBytes } from 'node:crypto';
+import { createServer } from 'node:http';
 import { Artifact, createArtifact } from '../public/client.js';
 import { controls, thread } from '../public/comments.js';
 import { tmpdir } from 'node:os';
@@ -22,6 +23,15 @@ const owner = 'e2e-owner-token';
 const work = mkdtempSync(join(tmpdir(), 'artifact-e2e-'));
 const fsclient = join(work, 'fsclient');
 let server;
+// The wake sink: a webhook that records every delivery and answers 500, so the
+// tests also show a failing sink never fails the write.
+const wakeSecret = 'e2e-wake-secret';
+const wakes = [];
+const hook = createServer((req, res) => {
+  let body = '';
+  req.on('data', d => { body += d; });
+  req.on('end', () => { wakes.push({ headers: req.headers, body }); res.writeHead(500).end('down'); });
+});
 
 const b64 = s => Buffer.from(s).toString('base64');
 const fromB64 = s => Buffer.from(s, 'base64').toString();
@@ -80,9 +90,11 @@ function cli(...args) {
 
 before(async () => {
   execFileSync('go', ['build', '-o', fsclient, './cmd/fsclient'], { cwd: join(root, 'fossil'), stdio: 'inherit' });
+  await new Promise(r => hook.listen(0, '127.0.0.1', r));
+  const wakeVars = ['--var', 'WAKE_SINK_KIND:webhook', '--var', `WAKE_SINK_URL:http://127.0.0.1:${hook.address().port}/wake`, '--var', `WAKE_SINK_SECRET:${wakeSecret}`];
   // Its own process group, so after() can stop wrangler and workerd together.
   server = spawn(join(root, 'node_modules/.bin/wrangler'), ['dev', '--port', String(port), '--ip', '127.0.0.1', '--persist-to', join(work, 'state'),
-    '--var', `BEARER_TOKEN:${owner}`, '--show-interactive-dev-session=false'], { cwd: root, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+    '--var', `BEARER_TOKEN:${owner}`, ...wakeVars, '--show-interactive-dev-session=false'], { cwd: root, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
   let log = '';
   server.stdout.on('data', d => { log += d; });
   server.stderr.on('data', d => { log += d; });
@@ -96,6 +108,7 @@ before(async () => {
 });
 
 after(() => {
+  hook.close();
   if (server) try { process.kill(-server.pid, 'SIGTERM'); } catch { /* already gone */ }
   rmSync(work, { recursive: true, force: true });
 });
@@ -134,6 +147,31 @@ test('publish, read, update, history and conflicts', async () => {
 
   const hist = await api(`/api/artifacts/${a.id}`, { token: a.read });
   assert.deepEqual(hist.json.timeline.map(c => c.comment), ['v2', 'Publish']);
+});
+
+test('X-Wake: an update wakes the sink with ids only, and a failing sink does not fail it', async () => {
+  const a = await create({ 'index.html': b64('<h1>one</h1>') });
+  const put = (wake, parent) => fetch(`${base}/api/artifacts/${a.id}`, {
+    method: 'PUT', headers: { Authorization: `Token ${a.write}`, 'X-Wake': wake },
+    body: JSON.stringify({ parent, files: { 'index.html': b64(`<h1>${wake}</h1>`) }, user: 'reviewer' }),
+  });
+  const before = wakes.length;
+  const r = await put('comment', a.tip);
+  assert.equal(r.status, 200);
+  const { tip } = await r.json();
+  for (let i = 0; i < 100 && wakes.length === before; i++) await new Promise(res => setTimeout(res, 50));
+  assert.equal(wakes.length, before + 1, 'the sink was called once');
+  const w = wakes.at(-1);
+  assert.equal(w.headers['x-signature'], `sha256=${createHmac('sha256', wakeSecret).update(w.body).digest('hex')}`);
+  assert.equal(w.headers['idempotency-key'], `${a.id}-${tip}`);
+  assert.deepEqual(JSON.parse(w.body), { artifact: a.id, checkin: tip, ticket: null, author: 'reviewer', kind: 'comment' });
+  assert.ok(!w.body.includes(a.write) && !w.body.includes(a.read) && !w.body.includes('http'));
+
+  // Not a wake kind: the write lands and nobody is woken.
+  const quiet = await put('shout', tip);
+  assert.equal(quiet.status, 200);
+  await new Promise(res => setTimeout(res, 300));
+  assert.equal(wakes.length, before + 1);
 });
 
 test('multi-file asset updates, history and sync remain usable', async () => {

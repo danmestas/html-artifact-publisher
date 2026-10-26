@@ -547,6 +547,113 @@ test('attached responder: attached.json set and cleared by a stock fossil, read 
   assert.match(html, /id="responderNote"/);
 });
 
+// The wakes for artifact `id`, once `n` have arrived and a quiet spell shows no more follow.
+async function wakesFor(id, n) {
+  const mine = () => wakes.filter(w => JSON.parse(w.body).artifact === id);
+  for (let i = 0; i < 200 && mine().length < n; i++) await new Promise(res => setTimeout(res, 50));
+  await new Promise(res => setTimeout(res, 400));
+  return mine().map(w => {
+    assert.equal(w.headers['x-signature'], `sha256=${createHmac('sha256', wakeSecret).update(w.body).digest('hex')}`, 'signed');
+    return { key: w.headers['idempotency-key'], ...JSON.parse(w.body) };
+  });
+}
+
+test('wake: API comments, replies, resolves and reopens wake the sink once each', async () => {
+  const a = await create({ 'index.html': b64('<h1 id="intro">wake me</h1>') });
+  const post = (token, body) => api(`/api/artifacts/${a.id}/tickets`, { method: 'POST', token, body });
+  const event = (kind, change, ticket, author) => ({ key: `${a.id}-${change}`, artifact: a.id, checkin: change, ticket, author, kind });
+
+  const first = await post(a.comment, { text: 'Too loud?', anchor: 'intro' });
+  assert.equal(first.status, 201, first.text);
+  assert.deepEqual(await wakesFor(a.id, 1), [event('comment', first.json.artifact, first.json.ticketUuid, 'comment-link')]);
+
+  const reply = await post(a.write, { ticketUuid: first.json.ticketUuid, text: 'Quieter now.' });
+  assert.equal(reply.status, 200, reply.text);
+  const resolve = await post(a.comment, { ticketUuid: first.json.ticketUuid, status: 'Closed' });
+  assert.equal(resolve.status, 200, resolve.text);
+  const reopen = await post(a.comment, { ticketUuid: first.json.ticketUuid, status: 'Open' });
+  assert.equal(reopen.status, 200, reopen.text);
+  const byOwner = await api(`/api/artifacts/${a.id}/tickets`, { method: 'POST', bearer: owner, body: { ticketUuid: first.json.ticketUuid, text: 'Noted.' } });
+  assert.equal(byOwner.status, 200, byOwner.text);
+  // Refused writes wake nobody.
+  assert.equal((await post(a.read, { text: 'readers cannot comment' })).status, 403);
+  assert.equal((await post(a.comment, { text: '' })).status, 400);
+  assert.equal((await post(a.comment, { ticketUuid: 'f'.repeat(40), text: 'x' })).status, 404);
+
+  assert.deepEqual(await wakesFor(a.id, 5), [
+    event('comment', first.json.artifact, first.json.ticketUuid, 'comment-link'),
+    event('reply', reply.json.artifact, first.json.ticketUuid, 'edit-link'),
+    event('resolve', resolve.json.artifact, first.json.ticketUuid, 'comment-link'),
+    event('reply', reopen.json.artifact, first.json.ticketUuid, 'comment-link'),
+    event('reply', byOwner.json.artifact, first.json.ticketUuid, 'owner'),
+  ]);
+});
+
+test('wake: a pushed ticket wakes the sink once; clones, pulls and pushes of nothing new wake nobody', { skip: !haveStockFossil && !process.env.CI && 'stock fossil is not installed' }, async () => {
+  const a = await create({ 'index.html': b64('<p>terminal</p>') });
+  const first = await api(`/api/artifacts/${a.id}/tickets`, { method: 'POST', token: a.comment, body: { text: 'From the viewer' } });
+  assert.equal(first.status, 201, first.text);
+  assert.equal((await wakesFor(a.id, 1)).length, 1);
+  const changes = async uuid => (await api(`/api/artifacts/${a.id}/tickets`, { token: a.read })).json.tickets.find(t => t.uuid === uuid).changes;
+
+  const clone = join(work, `${a.id}-wake.fossil`);
+  const cloned = stock('clone', a.cloneUrl, clone);
+  assert.ok(cloned.ok, cloned.out);
+  for (const args of [['pull', a.cloneUrl], ['push', a.cloneUrl], ['sync', a.cloneUrl]]) {
+    const r = stock(...args, '-R', clone);
+    assert.ok(r.ok, r.out);
+  }
+  assert.equal((await wakesFor(a.id, 1)).length, 1, 'the viewer comment going back and forth is not news');
+
+  const added = stock('ticket', 'add', 'title', 'From the terminal', 'status', 'Open', 'type', 'Comment', '-R', clone);
+  assert.ok(added.ok, added.out);
+  const uuid = /([0-9a-f]{40})/.exec(added.out)?.[1];
+  assert.ok(uuid, added.out);
+  const pushed = stock('push', a.cloneUrl, '-R', clone);
+  assert.ok(pushed.ok, pushed.out);
+  const [created] = await changes(uuid);
+  const got = await wakesFor(a.id, 2);
+  assert.equal(got.length, 2, JSON.stringify(got));
+  assert.deepEqual(got[1], { key: `${a.id}-${created.artifact}`, artifact: a.id, checkin: created.artifact, ticket: uuid, author: 'editor', kind: 'comment' });
+
+  // From the terminal: a reply on the viewer's thread and a resolve, in one push.
+  assert.ok(stock('ticket', 'change', first.json.ticketUuid, '+comment', 'Seen it.', '-R', clone).ok);
+  assert.ok(stock('ticket', 'change', uuid, 'status', 'Closed', '-R', clone).ok);
+  assert.ok(stock('push', a.cloneUrl, '-R', clone).ok);
+  const replied = (await changes(first.json.ticketUuid)).at(-1), closed = (await changes(uuid)).at(-1);
+  const both = (await wakesFor(a.id, 4)).slice(2);
+  assert.deepEqual(both.sort((x, y) => x.kind.localeCompare(y.kind)), [
+    { key: `${a.id}-${replied.artifact}`, artifact: a.id, checkin: replied.artifact, ticket: first.json.ticketUuid, author: 'editor', kind: 'reply' },
+    { key: `${a.id}-${closed.artifact}`, artifact: a.id, checkin: closed.artifact, ticket: uuid, author: 'editor', kind: 'resolve' },
+  ]);
+
+  // Another clone takes everything: nothing new reached the Worker.
+  const other = join(work, `${a.id}-wake-2.fossil`);
+  assert.ok(stock('clone', a.cloneUrl, other).ok);
+  assert.ok(stock('pull', a.cloneUrl, '-R', clone).ok);
+  assert.equal((await wakesFor(a.id, 4)).length, 4);
+});
+
+test('wake: a push of N tickets wakes N, and at most 40', { skip: !haveStockFossil && !process.env.CI && 'stock fossil is not installed' }, async () => {
+  const a = await create({ 'index.html': b64('<p>many</p>') });
+  const clone = join(work, `${a.id}-many.fossil`);
+  assert.ok(stock('clone', a.cloneUrl, clone).ok);
+  const add = n => {
+    for (let i = 0; i < n; i++) assert.ok(stock('ticket', 'add', 'title', `t${i}`, 'status', 'Open', 'type', 'Comment', '-R', clone).ok);
+    const r = stock('push', a.cloneUrl, '-R', clone);
+    assert.ok(r.ok, r.out);
+  };
+  add(3);
+  const three = await wakesFor(a.id, 3);
+  assert.equal(three.length, 3);
+  assert.ok(three.every(w => w.kind === 'comment' && w.author === 'editor'));
+  assert.equal(new Set(three.map(w => w.ticket)).size, 3);
+  add(45);
+  const all = await wakesFor(a.id, 43);
+  assert.equal(all.length, 43, 'the push of 45 woke 40');
+  assert.equal(new Set(all.map(w => w.key)).size, 43);
+});
+
 if (process.env.VIEWER_BROWSER_QA === '1') test('real browser: comment pins, thread panel, resolve and the read link', async () => {
   const { viewerQA, XSS } = await import('./viewer-browser.mjs');
   const a = await create({ 'index.html': b64('<!doctype html><h1 id="intro">Heading text</h1><p>The quick brown <em>fox</em> jumps over the lazy dog.</p>') });

@@ -53,6 +53,21 @@ export function wakeKind(value: string | null | undefined): WakeKind | null {
   return value && KINDS.includes(value) ? (value as WakeKind) : null;
 }
 
+/**
+ * The kind of a ticket change: the change that opens a thread is a comment,
+ * one that sets status Closed a resolve, and any other (a remark, a reopen to
+ * status Open, a field edit) a reply. The API and a fossil push agree on it.
+ */
+export function ticketKind(opens: boolean, fields: Record<string, string>): WakeKind {
+  return opens ? 'comment' : fields.status === 'Closed' ? 'resolve' : 'reply';
+}
+
+/**
+ * The most ticket changes one sync request wakes for, so a large push cannot
+ * fan out into unbounded subrequests (a free-plan Worker has 50 in all).
+ */
+export const WAKE_FANOUT = 40;
+
 const unknownLogged = new Set<string>();
 
 /** Deliver `event` to the sink the env names. Never rejects. */

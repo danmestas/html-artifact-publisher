@@ -7,6 +7,21 @@
 import { DurableObject } from 'cloudflare:workers';
 import { run, type FossilReply, type FossilRequest } from './fossil';
 import { genToken, sha256hex, timingSafeEqual } from './util';
+import { WAKE_FANOUT, ticketKind, type WakeKind } from './wake';
+
+/** A ticket change a push stored: its ticket, its artifact hash, who made it and what it was. */
+export interface PushedTicket {
+  ticket: string;
+  change: string;
+  author: string;
+  kind: WakeKind;
+}
+
+interface TicketChange {
+  artifact: string;
+  user: string;
+  fields?: Record<string, string>;
+}
 
 /** Each role can do everything the ones before it can. */
 export type Role = 'read' | 'comment' | 'write';
@@ -131,11 +146,58 @@ export class Repo extends DurableObject<Env> {
     return run<unknown>(this.ctx.storage, request);
   }
 
-  /** Fossil's sync protocol; the repository's own logins decide access. */
-  async sync(body: Uint8Array, cookie: string): Promise<FossilReply<{ data: string }>> {
+  /**
+   * Fossil's sync protocol; the repository's own logins decide access. When
+   * the request stored artifacts (a push), the result also lists the ticket
+   * changes among them, so the Worker can wake for each.
+   */
+  async sync(body: Uint8Array, cookie: string): Promise<FossilReply<{ data: string; tickets?: PushedTicket[] }>> {
     this.ensureTable();
     if (!this.meta()) return { error: 'not found', code: 'not_found' };
-    return run<{ data: string }>(this.ctx.storage, { op: 'sync', cookie }, body);
+    // No await from here to the return: the object runs no other request in
+    // between, so `before` is exactly the last artifact stored before this one.
+    const before = this.lastArrived();
+    const r = run<{ data: string }>(this.ctx.storage, { op: 'sync', cookie }, body);
+    if (!r.ok || !r.result || !before || this.lastArrived() === before) return r;
+    return { ...r, result: { ...r.result, tickets: this.ticketsSince(before) } };
+  }
+
+  /**
+   * The artifact this repository stored last, in the arrival order
+   * timelineSince uses: by receipt, then rid. Phantoms have not arrived.
+   */
+  private lastArrived(): string | null {
+    return this.ctx.storage.sql.exec<{ uuid: string }>(
+      'SELECT uuid FROM blob WHERE size >= 0 ORDER BY coalesce(rcvid, 0) DESC, rid DESC LIMIT 1',
+    ).toArray()[0]?.uuid ?? null;
+  }
+
+  /** The ticket changes that arrived after `hash`, oldest first, at most WAKE_FANOUT. */
+  private ticketsSince(hash: string): PushedTicket[] {
+    const since = run<{ uuid: string }[]>(this.ctx.storage, { op: 'timelineSince', hash, types: ['t'] });
+    const entries = since.ok ? since.result ?? [] : [];
+    if (entries.length > WAKE_FANOUT) {
+      console.warn(`wake: a sync stored ${entries.length} ticket changes; waking for the newest ${WAKE_FANOUT}`);
+    }
+    const threads = new Map<string, TicketChange[]>();
+    const out: PushedTicket[] = [];
+    for (const { uuid: change } of entries.slice(0, WAKE_FANOUT).reverse()) {
+      // A ticket change carries its ticket's id as the tkt-<id> tag.
+      const ticket = this.ctx.storage.sql.exec<{ id: string }>(
+        `SELECT substr(tag.tagname, 5) AS id FROM blob JOIN tagxref ON tagxref.rid = blob.rid
+         JOIN tag ON tag.tagid = tagxref.tagid WHERE blob.uuid = ? AND tag.tagname GLOB 'tkt-*' LIMIT 1`, change,
+      ).toArray()[0]?.id;
+      if (!ticket) continue;
+      if (!threads.has(ticket)) {
+        const r = run<TicketChange[]>(this.ctx.storage, { op: 'ticketChanges', ticketUuid: ticket });
+        threads.set(ticket, r.ok ? r.result ?? [] : []);
+      }
+      const changes = threads.get(ticket)!;
+      const i = changes.findIndex(c => c.artifact === change);
+      if (i < 0) continue;
+      out.push({ ticket, change, author: changes[i]!.user, kind: ticketKind(i === 0, changes[i]!.fields ?? {}) });
+    }
+    return out;
   }
 
   async info(): Promise<Meta | null> {

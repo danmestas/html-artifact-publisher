@@ -358,7 +358,10 @@ that carries the header `X-Wake: <kind>` (`comment`, `reply`, `resolve` or
 `publish`) makes the server wake whatever sink the host configured (a webhook,
 notify or NATS; README, Wake sinks) with the artifact id, check-in, ticket,
 author and kind. The wake contains ids only. Page code cannot set this header; the
-runtime's `publish` does not send it.
+runtime's `publish` does not send it. A comment thread wakes the sink on its own:
+each new thread (`comment`), remark or reopen (`reply`) and close (`resolve`),
+made in the viewer or pushed with `fossil ticket` and `fossil push`, wakes it once,
+with the ticket's id and the change's hash as the check-in.
 
 When woken:
 

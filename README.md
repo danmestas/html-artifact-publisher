@@ -31,7 +31,7 @@ flowchart LR
     browser -- "GET /v/:id, API" --> worker
     worker --> registry
     worker --> repo
-    worker -- "X-Wake" --> sink
+    worker -- "X-Wake, comments" --> sink
 ```
 
 **The Repo object** holds one Fossil repository in its own SQLite database: Fossil's real tables (`blob`, `event`, `mlink`, `leaf` and the rest), plus one row naming the artifact and the hashes of its two tokens. [go-libfossil](https://github.com/danmestas/go-libfossil), compiled to WebAssembly with TinyGo (`fossil/`, about 0.9 MB gzipped), runs inside the object and reaches that database through `dosql`, a small `database/sql` driver over the object's synchronous `ctx.storage.sql`. Each request is one call into go-libfossil inside one SQLite transaction, so it either completes or leaves nothing behind.
@@ -267,6 +267,8 @@ Every sink carries the same ids and nothing else, no link, clone URL or token; t
 ```
 
 `ticket` is the ticket's hash when the wake comes from a comment thread, otherwise `null`.
+
+**Comments wake the sink by themselves**, with no header. Every ticket change wakes it once, whichever way it arrived: through `POST /api/artifacts/:id/tickets` (the viewer, the API) or in a `fossil push` (`fossil ticket add`, `fossil ticket change`). The change that opens a thread is `comment`, one that sets `status` to `Closed` is `resolve`, and any other change, a reopen included, is `reply`. For these wakes `checkin` is the ticket change's own artifact hash, not the page's tip, so the idempotency key `<artifact>-<checkin>` names that change: the same change announced twice carries the same key. `author` is the credential's name for an API comment and the change's Fossil user for a pushed one. A clone, a pull, or a push of artifacts the repository already holds (a viewer comment travelling back from a clone) stores nothing and wakes nobody. One sync request wakes for at most 40 ticket changes, the newest; the rest are logged, and the responder finds them when it pulls.
 
 - **`webhook`** POSTs that JSON with `Content-Type: application/json`, `X-Signature: sha256=<hex>` (HMAC-SHA256 of the exact body bytes, keyed with `WAKE_SINK_SECRET`) and `Idempotency-Key: <artifact>-<checkin>`. Verify the signature over the raw body before parsing it, and drop a key you have already handled.
 - **`notify`** posts to [notify](https://github.com/danmestas/notify) at `WAKE_SINK_URL/v1/inbox/conversations/NOTIFY_AGENT/messages`, conversation `artifact-<id>`, with `Authorization: ApiKey <WAKE_SINK_SECRET>`, `Idempotency-Key: <artifact>-<first 32 of checkin>` and the text "Artifact <id> has a new <kind> at check-in <short id>. Pull it to read it." `NOTIFY_AGENT` (required) and `NOTIFY_SUBSCRIBER` (optional) stay in `wrangler.jsonc`.

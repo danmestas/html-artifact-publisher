@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
-import { wake, wakeKind } from '../src/wake.ts';
+import { WAKE_FANOUT, ticketKind, wake, wakeKind } from '../src/wake.ts';
 
 // The wake sinks: one event, delivered however the host chose by env, never
 // carrying a clone URL or a credential, never failing the write that fired it.
@@ -238,4 +238,19 @@ test('failing sinks resolve: HTTP errors, network errors and timeouts are logged
   assert.equal(q.lines.length, 3);
   assert.match(q.lines[0], /500/);
   assert.ok(q.lines.every(l => !l.includes('hook-secret-9')));
+});
+
+test('ticket kinds: a new thread is a comment, status Closed a resolve, anything else a reply', () => {
+  assert.equal(ticketKind(true, { title: 't', comment: 'c', status: 'Open' }), 'comment');
+  assert.equal(ticketKind(true, { status: 'Closed' }), 'comment', 'the first change opens the thread whatever it says');
+  assert.equal(ticketKind(false, { status: 'Closed' }), 'resolve');
+  assert.equal(ticketKind(false, { status: 'Closed', icomment: 'done' }), 'resolve');
+  assert.equal(ticketKind(false, { icomment: 'thanks' }), 'reply');
+  assert.equal(ticketKind(false, { '+comment': 'more' }), 'reply');
+  assert.equal(ticketKind(false, { status: 'Open' }), 'reply', 'a reopen wakes as a reply');
+  assert.equal(ticketKind(false, {}), 'reply');
+});
+
+test('a push wakes for at most WAKE_FANOUT ticket changes', () => {
+  assert.equal(WAKE_FANOUT, 40);
 });

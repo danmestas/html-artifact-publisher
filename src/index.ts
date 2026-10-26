@@ -44,7 +44,7 @@ import { b64decode, b64encode, clampTtl, genId, genToken, isoOrNull } from './ut
 import { ATTACHED_FILE, attachedFrom } from './attached';
 import { ticketAuthor } from './ticket-author';
 import { TICKET_BODY, ticketChange } from './ticket-body';
-import { wake, wakeKind } from './wake';
+import { ticketKind, wake, wakeKind, type WakeKind } from './wake';
 
 export { Repo, Registry };
 
@@ -132,6 +132,14 @@ function validFiles(files: unknown): files is Record<string, string> {
 function wakeOnHeader(env: Env, ctx: ExecutionContext, req: Request, id: string, tip: string, author: string): void {
   const kind = wakeKind(req.headers.get('X-Wake'));
   if (kind) ctx.waitUntil(wake(env, { artifact: id, checkin: tip, ticket: null, author, kind }));
+}
+
+// A ticket change wakes the sink whether it came through the API or a fossil
+// push. `checkin` is the change's own artifact hash, so the idempotency key
+// `<artifact>-<hash>` names the change, not the page: the same change seen
+// twice carries the same key, and the receiver drops the second.
+function wakeOnTicket(env: Env, ctx: ExecutionContext, id: string, ticket: string, change: string, author: string, kind: WakeKind): void {
+  ctx.waitUntil(wake(env, { artifact: id, checkin: change, ticket, author, kind }));
 }
 
 // ─── Handlers ────────────────────────────────────────────────────────────────
@@ -327,12 +335,16 @@ async function handleArtifact(req: Request, env: Env, ctx: ExecutionContext, id:
       : actor.legacy ? { kind: 'owner' } : { kind: 'edit' });
     if (!change.ticketUuid) {
       const r = (await stub.op(who, { op: 'ticketAdd', fields: change.fields, user, comment: '' })) as FossilReply<{ ticketUuid: string; artifact: string }>;
-      return r.ok ? json(r.result, 201) : reply(r);
+      if (!r.ok || !r.result) return reply(r);
+      wakeOnTicket(env, ctx, id, r.result.ticketUuid, r.result.artifact, user, 'comment');
+      return json(r.result, 201);
     }
     const known = (await stub.op(who, { op: 'ticketChanges', ticketUuid: change.ticketUuid })) as FossilReply<unknown[]>;
     if (!known.ok) return reply(known);
     const r = (await stub.op(who, { op: 'ticketSet', ticketUuid: change.ticketUuid, fields: change.fields, user, comment: change.comment })) as FossilReply<{ artifact: string }>;
-    return r.ok ? json({ ticketUuid: change.ticketUuid, ...r.result }) : reply(r);
+    if (!r.ok || !r.result) return reply(r);
+    wakeOnTicket(env, ctx, id, change.ticketUuid, r.result.artifact, user, ticketKind(false, change.fields));
+    return json({ ticketUuid: change.ticketUuid, ...r.result });
   }
   if (rest === '/timeline' && method === 'GET') {
     const since = url.searchParams.get('since') ?? '';
@@ -381,8 +393,13 @@ async function handleArtifact(req: Request, env: Env, ctx: ExecutionContext, id:
   return json({ error: 'Not Found' }, 404);
 }
 
-/** Fossil's sync protocol (application/x-fossil). */
-async function handleSync(req: Request, env: Env, id: string): Promise<Response> {
+/**
+ * Fossil's sync protocol (application/x-fossil). A push that stored ticket
+ * changes wakes the sink once for each, as the ticket API does; a clone, a
+ * pull, or a push of artifacts the repository already had stores nothing and
+ * wakes nobody.
+ */
+async function handleSync(req: Request, env: Env, ctx: ExecutionContext, id: string): Promise<Response> {
   const type = (req.headers.get('Content-Type') ?? '').split(';')[0]!.trim().toLowerCase();
   if (type !== 'application/x-fossil') return new Response('send sync requests as application/x-fossil\n', { status: 415 });
   const cookie = (req.headers.get('Cookie') ?? '').match(/(?:^|;\s*)x-f-l-c=([^;]*)/)?.[1] ?? '';
@@ -390,6 +407,7 @@ async function handleSync(req: Request, env: Env, id: string): Promise<Response>
   if (r.code === 'not_found') return new Response('not found\n', { status: 404 });
   // Anything that failed was rolled back; tell the client so it stops.
   if (!r.ok || !r.result) return errorReply(r.error ?? 'sync failed');
+  for (const t of r.result.tickets ?? []) wakeOnTicket(env, ctx, id, t.ticket, t.change, t.author, t.kind);
   return new Response(b64decode(r.result.data), { headers: { 'Content-Type': 'application/x-fossil', 'Cache-Control': 'no-store' } });
 }
 
@@ -509,7 +527,7 @@ export default {
       if (method !== 'POST') return Response.redirect(new URL(`/v/${sync[1]}`, req.url).toString(), 302);
       const id = await registry(env).resolve(sync[1]!);
       if (!id) return new Response('not found\n', { status: 404 });
-      return handleSync(req, env, id);
+      return handleSync(req, env, ctx, id);
     }
 
     if (method === 'GET' && /^\/v\/[A-Za-z0-9_-]{1,64}$/.test(path)) return handleViewer(req, env);

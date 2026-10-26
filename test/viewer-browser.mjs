@@ -15,7 +15,7 @@ export const XSS = {
   author: '<img src=x onerror=window.__xss=4>',
 };
 
-export async function viewerQA({ base, a, api, output }) {
+export async function viewerQA({ base, a, api, output, attach }) {
   mkdirSync(output, { recursive: true });
   const session = 'viewer-comments-qa';
   const run = (...args) => {
@@ -248,6 +248,25 @@ export async function viewerQA({ base, a, api, output }) {
     assert.deepEqual({ ...readOnly, threads: readOnly.threads > 0 }, { form: true, replies: 0, resolves: 0, threads: true, note: 'Read only' });
     assert.ok((await pins()).length >= 3, 'readers see the pins');
     run('screenshot', join(output, 'read-link-desktop.png'));
+
+    // ── The responder banner above the threads: from attached.json, no republish ──
+    const banner = () => evaluate(`(() => { const n = document.getElementById('responderNote'); return { attached: n.dataset.attached, text: n.textContent.trim().replace(/\\s+/g, ' '), kids: n.querySelectorAll('*:not(strong):not(span)').length }; })()`);
+    assert.deepEqual(banner(), { attached: 'false', text: 'Comments are recorded; nothing is listening right now', kids: 0 });
+    if (attach) {
+      attach(JSON.stringify({ responder: XSS.text.split('\n')[0], contact: XSS.author }));
+      run('reload');
+      wait('#bar:not([hidden])');
+      run('click', '#commentsBtn');
+      wait('#responderNote[data-attached="true"]');
+      assert.deepEqual(banner(), { attached: 'true', text: `A responder is attached ${XSS.text.split('\n')[0]} (${XSS.author})`, kids: 0 });
+      assert.deepEqual(evaluate('[window.__xss]'), [null], 'markup in the file never ran');
+      run('screenshot', join(output, 'responder-attached.png'));
+      attach(null);
+      run('reload');
+      wait('#bar:not([hidden])');
+      run('click', '#commentsBtn');
+      wait('#responderNote[data-attached="false"]');
+    }
     return { output };
   } finally {
     page?.close();

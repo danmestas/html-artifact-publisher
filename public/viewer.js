@@ -8,7 +8,7 @@ import { renderDiagrams, renderPikchr } from './diagrams.js';
 import { embedFonts } from './fonts.js';
 import { zip } from './zip.js';
 import { preparePublication } from './export.js';
-import { anchorFor, arrange, controls, findQuotes, thread } from './comments.js';
+import { anchorFor, arrange, controls, findQuotes, responderNote, thread } from './comments.js';
 import { pagePins } from './page-pins.js';
 
 const $ = id => document.getElementById(id);
@@ -350,6 +350,7 @@ function replyForm(t) {
 
 function renderThreads() {
   const can = controls(info);
+  renderResponder();
   const { open, resolved, pins: next } = arrange(threads);
   $('commentCount').textContent = threads.length ? `${threads.length}${threadsTruncated ? '+' : ''}` : '';
   $('commentsNote').textContent = [
@@ -431,6 +432,14 @@ async function loadThreads() {
     threadsTruncated = result.truncated;
     renderThreads();
   } catch { /* offline or gone: keep what is shown */ }
+}
+
+function renderResponder() {
+  const n = responderNote(info);
+  $('responderNote').dataset.attached = String(n.attached);
+  $('responderHead').textContent = n.headline;
+  $('responderName').textContent = n.name;
+  $('responderContact').textContent = n.contact ? `(${n.contact})` : '';
 }
 
 function openPanel() {

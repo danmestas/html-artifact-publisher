@@ -19,6 +19,19 @@ export function controls(info) {
   };
 }
 
+/**
+ * What the thread panel says about a responder, from `info.attached` (the
+ * reply of GET /api/artifacts/:id; the server validated it, and the viewer
+ * renders every field as text, never as markup or a link).
+ */
+export function responderNote(info) {
+  const a = info.attached;
+  if (a && typeof a === 'object' && typeof a.responder === 'string' && a.responder) {
+    return { attached: true, headline: 'A responder is attached', name: a.responder, contact: typeof a.contact === 'string' ? a.contact : '' };
+  }
+  return { attached: false, headline: 'Comments are recorded; nothing is listening right now', name: '', contact: '' };
+}
+
 // Fossil's stock ticket statuses that mean the thread was answered. The
 // viewer writes only Open and Closed; the others come from a terminal.
 const RESOLVED = ['Closed', 'Fixed', 'Tested'];

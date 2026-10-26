@@ -485,6 +485,68 @@ test('comment link: tickets through the API, a stock fossil clone and a terminal
   assert.equal((await tickets()).json.tickets.find(x => x.uuid === byOwner.json.ticketUuid).changes[0].user, 'owner');
 });
 
+// The flag is state about the artifact, kept where every responder can set it:
+// an unversioned file, so it never makes a check-in and needs no republish.
+test('attached responder: attached.json set and cleared by a stock fossil, read by every link', { skip: !haveStockFossil && !process.env.CI && 'stock fossil is not installed' }, async () => {
+  const a = await create({ 'index.html': b64('<h1>who answers</h1>') });
+  const get = (token = a.read) => api(`/api/artifacts/${a.id}`, { token });
+  const clone = join(work, `${a.id}-attached.fossil`);
+  assert.ok(stock('clone', a.cloneUrl, clone).ok);
+  // The newest modification time wins a unversioned conflict, so each set is a second later than the last.
+  let mtime = Math.floor(Date.now() / 1000);
+  const stamp = () => new Date(++mtime * 1000).toISOString().slice(0, 19).replace('T', ' ');
+  const set = (content, name = 'attached.json') => {
+    const src = join(work, `${a.id}-${name}`);
+    writeFileSync(src, content);
+    const added = stock('uv', 'add', src, '--as', name, '--mtime', stamp(), '-R', clone);
+    assert.ok(added.ok, added.out);
+    const synced = stock('uv', 'sync', a.cloneUrl, '-R', clone);
+    assert.ok(synced.ok, synced.out);
+  };
+
+  for (const token of [a.read, a.comment, a.write]) assert.equal((await get(token)).json.attached, null, 'nothing attached yet');
+  const tip = (await get()).json.tip;
+
+  const since = '2026-10-26T12:00:00Z';
+  set(JSON.stringify({ responder: 'local session', since, contact: 'dan@example.com', secret: 'dropped' }));
+  for (const token of [a.read, a.comment, a.write]) {
+    const r = await get(token);
+    assert.deepEqual(r.json.attached, { responder: 'local session', since, contact: 'dan@example.com' }, 'public state: every link sees it');
+  }
+  assert.equal((await get()).json.tip, tip, 'no check-in, no republish');
+  assert.equal((await get()).json.timeline.length, 1);
+
+  // Only a write-capable user can set it; a read link cannot push it.
+  const readUrl = a.cloneUrl.replace(/editor:[0-9a-f]+@/, `viewer:${a.read}@`);
+  const vclone = join(work, `${a.id}-attached-viewer.fossil`);
+  assert.ok(stock('clone', readUrl, vclone).ok);
+  writeFileSync(join(work, 'forged.json'), JSON.stringify({ responder: 'forged' }));
+  stock('uv', 'add', join(work, 'forged.json'), '--as', 'attached.json', '-R', vclone);
+  stock('uv', 'sync', readUrl, '-R', vclone);
+  assert.equal((await get()).json.attached.responder, 'local session', 'a read link cannot change it');
+
+  // Untrusted content: unusable files read as absent, markup stays text.
+  let round = 0;
+  for (const bad of ['not json', '[]', '"x"', '{"responder":7}', '{"responder":""}', JSON.stringify({ responder: 'x'.repeat(101) }), ' '.repeat(5000) + '{"responder":"late"}']) {
+    const name = `valid ${++round}`;
+    set(JSON.stringify({ responder: name }));
+    assert.equal((await get()).json.attached?.responder, name, bad.slice(0, 20));
+    set(bad);
+    assert.equal((await get()).json.attached, null, bad.slice(0, 30));
+  }
+  set(JSON.stringify({ responder: '<img src=x onerror=alert(1)>', since: 'soon', contact: 'c'.repeat(500) }));
+  assert.deepEqual((await get()).json.attached, { responder: '<img src=x onerror=alert(1)>', since: null, contact: null });
+
+  // Removing it clears the flag on the next load.
+  assert.ok(stock('uv', 'rm', 'attached.json', '--mtime', stamp(), '-R', clone).ok);
+  assert.ok(stock('uv', 'sync', a.cloneUrl, '-R', clone).ok);
+  for (const token of [a.read, a.comment, a.write]) assert.equal((await get(token)).json.attached, null, 'cleared');
+
+  // The viewer has a place for the banner above the thread list.
+  const html = await (await fetch(`${base}/v/${a.id}`)).text();
+  assert.match(html, /id="responderNote"/);
+});
+
 if (process.env.VIEWER_BROWSER_QA === '1') test('real browser: comment pins, thread panel, resolve and the read link', async () => {
   const { viewerQA, XSS } = await import('./viewer-browser.mjs');
   const a = await create({ 'index.html': b64('<!doctype html><h1 id="intro">Heading text</h1><p>The quick brown <em>fox</em> jumps over the lazy dog.</p>') });
@@ -511,7 +573,19 @@ if (process.env.VIEWER_BROWSER_QA === '1') test('real browser: comment pins, thr
     authorXss = (await api(`/api/artifacts/${a.id}/tickets`, { token: a.read })).json.tickets.some(t => t.changes[0].user === XSS.author);
     assert.ok(authorXss, 'the pushed ticket carries the markup-like author');
   }
-  await viewerQA({ base, a: { ...a, authorXss }, api, output: join(root, '.wrangler/viewer-browser-qa') });
+  let stamp = Math.floor(Date.now() / 1000);
+  const attach = haveStockFossil ? content => {
+    const clone = join(work, `${a.id}-qa.fossil`);
+    const when = () => new Date(++stamp * 1000).toISOString().slice(0, 19).replace('T', ' ');
+    if (content === null) assert.ok(stock('uv', 'rm', 'attached.json', '--mtime', when(), '-R', clone).ok);
+    else {
+      writeFileSync(join(work, `${a.id}-qa-attached.json`), content);
+      assert.ok(stock('uv', 'add', join(work, `${a.id}-qa-attached.json`), '--as', 'attached.json', '--mtime', when(), '-R', clone).ok);
+    }
+    const synced = stock('uv', 'sync', a.cloneUrl, '-R', clone);
+    assert.ok(synced.ok, synced.out);
+  } : undefined;
+  await viewerQA({ base, a: { ...a, authorXss }, api, output: join(root, '.wrangler/viewer-browser-qa'), attach });
 });
 
 test('comment link: commenting is all it can do, and delete revokes it', async () => {

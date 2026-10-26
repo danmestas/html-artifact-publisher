@@ -17,8 +17,11 @@ environment decides most of the technical choices before taste does:
   `addEventListener`.
 - **No downloads.** "Save as PNG" / "Export CSV" buttons do nothing in the sandbox. If data
   must leave the page, show it in a `<textarea>` the reader can select and copy.
-- **One theme source.** The viewer has no toggle; the page follows the OS through
-  `prefers-color-scheme`. Every chart color is a CSS custom property with a dark override.
+- **One theme source.** Follow the viewer's Light / Dark / System choice through
+  the iframe's `prefers-color-scheme` (the browser derives it from the chrome's
+  used `color-scheme`). Standalone snapshots follow the browser/system scheme.
+  Use artifact-design's complete light/dark token pattern, including explicit
+  root overrides for standalone testing; never ship a pinned `data-theme`.
 - **Any width.** Pages are read from ~360 px phones to wide desktops.
 
 Page-level layout, type and tokens belong to the **artifact-design** skill; getting the file
@@ -130,13 +133,21 @@ What `node skills/artifact-dataviz/check-contrast.mjs` reports for these values:
   --surface: #ffffff; --ink: #1d1f23; --ink-2: #555a63; --grid: #e6e7ea;
   --s1: #2563c9; --s2: #4d7f12; --s3: #c0307a; --s4: #9a6b00;
   --s5: #7a4fd6; --s6: #0f8577; --s7: #c4520c; --s8: #5c6878;
+  color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --surface: #15171a; --ink: #e9eaec; --ink-2: #a7acb5; --grid: #2a2d33;
     --s1: #5b9bf0; --s2: #86bd4b; --s3: #ef6fae; --s4: #d8a636;
     --s5: #a98cf6; --s6: #33bba8; --s7: #f08a4b; --s8: #9aa6b6;
+    color-scheme: dark;
   }
+}
+:root[data-theme="dark"] {
+  --surface: #15171a; --ink: #e9eaec; --ink-2: #a7acb5; --grid: #2a2d33;
+  --s1: #5b9bf0; --s2: #86bd4b; --s3: #ef6fae; --s4: #d8a636;
+  --s5: #a98cf6; --s6: #33bba8; --s7: #f08a4b; --s8: #9aa6b6;
+  color-scheme: dark;
 }
 body { background: var(--surface); color: var(--ink); }
 ```
@@ -148,6 +159,10 @@ resolve in all browsers, so set colour through CSS classes or `style`:
 script. Canvas is the exception: read the tokens with
 `getComputedStyle(document.documentElement).getPropertyValue('--s1')` and redraw on
 `matchMedia('(prefers-color-scheme: dark)').addEventListener('change', redraw)`.
+That event also fires when the chrome changes the iframe's preferred scheme.
+If supporting explicit `data-theme` changes on the page root for standalone
+preview, also observe that attribute with `MutationObserver` and redraw from
+computed tokens; do not choose canvas colors from `matchMedia` alone.
 
 ## Marks, axes, labels
 

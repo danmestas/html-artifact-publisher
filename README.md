@@ -24,14 +24,14 @@ flowchart LR
     worker["Worker\nroutes + access"]
     registry["Registry DO\nids, slugs, titles"]
     repo["Repo DO, one per artifact\ngo-libfossil (wasm) + SQLite"]
-    notify["notify\n(optional)"]
+    sink["wake sink\nwebhook, notify, nats\n(optional)"]
 
     cli -- "HTTP API" --> worker
     fossilc -- "POST /r/:id" --> worker
     browser -- "GET /v/:id, API" --> worker
     worker --> registry
     worker --> repo
-    worker -- "X-Wake" --> notify
+    worker -- "X-Wake" --> sink
 ```
 
 **The Repo object** holds one Fossil repository in its own SQLite database: Fossil's real tables (`blob`, `event`, `mlink`, `leaf` and the rest), plus one row naming the artifact and the hashes of its two tokens. [go-libfossil](https://github.com/danmestas/go-libfossil), compiled to WebAssembly with TinyGo (`fossil/`, about 0.9 MB gzipped), runs inside the object and reaches that database through `dosql`, a small `database/sql` driver over the object's synchronous `ctx.storage.sql`. Each request is one call into go-libfossil inside one SQLite transaction, so it either completes or leaves nothing behind.
@@ -131,7 +131,8 @@ Secrets live in [Doppler](https://www.doppler.com). The deploy job reads them wi
    - `EMAIL_FROM`: the sender address on your onboarded Email Sending domain
    - `APP_ORIGIN`: your deployment's exact external HTTPS origin (no trailing slash)
    - `PUBLIC_ORIGIN` (optional): a separate exact HTTPS origin for public snapshots, without a trailing slash; omit it to discover the public Worker's `workers.dev` origin automatically
-   - `NOTIFY_API_KEY` (optional)
+   - `NOTIFY_API_KEY` (optional; the notify key while `WAKE_SINK_KIND` is unset)
+   - `WAKE_SINK_KIND`, `WAKE_SINK_URL`, `WAKE_SINK_SECRET` (optional; see [Wake sinks](#wake-sinks-optional))
    - Leave `TEST_MAIL_TRANSPORT` unset/empty. The production deploy script rejects it, checks owner/sender/origin configuration and uploads `OWNER_EMAIL` with the bearer secret. No privileged email is checked into production configuration.
 2. Create a Doppler service token for that config, and add it to the GitHub repository as the secret `DOPPLER_TOKEN` (until it exists, merges skip the deploy with a warning), under an environment named `production` (or as a repository secret). Environment protection rules, if you add any, gate every deploy.
 3. For a custom domain, add a `routes` entry to `wrangler.jsonc`; otherwise the Worker is served on `workers.dev`.
@@ -249,9 +250,38 @@ The viewer adds two things to a page, and only when the page uses them:
 
 The renderer and fonts are cached by the browser for a week (`public/_headers`).
 
-## Agent wake-up (optional)
+## Wake sinks (optional)
 
-An update sent with the header `X-Wake: <kind>` asks the Worker to tell an agent through [notify](https://github.com/danmestas/notify): it posts to `NOTIFY_URL/v1/inbox/conversations/NOTIFY_AGENT/messages` with conversation `artifact-<id>`. Only the id and check-in are sent; the agent pulls the change itself. Set `NOTIFY_URL`, `NOTIFY_AGENT` and optionally `NOTIFY_SUBSCRIBER` in `wrangler.jsonc`, and `wrangler secret put NOTIFY_API_KEY`.
+An update sent with the header `X-Wake: <kind>`, where kind is `comment`, `reply`, `resolve` or `publish`, asks the Worker to tell whoever answers comments that the artifact changed. Any other value updates the artifact and wakes nobody. The publisher knows no agent: the host picks the sink with three settings.
+
+| Setting | Holds |
+|---|---|
+| `WAKE_SINK_KIND` | `webhook`, `notify`, `nats` or `none` |
+| `WAKE_SINK_URL` | the webhook URL, the notify base URL, or the NATS WebSocket URL (`wss://…`) |
+| `WAKE_SINK_SECRET` (secret) | the webhook HMAC key, the notify API key, or the NATS credential |
+
+Every sink carries the same ids and nothing else, no link, clone URL or token; the responder pulls the change itself:
+
+```json
+{"artifact": "<id>", "checkin": "<hash>", "ticket": null, "author": "<name>", "kind": "comment"}
+```
+
+`ticket` is the ticket's hash when the wake comes from a comment thread, otherwise `null`.
+
+- **`webhook`** POSTs that JSON with `Content-Type: application/json`, `X-Signature: sha256=<hex>` (HMAC-SHA256 of the exact body bytes, keyed with `WAKE_SINK_SECRET`) and `Idempotency-Key: <artifact>-<checkin>`. Verify the signature over the raw body before parsing it, and drop a key you have already handled.
+- **`notify`** posts to [notify](https://github.com/danmestas/notify) at `WAKE_SINK_URL/v1/inbox/conversations/NOTIFY_AGENT/messages`, conversation `artifact-<id>`, with `Authorization: ApiKey <WAKE_SINK_SECRET>`, `Idempotency-Key: <artifact>-<first 32 of checkin>` and the text "Artifact <id> has a new <kind> at check-in <short id>. Pull it to read it." `NOTIFY_AGENT` (required) and `NOTIFY_SUBSCRIBER` (optional) stay in `wrangler.jsonc`.
+- **`nats`** publishes the JSON to the subject `artifact.<id>.<kind>` over NATS's WebSocket transport (Workers cannot open raw NATS connections): the server needs a `websocket` block with TLS. `WAKE_SINK_SECRET` is a token (`auth_token`), or `user:password` when it holds a colon. NKey and JWT credentials are not supported. Core NATS has no idempotency key; subscribers drop repeats by `artifact` and `checkin`.
+- **`none`** sends nothing; responders poll.
+
+Delivery is best-effort: it runs after the response, each attempt is bounded to five seconds, and a sink that is down, slow or refusing is logged and never fails the write. An unknown `WAKE_SINK_KIND` wakes nobody and is logged once; a kind set without its URL or secret wakes nobody.
+
+**Before `WAKE_SINK_*`.** While `WAKE_SINK_KIND` is unset, the Worker behaves as it always has: with `NOTIFY_URL`, `NOTIFY_AGENT` and the secret `NOTIFY_API_KEY` set it wakes notify with the request above, and otherwise wakes nobody. To move to the new names without changing a byte on the wire:
+
+1. Set `WAKE_SINK_KIND=notify`, `WAKE_SINK_URL=<the NOTIFY_URL value>` and `WAKE_SINK_SECRET=<the NOTIFY_API_KEY value>` where the deploy reads its secrets (Doppler; `scripts/deploy.sh` passes them only when set). Keep `NOTIFY_AGENT` and `NOTIFY_SUBSCRIBER` in `wrangler.jsonc`.
+2. Deploy, and confirm a write with `X-Wake: comment` still reaches the agent.
+3. Remove `NOTIFY_API_KEY` from Doppler (`wrangler secret delete NOTIFY_API_KEY` if it was set by hand) and empty `NOTIFY_URL`.
+
+To switch substrate later, change `WAKE_SINK_KIND`, `WAKE_SINK_URL` and `WAKE_SINK_SECRET` together.
 
 ## HTTP API
 

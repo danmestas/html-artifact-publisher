@@ -44,6 +44,7 @@ import { b64decode, b64encode, clampTtl, genId, genToken, isoOrNull } from './ut
 import { ATTACHED_FILE, attachedFrom } from './attached';
 import { ticketAuthor } from './ticket-author';
 import { TICKET_BODY, ticketChange } from './ticket-body';
+import { wake, wakeKind } from './wake';
 
 export { Repo, Registry };
 
@@ -122,31 +123,15 @@ function validFiles(files: unknown): files is Record<string, string> {
     typeof v === 'string' && /^[^\0\\]{1,255}$/.test(k) && !k.startsWith('/') && !k.split('/').includes('..'));
 }
 
-// ─── Agent wake (notify) ─────────────────────────────────────────────────────
+// ─── Wake on X-Wake ──────────────────────────────────────────────────────────
 //
-// A write carrying `X-Wake: <kind>` (e.g. "comment") tells the agent the
-// artifact changed. Only ids reach notify; the agent reads the change itself.
-// Best-effort; never fails the write.
+// A write carrying `X-Wake: <kind>` (comment, reply, resolve or publish) tells
+// the configured wake sink (src/wake.ts) the artifact changed. Runs after the
+// response; never fails or delays the write.
 
-function wake(env: Env, ctx: ExecutionContext, req: Request, id: string, tip: string): void {
-  const kind = (req.headers.get('X-Wake') ?? '').replace(/[^a-z-]/g, '').slice(0, 32);
-  const base: string = env.NOTIFY_URL, agent: string = env.NOTIFY_AGENT, subscriber: string = env.NOTIFY_SUBSCRIBER;
-  if (!kind || !base || !agent || !env.NOTIFY_API_KEY) return;
-  ctx.waitUntil(
-    fetch(`${base.replace(/\/$/, '')}/v1/inbox/conversations/${encodeURIComponent(agent)}/messages`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `ApiKey ${env.NOTIFY_API_KEY}`,
-        'Idempotency-Key': `${id}-${tip.slice(0, 32)}`,
-      },
-      body: JSON.stringify({
-        subscriberId: subscriber || 'html-artifact-publisher',
-        conversationId: `artifact-${id}`,
-        text: `Artifact ${id} has a new ${kind} at check-in ${tip.slice(0, 10)}. Pull it to read it.`,
-      }),
-    }).catch(() => undefined),
-  );
+function wakeOnHeader(env: Env, ctx: ExecutionContext, req: Request, id: string, tip: string, author: string): void {
+  const kind = wakeKind(req.headers.get('X-Wake'));
+  if (kind) ctx.waitUntil(wake(env, { artifact: id, checkin: tip, ticket: null, author, kind }));
 }
 
 // ─── Handlers ────────────────────────────────────────────────────────────────
@@ -272,15 +257,15 @@ async function handleArtifact(req: Request, env: Env, ctx: ExecutionContext, id:
       await registry(env).refBlobs(id, allowed);
       const missing = await missingBlobs(env, pointers, allowed);
       if (missing.length) return missingReply(missing);
+      const user = String(b.user ?? 'web').slice(0, 64);
       const r = (await stub.op(who, {
-        op: 'commit', parent: b.parent, files: b.files,
-        comment: String(b.message ?? 'Update').slice(0, 1000), user: String(b.user ?? 'web').slice(0, 64),
+        op: 'commit', parent: b.parent, files: b.files, comment: String(b.message ?? 'Update').slice(0, 1000), user,
       })) as FossilReply<{ tip: string }>;
       if (!r.ok || !r.result) return reply(r);
       const title = typeof b.title === 'string' ? b.title.slice(0, 300) : undefined;
       if (title) await stub.rename(title);
       await registry(env).touch(id, r.result.tip, title);
-      wake(env, ctx, req, id, r.result.tip);
+      wakeOnHeader(env, ctx, req, id, r.result.tip, user);
       return json(r.result);
     }
     if (method === 'DELETE') {

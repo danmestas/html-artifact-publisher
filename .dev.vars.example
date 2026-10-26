@@ -1,7 +1,9 @@
 # Copy to .dev.vars for local development. Do not commit real secrets.
 BEARER_TOKEN=local-dev-token-change-me
-# Optional: notify API key for agent wake-up.
+# Optional: notify API key for agent wake-up (used while WAKE_SINK_KIND is empty).
 NOTIFY_API_KEY=
+# Optional: wake sink credential (webhook HMAC key, notify API key or NATS token / user:password).
+WAKE_SINK_SECRET=
 # Invite-only account owner; lowercase email. Stable account id: instance-owner.
 OWNER_EMAIL=
 # Exact external origin, no trailing slash. Login links never use request Host.

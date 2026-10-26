@@ -6,6 +6,15 @@ export type TicketWriter =
   | { kind: 'edit' };
 
 /**
+ * A name fit to leave the Worker as an author: an empty name or one that looks
+ * like an email address becomes "account", and every name is capped at 64.
+ */
+export function authorName(name: string): string {
+  const n = name.trim();
+  return n && !n.includes('@') ? n.slice(0, 64) : 'account';
+}
+
+/**
  * The author recorded on a ticket change. It comes from the credential, never
  * from the request body. A ticket author is readable by every link holder and
  * every clone, and an account's name defaults to its email address, so a name
@@ -15,10 +24,8 @@ export function ticketAuthor(writer: TicketWriter): string {
   switch (writer.kind) {
     case 'comment':
       return 'comment-link';
-    case 'account': {
-      const name = writer.name.trim();
-      return name && !name.includes('@') ? name.slice(0, 64) : 'account';
-    }
+    case 'account':
+      return authorName(writer.name);
     case 'owner':
       return 'owner';
     case 'edit':

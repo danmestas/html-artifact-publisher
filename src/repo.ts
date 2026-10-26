@@ -1,14 +1,16 @@
 /**
  * Repo: one Durable Object per artifact. Its SQLite holds a whole Fossil
  * repository (go-libfossil's tables, via src/fossil.ts) plus one row of
- * artifact metadata and the hashes of its two link tokens.
+ * artifact metadata and the hashes of its three link tokens.
  */
 
 import { DurableObject } from 'cloudflare:workers';
 import { run, type FossilReply, type FossilRequest } from './fossil';
-import { sha256hex, timingSafeEqual } from './util';
+import { genToken, sha256hex, timingSafeEqual } from './util';
 
-export type Role = 'read' | 'write';
+/** Each role can do everything the ones before it can. */
+export type Role = 'read' | 'comment' | 'write';
+const RANK: Record<Role, number> = { read: 0, comment: 1, write: 2 };
 
 /** Who is asking: the owner (bearer token), or the holder of a link token. */
 export interface Caller {
@@ -39,6 +41,8 @@ export interface Meta {
 /** The ops a caller may run, by the role they need. */
 const NEEDS: Record<string, Role> = {
   tip: 'read', info: 'read', bundle: 'read', preview: 'read', raw: 'read', uvGet: 'read', uvList: 'read',
+  ticketList: 'read', ticketChanges: 'read', timelineSince: 'read',
+  ticketAdd: 'comment', ticketSet: 'comment',
   commit: 'write', uvSet: 'write',
 };
 
@@ -51,22 +55,32 @@ export class Repo extends DurableObject<Env> {
     ctx.storage.sql.exec('PRAGMA foreign_keys = OFF');
   }
 
-  private meta(): (Meta & { readHash: string; writeHash: string }) | null {
+  private meta(): (Meta & { readHash: string; writeHash: string; commentHash: string }) | null {
     const rows = this.ctx.storage.sql
-      .exec<{ id: string; title: string; created_at: number; expires_at: number | null; read_hash: string; write_hash: string }>(
+      .exec<{ id: string; title: string; created_at: number; expires_at: number | null; read_hash: string; write_hash: string; comment_hash: string }>(
         `SELECT * FROM _artifact LIMIT 1`,
       )
       .toArray();
     const r = rows[0];
     if (!r || (r.expires_at != null && r.expires_at <= Date.now() / 1000)) return null;
-    return { id: r.id, title: r.title, createdAt: r.created_at, expiresAt: r.expires_at, readHash: r.read_hash, writeHash: r.write_hash };
+    return {
+      id: r.id, title: r.title, createdAt: r.created_at, expiresAt: r.expires_at,
+      readHash: r.read_hash, writeHash: r.write_hash, commentHash: r.comment_hash,
+    };
   }
 
   private ensureTable(): void {
-    this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS _artifact (
+    const sql = this.ctx.storage.sql;
+    sql.exec(`CREATE TABLE IF NOT EXISTS _artifact (
       id TEXT NOT NULL, title TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER,
       read_hash TEXT NOT NULL, write_hash TEXT NOT NULL,
-      read_token TEXT NOT NULL DEFAULT '')`);
+      read_token TEXT NOT NULL DEFAULT '',
+      comment_hash TEXT NOT NULL DEFAULT '', comment_token TEXT NOT NULL DEFAULT '')`);
+    // Artifacts made before comment links have no comment token until an editor asks for one.
+    if (!sql.exec<{ name: string }>('PRAGMA table_info(_artifact)').toArray().some(c => c.name === 'comment_hash')) {
+      sql.exec(`ALTER TABLE _artifact ADD COLUMN comment_hash TEXT NOT NULL DEFAULT ''`);
+      sql.exec(`ALTER TABLE _artifact ADD COLUMN comment_token TEXT NOT NULL DEFAULT ''`);
+    }
   }
 
   /** Create the repository and its first check-in. */
@@ -81,7 +95,7 @@ export class Repo extends DurableObject<Env> {
     });
     if (!reply.ok) return reply;
     this.ctx.storage.sql.exec(
-      `INSERT INTO _artifact VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO _artifact (id, title, created_at, expires_at, read_hash, write_hash, read_token) VALUES (?, ?, ?, ?, ?, ?, ?)`,
       args.id, args.title, Math.floor(Date.now() / 1000), args.expiresAt,
       await sha256hex(args.readToken), await sha256hex(args.writeToken),
       // Kept so editors can share the read link; the write token is never stored.
@@ -101,6 +115,7 @@ export class Repo extends DurableObject<Env> {
     if (!caller.token) return null;
     const h = await sha256hex(caller.token);
     if (timingSafeEqual(h, m.writeHash)) return 'write';
+    if (m.commentHash && timingSafeEqual(h, m.commentHash)) return 'comment';
     if (timingSafeEqual(h, m.readHash)) return 'read';
     return null;
   }
@@ -109,8 +124,9 @@ export class Repo extends DurableObject<Env> {
   async op(caller: Caller, request: FossilRequest): Promise<FossilReply<unknown>> {
     const need = NEEDS[request.op];
     const role = await this.role(caller);
-    if (!need || !role || (need === 'write' && role !== 'write')) {
-      return { error: role === 'read' ? 'this link is read-only' : 'not found', code: role === 'read' ? 'forbidden' : 'not_found' };
+    if (!need || !role) return { error: 'not found', code: 'not_found' };
+    if (RANK[role] < RANK[need]) {
+      return { error: role === 'read' ? 'this link is read-only' : 'this link can only comment', code: 'forbidden' };
     }
     return run<unknown>(this.ctx.storage, request);
   }
@@ -132,6 +148,22 @@ export class Repo extends DurableObject<Env> {
   async readToken(caller: Caller): Promise<string | null> {
     if (caller.permission || (await this.role(caller)) !== 'write') return null;
     return this.ctx.storage.sql.exec<{ read_token: string }>(`SELECT read_token FROM _artifact`).toArray()[0]?.read_token ?? null;
+  }
+
+  /**
+   * The comment token, for a caller who may share it (an editor). An artifact
+   * made before comment links gets one on the first such request.
+   */
+  async commentToken(caller: Caller): Promise<string | null> {
+    if (caller.permission || (await this.role(caller)) !== 'write') return null;
+    const sql = this.ctx.storage.sql;
+    const stored = () => sql.exec<{ comment_token: string }>(`SELECT comment_token FROM _artifact`).toArray()[0]?.comment_token ?? '';
+    if (stored()) return stored();
+    const token = genToken();
+    const hash = await sha256hex(token);
+    // Another request may have minted one while this one hashed; the first stays.
+    sql.exec(`UPDATE _artifact SET comment_hash = ?, comment_token = ? WHERE comment_token = ''`, hash, token);
+    return stored();
   }
 
   async rename(title: string): Promise<void> {

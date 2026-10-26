@@ -90,6 +90,19 @@ button:focus-visible, a:focus-visible, input:focus-visible { outline: 2px solid 
 .collaboration summary { cursor: pointer; padding: 14px 16px; font-weight: 500; }
 .collaboration-hint { margin: 0; padding: 0 16px 12px; }
 button:disabled { cursor: wait; opacity: .6; }
+/* Comments: the thread list and the comment box. Pins and the full thread panel are #18. */
+.popover.comments { right: 0; width: 420px; max-height: min(80vh, 640px); overflow-y: auto; overscroll-behavior: contain; }
+.thread { padding: 10px 16px; border-top: 1px solid var(--line); }
+.thread h3 { margin: 0 0 6px; font-size: 14px; display: flex; gap: 8px; align-items: baseline; justify-content: space-between; }
+.thread .message { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.thread .who { font-size: 12.5px; color: var(--muted); }
+#threadList:empty::after { content: 'No comments yet.'; display: block; padding: 0 16px 12px; color: var(--muted); font-size: 12.5px; }
+#commentForm { display: flex; flex-direction: column; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--line); background: var(--bar); }
+#commentForm[hidden] { display: none; }
+#commentForm label { font-weight: 500; }
+#commentText { width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--surface); color: var(--ink); font: inherit; resize: vertical; }
+.comment-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.comment-actions .hint { font-size: 12.5px; color: var(--muted); }
 .popover.more { right: 0; width: 240px; padding: 6px; display: flex; flex-direction: column; }
 .popover-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 14px 16px 10px; }
 .popover-foot { padding: 10px 16px; border-top: 1px solid var(--line); background: var(--bar); font-size: 12.5px; }
@@ -163,6 +176,6 @@ button:disabled { cursor: wait; opacity: .6; }
   .primary { justify-content: center; gap: 6px; padding: 0 10px; font-size: 12px; }
   .chip, .icon, .primary { height: 44px; }
   .icon { width: 44px; }
-  .popover.versions, .popover.share { position: fixed; left: 12px; right: 12px; top: auto; bottom: max(12px, env(safe-area-inset-bottom, 0px)); width: auto; }
+  .popover.versions, .popover.share, .popover.comments { position: fixed; left: 12px; right: 12px; top: auto; bottom: max(12px, env(safe-area-inset-bottom, 0px)); width: auto; }
 }
 @media (prefers-reduced-motion: reduce) { #ring { animation: none; } }

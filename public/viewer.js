@@ -8,6 +8,7 @@ import { renderDiagrams, renderPikchr } from './diagrams.js';
 import { embedFonts } from './fonts.js';
 import { zip } from './zip.js';
 import { preparePublication } from './export.js';
+import { controls, thread } from './comments.js';
 
 const $ = id => document.getElementById(id);
 const NONCE = document.querySelector('meta[name="artifact-nonce"]')?.content ?? '';
@@ -216,7 +217,8 @@ function renderChrome() {
   const latest = shown.checkin === info.tip;
   const index = info.timeline.findIndex(c => c.uuid === shown.checkin);
   const current = info.timeline[index];
-  const writer = info.role === 'write';
+  const can = controls(info);
+  const writer = can.edit;
 
   $('bar').hidden = false;
   $('title').textContent = info.title || 'Untitled';
@@ -226,8 +228,10 @@ function renderChrome() {
   $('versionBtn').classList.toggle('old', !latest);
   const head = info.timeline[0];
   $('updated').textContent = head ? `Updated ${ago(head.time)} by ${head.user}` : '';
-  $('role').textContent = writer ? 'Can edit' : 'View only';
+  $('role').textContent = writer ? 'Can edit' : can.commentBox ? 'Can comment' : 'View only';
   $('role').className = `pill ${writer ? 'write' : 'read'}`;
+  $('commentForm').hidden = !can.commentBox;
+  $('commentsNote').textContent = can.commentBox ? '' : 'Read only';
   $('deleteBtn').hidden = !writer || (!link.token && !info.canManage);
   $('uploadFilesBtn').hidden = $('uploadFolderBtn').hidden = !writer;
   $('openLatest').hidden = latest;
@@ -245,7 +249,48 @@ function renderChrome() {
 
   renderVersions();
   renderShare();
+  renderThreads();
 }
+
+// ─── Comments: each thread is a ticket in the artifact's repository ─────────
+
+let threads = [];
+
+function renderThreads() {
+  $('commentCount').textContent = threads.length ? String(threads.length) : '';
+  $('threadList').replaceChildren(...threads.map(t => el('article', { className: 'thread' },
+    el('h3', {}, el('span', { textContent: t.title }), el('span', { className: 'tag', textContent: t.status })),
+    ...t.messages.filter(m => m.text || m.status).map(m => el('div', {},
+      el('div', { className: 'who', textContent: `${m.user} · ${ago(m.time)}${m.status ? ` · marked ${m.status}` : ''}` }),
+      m.text ? el('p', { className: 'message', textContent: m.text }) : null)))));
+}
+
+async function loadThreads() {
+  if (!controls(info).threads) return;
+  try {
+    threads = (await art.tickets()).tickets.map(thread);
+    renderThreads();
+  } catch { /* offline or gone: keep what is shown */ }
+}
+
+$('commentForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const text = $('commentText').value.trim();
+  if (!text) return;
+  const button = $('commentForm').querySelector('button');
+  button.disabled = true;
+  $('commentStatus').textContent = 'Posting…';
+  try {
+    await art.comment({ text });
+    $('commentText').value = '';
+    $('commentStatus').textContent = 'Posted.';
+    await loadThreads();
+  } catch (err) {
+    $('commentStatus').textContent = `Could not post: ${err.message}`;
+  } finally {
+    button.disabled = false;
+  }
+});
 
 function renderVersions() {
   $('versionCount').textContent = `${info.timeline.length} check-in${info.timeline.length === 1 ? '' : 's'}`;
@@ -390,14 +435,18 @@ function renderShare() {
     $('shareFoot').textContent = 'Manage named access from your library. This link does not grant access.';
     return;
   }
-  const writer = info.role === 'write';
-  const readToken = writer ? info.readToken : link.token;
+  const can = controls(info);
+  const writer = can.edit;
+  // A comment link is not a Fossil login, and holders of one see no other link.
+  const reader = info.role === 'read';
+  const readToken = writer ? info.readToken : reader ? link.token : null;
   const login = writer ? 'editor' : 'viewer';
   const clone = `fossil clone ${location.origin.replace('://', `://${login}:${link.token}@`)}/r/${art.id}`;
   $('shareRows').replaceChildren(...[
     readToken ? shareRow('readLink', 'Read link', 'Anyone with it can view every version.', linkWith(readToken)) : null,
+    can.commentLink ? shareRow('commentLink', 'Comment link', 'Can view every version and comment, not edit.', linkWith(info.commentToken), { secret: true }) : null,
     writer ? shareRow('editLink', 'Edit link', 'Can publish new versions and delete. Share only with editors.', linkWith(link.token), { secret: true }) : null,
-    shareRow('cloneCmd', 'Clone with Fossil', writer ? 'The whole history, to edit locally and push back.' : 'The whole history, read-only.', clone, { secret: writer }),
+    writer || reader ? shareRow('cloneCmd', 'Clone with Fossil', writer ? 'The whole history, to edit locally and push back.' : 'The whole history, read-only.', clone, { secret: writer }) : null,
   ].filter(Boolean));
   $('shareFoot').textContent = info.expiresAt
     ? `Expires ${new Date(info.expiresAt).toLocaleDateString(undefined, { dateStyle: 'medium' })}`
@@ -405,7 +454,7 @@ function renderShare() {
 }
 
 // One popover open at a time; Escape or a click elsewhere closes it.
-const popovers = [['versionBtn', 'versionMenu'], ['shareBtn', 'shareMenu'], ['moreBtn', 'moreMenu']];
+const popovers = [['versionBtn', 'versionMenu'], ['shareBtn', 'shareMenu'], ['commentsBtn', 'commentsMenu'], ['moreBtn', 'moreMenu']];
 function closePopovers(except) {
   for (const [btn, menu] of popovers) {
     if (menu === except) continue;
@@ -421,6 +470,7 @@ for (const [btn, menu] of popovers) {
     $(menu).hidden = !open;
     $(btn).setAttribute('aria-expanded', String(open));
     if (open && menu === 'shareMenu') loadPublications();
+    if (open && menu === 'commentsMenu') loadThreads();
   });
   $(menu).addEventListener('click', e => e.stopPropagation());
 }
@@ -621,6 +671,7 @@ async function main() {
   }
   art = new Artifact(location.origin, m[1], link.token);
   await reload(true);
+  await loadThreads();
 }
 
 addEventListener('hashchange', () => {

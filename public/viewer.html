@@ -33,6 +33,18 @@
     <span id="updated" class="muted"></span>
     <span id="role" class="pill"></span>
     <div class="menu-anchor">
+      <button id="commentsBtn" class="chip" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="commentsMenu">Comments <span id="commentCount" class="muted"></span></button>
+      <div id="commentsMenu" class="popover comments" role="dialog" aria-label="Comments" hidden>
+        <div class="popover-head"><strong>Comments</strong><span id="commentsNote" class="muted"></span></div>
+        <div id="threadList"></div>
+        <form id="commentForm" hidden>
+          <label for="commentText">New comment</label>
+          <textarea id="commentText" rows="3" maxlength="8000" required></textarea>
+          <div class="comment-actions"><span id="commentStatus" class="hint" role="status" aria-live="polite"></span><button class="primary" type="submit">Comment</button></div>
+        </form>
+      </div>
+    </div>
+    <div class="menu-anchor">
       <button id="shareBtn" aria-label="Share artifact" class="primary" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="shareMenu">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></svg>
         <span class="label">Share</span>

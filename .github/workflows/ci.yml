@@ -59,6 +59,10 @@ jobs:
       - name: Build the Fossil engine (TinyGo)
         run: npm run build:wasm
 
+      # The comment-link tests clone, add a ticket and push with a stock fossil binary.
+      - name: Install stock Fossil
+        run: sudo apt-get update && sudo apt-get install -y fossil
+
       - name: End-to-end tests
         run: npm test
 

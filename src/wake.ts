@@ -7,6 +7,8 @@
 // best-effort and bounded; wake() never rejects, so a caller can hand it to
 // ctx.waitUntil and forget it. No Worker-only imports, so node tests load it.
 
+import { authorName } from './ticket-author.ts';
+
 export type WakeKind = 'comment' | 'reply' | 'resolve' | 'publish';
 
 export interface WakeEvent {
@@ -120,7 +122,7 @@ function checked(e: WakeEvent): WakeEvent | null {
   if (e.ticket !== null && !hex.test(e.ticket)) return null;
   return {
     artifact: e.artifact, checkin: e.checkin, ticket: e.ticket,
-    author: String(e.author).replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 64), kind: e.kind,
+    author: authorName(String(e.author).replace(/[\u0000-\u001f\u007f]/g, '')), kind: e.kind,
   };
 }
 

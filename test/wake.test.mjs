@@ -105,6 +105,16 @@ test('webhook: signed JSON body, idempotency key, nothing secret', async () => {
   assert.ok(!/clone|token|https?:/i.test(init.body));
 });
 
+test('webhook: an email-shaped author is sent as "account", and authors are capped', async () => {
+  const env = { WAKE_SINK_KIND: 'webhook', WAKE_SINK_URL: 'https://hooks.example/wake', WAKE_SINK_SECRET: 's' };
+  const r = recorder();
+  await wake(env, { ...event, author: 'Dan <dan@example.com>' }, { fetch: r.fetch, log: quiet().log });
+  await wake(env, { ...event, author: '  ' }, { fetch: r.fetch, log: quiet().log });
+  await wake(env, { ...event, author: 'x'.repeat(80) }, { fetch: r.fetch, log: quiet().log });
+  assert.deepEqual(r.calls.map(c => JSON.parse(c.init.body).author), ['account', 'account', 'x'.repeat(64)]);
+  assert.ok(!r.calls[0].init.body.includes('@'));
+});
+
 test('webhook: a caller-supplied idempotency key replaces the default', async () => {
   const env = { WAKE_SINK_KIND: 'webhook', WAKE_SINK_URL: 'https://hooks.example/wake', WAKE_SINK_SECRET: 's' };
   const r = recorder();

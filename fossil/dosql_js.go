@@ -10,6 +10,7 @@ package main
 // aborted, and JS throws to undo it (src/fossil.ts).
 
 import (
+	"context"
 	"database/sql"
 	"database/sql/driver"
 	"fmt"
@@ -51,6 +52,22 @@ func (conn) Query(q string, args []driver.Value) (driver.Rows, error) {
 	}
 	return &rows{res: r}, nil
 }
+
+// BeginTx gives a read-only transaction its own Tx. go-libfossil serves a
+// request that cannot write, a clone among them, in a read transaction and
+// always ends it with Rollback; that rollback undoes nothing, so it must not
+// abort the request the way a write transaction's rollback does.
+func (conn) BeginTx(_ context.Context, o driver.TxOptions) (driver.Tx, error) {
+	if o.ReadOnly {
+		return readTx{}, nil
+	}
+	return tx{}, nil
+}
+
+type readTx struct{}
+
+func (readTx) Commit() error   { return nil }
+func (readTx) Rollback() error { return nil }
 
 type tx struct{}
 

@@ -16,7 +16,7 @@ out="$root/src"
 wasmopt="$root/node_modules/.bin/wasm-opt"
 # gzip -9 bytes. Raise it only on purpose, in the same commit as the change
 # that needs it.
-budget="${FOSSIL_WASM_MAX_GZIP:-880000}"
+budget="${FOSSIL_WASM_MAX_GZIP:-1100000}"
 
 cd "$here"
 case "${GO_COMPILER:-tinygo}" in

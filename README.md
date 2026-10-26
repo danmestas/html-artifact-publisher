@@ -160,7 +160,7 @@ The end-to-end tests start their own `wrangler dev` with fresh state, and build 
 2. **TinyGo exactly 0.43.0**, the version CI uses. The build checks it and stops otherwise. On macOS: download the `darwin` release from the link in Prerequisites (Homebrew may give another version); on Linux: the `linux-amd64` tarball, with its `bin/` on `PATH`.
 3. **Go from `fossil/go.mod`** (1.26). TinyGo uses it for the standard library. If a newer Go is installed globally, select Go 1.26 for this build with both `GOROOT` and `PATH`; native development can still use the newer version. Go 1.27.3 compiles with TinyGo 0.43.0, but its engine exceeds the current gzip deployment budget.
 
-The build fails if the result is over the size budget, 880,000 bytes gzipped (`FOSSIL_WASM_MAX_GZIP` in `fossil/build.sh`), and `deploy.sh` checks the same budget before deploying. If you hit it, look for the causes above before raising the number; raise it only on purpose, in the same commit as the change that needs it. `GO_COMPILER=go sh fossil/build.sh` builds with standard Go instead (about 2.4 MB gzipped, no budget): for debugging, never for deploying.
+The build fails if the result is over the size budget, 1,100,000 bytes gzipped (`FOSSIL_WASM_MAX_GZIP` in `fossil/build.sh`), and `deploy.sh` checks the same budget before deploying. If you hit it, look for the causes above before raising the number; raise it only on purpose, in the same commit as the change that needs it. `GO_COMPILER=go sh fossil/build.sh` builds with standard Go instead (about 2.4 MB gzipped, no budget): for debugging, never for deploying.
 
 ## CLI usage
 

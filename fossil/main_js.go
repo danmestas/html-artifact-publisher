@@ -44,6 +44,10 @@ type request struct {
 	ReadToken   string            `json:"readToken"`
 	WriteToken  string            `json:"writeToken"`
 	Cookie      string            `json:"cookie"`
+	Fields      map[string]string `json:"fields"`     // ticket field -> value; "+name" appends
+	TicketUUID  string            `json:"ticketUuid"` // a ticket's id or a unique prefix of it
+	Hash        string            `json:"hash"`       // timelineSince: entries that arrived after this artifact
+	Types       []string          `json:"types"`      // timelineSince: ci, t, w, f; none is all
 }
 
 // coded errors carry a machine-readable code to the Worker.
@@ -205,6 +209,9 @@ func handle(req request, body []byte) (any, error) {
 
 	case "verify":
 		return map[string]any{"ok": true}, r.Verify()
+	}
+	if result, ok, err := ticketOp(r, req); ok {
+		return result, err
 	}
 	return nil, fail("bad_request", "unknown op %q", req.Op)
 }

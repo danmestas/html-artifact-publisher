@@ -41,6 +41,7 @@ import { Registry } from './registry';
 import { blobLinks, getBlob, missingBlobs, pointersIn, putBlob } from './blobs';
 import type { FossilReply } from './fossil';
 import { b64decode, b64encode, clampTtl, genId, genToken, isoOrNull } from './util';
+import { ticketAuthor } from './ticket-author';
 
 export { Repo, Registry };
 
@@ -364,7 +365,9 @@ async function handleArtifact(req: Request, env: Env, ctx: ExecutionContext, id:
     if (!change) return json({ error: TICKET_BODY }, 400);
     const role = await stub.role(who);
     // The credential names the author, never the body.
-    const user = role === 'comment' ? 'comment-link' : actor.user ? actor.user.name.slice(0, 64) || 'account' : actor.legacy ? 'owner' : 'edit-link';
+    const user = ticketAuthor(role === 'comment' ? { kind: 'comment' }
+      : actor.user ? { kind: 'account', name: actor.user.name }
+      : actor.legacy ? { kind: 'owner' } : { kind: 'edit' });
     if (!change.ticketUuid) {
       const r = (await stub.op(who, { op: 'ticketAdd', fields: change.fields, user, comment: '' })) as FossilReply<{ ticketUuid: string; artifact: string }>;
       return r.ok ? json(r.result, 201) : reply(r);

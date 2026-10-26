@@ -59,9 +59,21 @@ jobs:
       - name: Build the Fossil engine (TinyGo)
         run: npm run build:wasm
 
-      # The comment-link tests clone, add a ticket and push with a stock fossil binary.
-      - name: Install stock Fossil
-        run: sudo apt-get update && sudo apt-get install -y fossil
+      # The comment-link tests clone, add a ticket and push with a stock fossil
+      # binary: the official release, pinned by checksum as go-libfossil's CI
+      # pins it, not the distro package, which lags several releases.
+      - name: Install pinned Fossil
+        env:
+          FOSSIL_VERSION: "2.28"
+          FOSSIL_SHA256: "c9d2bf9d150dff1076eae1b0b822ed3cde892e1273f78b040c4f8ace1b59dd40"
+        run: |
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors \
+            -o /tmp/fossil.tar.gz \
+            "https://fossil-scm.org/home/uv/fossil-linux-x64-${FOSSIL_VERSION}.tar.gz"
+          echo "${FOSSIL_SHA256}  /tmp/fossil.tar.gz" | sha256sum -c -
+          sudo tar -xzf /tmp/fossil.tar.gz -C /usr/local/bin fossil
+          rm -f /tmp/fossil.tar.gz
+          fossil version | grep -q "fossil version ${FOSSIL_VERSION} " || { fossil version; exit 1; }
 
       - name: End-to-end tests
         run: npm test

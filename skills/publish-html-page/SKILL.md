@@ -32,7 +32,7 @@ new one.
 
 ```bash
 node scripts/publish-html.mjs [publish] [options] <file.html | dir>
-node scripts/publish-html.mjs update <edit-url> <file.html | dir> [--message <text>] [--title <text>]
+node scripts/publish-html.mjs update <edit-url> <file.html | dir> [--message <text>] [--title <text>] [--notes <file>]
 node scripts/publish-html.mjs read <url> [--out <dir>]    # URL may end in @<check-in>
 node scripts/publish-html.mjs history <url>
 node scripts/publish-html.mjs list
@@ -42,6 +42,7 @@ node scripts/publish-html.mjs delete <edit-url>
   --ttl <duration>   1h | 6h | 24h | 7d | 30d | never  (default: 7d)
   --slug <slug>      Optional vanity slug
   --message <text>   Check-in comment (default: "Publish <name>" / "Update <name>")
+  --notes <file>     Ship the file as NOTES.md beside index.html; update without it keeps the old one
   --delete-local     Delete local HTML ONLY after confirmed successful upload
   --json             Machine-readable JSON output only (no friendly output)
   --copy             Copy viewer URL to clipboard even with --json

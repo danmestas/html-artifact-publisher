@@ -12,6 +12,7 @@ import { spawnSync } from 'node:child_process';
 import { userInfo } from 'node:os';
 import { Artifact, ConflictError, createArtifact, listArtifacts, parseFragment } from '../public/client.js';
 import { loadPikchr, pikchrBlocks } from './pikchr.mjs';
+import { redact, runWatch } from './watch.mjs';
 
 const HELP = `
 Usage:
@@ -21,6 +22,7 @@ Usage:
   node scripts/publish-html.mjs history <url>
   node scripts/publish-html.mjs list
   node scripts/publish-html.mjs delete <edit-url>
+  node scripts/publish-html.mjs watch <edit-or-comment-url> [--since <hash>] [--interval 30s] [--once] [--cache <dir>]
 
 Publish options:
   --title <text>     Title for the artifact (default: filename)
@@ -40,6 +42,13 @@ index.html or another .html file). Updating with a directory adds and changes
 files; files missing from the directory are kept from the previous version.
 A URL may end in @<check-in> to read that version.
 
+watch prints one JSON line per new comment, reply or resolve:
+  {"artifact","ticket","change","kind","author","text","time"}
+It remembers the last change printed in <cache>/<id>/watch.json (cache:
+--cache, HTML_PUBLISHER_CACHE or ~/.cache/html-artifact-publisher), so a
+restart prints only what is new; --since <hash> starts after that artifact.
+It polls every --interval (5s to 1h) until Ctrl-C; --once makes one pass.
+
 Environment variables:
   HTML_PUBLISHER_URL    Base URL of the publisher Worker (publish, list)
   HTML_PUBLISHER_TOKEN  Owner bearer token (publish, list)
@@ -57,7 +66,7 @@ Links:
 // ---------------------------------------------------------------------------
 
 const args = process.argv.slice(2);
-const flagsWithValues = new Set(['--title', '--ttl', '--slug', '--message', '--notes', '--out']);
+const flagsWithValues = new Set(['--title', '--ttl', '--slug', '--message', '--notes', '--out', '--since', '--interval', '--cache']);
 const hasFlag = flag => args.includes(flag);
 const flagValue = flag => {
   const i = args.indexOf(flag);
@@ -75,7 +84,7 @@ if (hasFlag('--help') || hasFlag('-h')) {
   process.exit(0);
 }
 
-const COMMANDS = new Set(['publish', 'update', 'read', 'history', 'list', 'delete']);
+const COMMANDS = new Set(['publish', 'update', 'read', 'history', 'list', 'delete', 'watch']);
 const command = COMMANDS.has(positional[0]) ? positional.shift() : 'publish';
 
 const jsonOnly = hasFlag('--json');
@@ -112,9 +121,9 @@ function parseTtl(raw) {
 /** Parse an artifact link into its origin, id, token and check-in. */
 function parseLink(raw) {
   let url;
-  try { url = new URL(raw); } catch { die(`not a URL: ${raw}`); }
+  try { url = new URL(raw); } catch { die(`not a URL: ${redact(raw)}`); }
   const m = /^\/v\/([A-Za-z0-9_-]{1,64})$/.exec(url.pathname);
-  if (!m) die(`not an artifact link (expected /v/<id>#<token>): ${raw}`);
+  if (!m) die(`not an artifact link (expected /v/<id>#<token>): ${redact(raw)}`);
   let parts;
   try { parts = parseFragment(url.hash); } catch (e) { die(e.message); }
   return { base: url.origin, id: m[1], ...parts, art: new Artifact(url.origin, m[1], parts.token) };
@@ -307,6 +316,14 @@ async function remove() {
   if (!jsonOnly) console.log(`Deleted ${link.id}`);
 }
 
+async function watch() {
+  const [rawUrl] = positional;
+  if (!rawUrl) die('usage: watch <edit-or-comment-url> [--since <hash>] [--interval 30s] [--once] [--cache <dir>]');
+  await runWatch({
+    rawUrl, since: flagValue('--since'), interval: flagValue('--interval') ?? '30s', once: hasFlag('--once'), cache: flagValue('--cache'),
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Output
 // ---------------------------------------------------------------------------
@@ -354,7 +371,7 @@ function output(result, viewerUrl) {
   }
 }
 
-const run = { publish, update, read, history, list, delete: remove }[command];
+const run = { publish, update, read, history, list, delete: remove, watch }[command];
 try {
   await run();
 } catch (e) {

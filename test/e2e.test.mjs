@@ -360,6 +360,52 @@ test('CLI', async () => {
   assert.equal(cli('delete', out.editUrl).code, 0);
 });
 
+test('CLI --notes ships NOTES.md with the page (tracked in #22)', async () => {
+  const dir = join(work, 'notes-site');
+  mkdirSync(dir, { recursive: true });
+  const page = join(dir, 'page.html');
+  const notes = join(dir, 'context.txt');
+  writeFileSync(page, '<!doctype html><h1>n1</h1>');
+  writeFileSync(notes, '# Notes\nKeep the header.\n');
+
+  const pub = cli('publish', '--json', '--no-clipboard', '--notes', notes, page);
+  assert.equal(pub.code, 0, pub.out);
+  const out = JSON.parse(pub.out);
+  const a = { read: tokenOf(out.viewerUrl), id: out.id };
+
+  // Stored as NOTES.md next to index.html, in the one publish check-in.
+  const bundle = await api(`/api/artifacts/${a.id}/bundle`, { token: a.read });
+  assert.deepEqual(Object.keys(bundle.json.files).sort(), ['NOTES.md', 'index.html']);
+  assert.equal(fromB64(bundle.json.files['NOTES.md']), '# Notes\nKeep the header.\n');
+  assert.equal(JSON.parse(cli('history', '--json', out.viewerUrl).out).length, 1);
+
+  // fossil clone shows it at the tip.
+  const clone = join(work, `${a.id}-notes.fossil`);
+  assert.ok(fossil('clone', out.cloneUrl, clone).ok, 'clone');
+
+  // The viewer's entry page is still the HTML.
+  assert.match(cli('read', out.viewerUrl).out, /<h1>n1<\/h1>/);
+  // read writes it back out with the rest.
+  const back = join(work, 'notes-back');
+  assert.equal(cli('read', out.viewerUrl, '--out', back).code, 0);
+  assert.equal(readFileSync(join(back, 'NOTES.md'), 'utf8'), '# Notes\nKeep the header.\n');
+
+  // Update without --notes leaves it untouched; with --notes replaces it.
+  writeFileSync(page, '<!doctype html><h1>n2</h1>');
+  assert.equal(cli('update', '--json', '--no-clipboard', out.editUrl, page).code, 0);
+  let b = await api(`/api/artifacts/${a.id}/bundle`, { token: a.read });
+  assert.equal(fromB64(b.json.files['NOTES.md']), '# Notes\nKeep the header.\n');
+  assert.equal(fromB64(b.json.files['index.html']), '<!doctype html><h1>n2</h1>');
+  writeFileSync(notes, 'Decided: dark mode.\n');
+  assert.equal(cli('update', '--json', '--no-clipboard', '--notes', notes, out.editUrl, page).code, 0);
+  b = await api(`/api/artifacts/${a.id}/bundle`, { token: a.read });
+  assert.equal(fromB64(b.json.files['NOTES.md']), 'Decided: dark mode.\n');
+
+  assert.notEqual(cli('publish', '--no-clipboard', '--notes', join(dir, 'missing.md'), page).code, 0, 'missing notes file');
+  assert.notEqual(cli('publish', '--no-clipboard', '--notes', dir, page).code, 0, 'notes is a directory');
+  assert.equal(cli('delete', out.editUrl).code, 0);
+});
+
 test('pages with Pikchr: broken diagrams are refused, renderer and fonts are served', async () => {
   const dir = join(work, 'diagram');
   mkdirSync(dir, { recursive: true });

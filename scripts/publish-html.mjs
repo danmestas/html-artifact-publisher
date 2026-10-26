@@ -16,7 +16,7 @@ import { loadPikchr, pikchrBlocks } from './pikchr.mjs';
 const HELP = `
 Usage:
   node scripts/publish-html.mjs [publish] [options] <file.html | dir>
-  node scripts/publish-html.mjs update <edit-url> <file.html | dir> [--message <text>] [--title <text>]
+  node scripts/publish-html.mjs update <edit-url> <file.html | dir> [--message <text>] [--title <text>] [--notes <file>]
   node scripts/publish-html.mjs read <url> [--out <dir>]
   node scripts/publish-html.mjs history <url>
   node scripts/publish-html.mjs list
@@ -27,6 +27,8 @@ Publish options:
   --ttl <duration>   Time-to-live: 1h, 6h, 24h, 7d, 30d, never (default: 7d)
   --slug <slug>      Optional vanity slug
   --message <text>   Check-in comment (default: "Publish <name>" / "Update <name>")
+  --notes <file>     Store <file> as NOTES.md next to index.html (publish and update);
+                     update without --notes keeps the existing NOTES.md
   --delete-local     Delete the local HTML file after a successful upload
   --json             Print only machine-readable JSON (no friendly output)
   --copy             Copy the viewer URL to clipboard even with --json
@@ -54,7 +56,7 @@ Links:
 // ---------------------------------------------------------------------------
 
 const args = process.argv.slice(2);
-const flagsWithValues = new Set(['--title', '--ttl', '--slug', '--message', '--out']);
+const flagsWithValues = new Set(['--title', '--ttl', '--slug', '--message', '--notes', '--out']);
 const hasFlag = flag => args.includes(flag);
 const flagValue = flag => {
   const i = args.indexOf(flag);
@@ -153,6 +155,12 @@ function readInput(path) {
     for (const w of warnings.slice(0, 10)) console.warn(`  Warning: ${w}`);
     if (warnings.length > 10) console.warn(`  … and ${warnings.length - 10} more`);
     console.warn('  The viewer blocks network requests, so these will not load.\n');
+  }
+  const notes = flagValue('--notes');
+  if (notes !== undefined) {
+    let data;
+    try { data = readFileSync(notes); } catch (err) { die(`cannot read --notes ${notes}: ${err.message}`); }
+    files['NOTES.md'] = data;
   }
   return { files, warnings };
 }

@@ -166,7 +166,7 @@ The build fails if the result is over the size budget, 880,000 bytes gzipped (`F
 
 ```bash
 node scripts/publish-html.mjs [publish] [options] <file.html | dir>
-node scripts/publish-html.mjs update <edit-url> <file.html | dir> [--message <text>] [--title <text>]
+node scripts/publish-html.mjs update <edit-url> <file.html | dir> [--message <text>] [--title <text>] [--notes <file>]
 node scripts/publish-html.mjs read <url>[@<check-in>] [--out <dir>]
 node scripts/publish-html.mjs history <url>
 node scripts/publish-html.mjs list
@@ -181,9 +181,12 @@ A single file is stored as `index.html`; a directory is stored as-is and needs a
 | `--ttl <duration>` | `1h`, `6h`, `24h`, `7d`, `30d`, `never` | `7d` |
 | `--slug <slug>` | Vanity slug `[a-z0-9-]{1,64}` in the URL instead of the id | — |
 | `--message <text>` | Check-in comment | `Publish <name>` / `Update <name>` |
+| `--notes <file>` | Store the file as `NOTES.md` next to `index.html`, in the same check-in (publish and update) | — |
 | `--delete-local` | Delete the local HTML file after upload | off |
 | `--json` | Machine-readable JSON only | off |
 | `--copy` / `--no-clipboard` | Force or suppress copying the read link | copy unless `--json` |
+
+`NOTES.md` carries the page's context (what it is for, what has been decided, what not to touch) for whoever answers comments on it. It is an ordinary file in the repository: it appears in the clone and in `read --out`, is listed with the other files, and is never shown as the page. `update` without `--notes` leaves the existing `NOTES.md` as it is; with `--notes` it replaces it (tracked in #22).
 
 `HTML_PUBLISHER_URL` and `HTML_PUBLISHER_TOKEN` are needed for `publish` and `list`; the other commands take everything from the link.
 

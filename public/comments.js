@@ -4,7 +4,7 @@
 // and a resolution sets its status. Its anchor (the `subsystem` field) is an
 // element id or a quote of the page's text.
 //
-// findQuote and anchorFor also run inside the sandboxed page (page-pins.js):
+// findQuotes and anchorFor also run inside the sandboxed page (page-pins.js):
 // they are injected as source, so they use nothing outside themselves.
 
 /** The viewer controls for `info`, the reply of GET /api/artifacts/:id. */
@@ -54,28 +54,34 @@ export function arrange(threads) {
 }
 
 /**
- * Where `quote` is in the text nodes `texts`, comparing with whitespace runs
- * collapsed: { start: [node, offset], end: [node, offset] } (end exclusive), or null.
+ * Where each of `quotes` is in the text nodes `texts`, comparing with
+ * whitespace runs collapsed: { start: [node, offset], end: [node, offset] }
+ * (end exclusive), or null, in the order of `quotes`. The page's text is
+ * collapsed once for all of them.
  */
-export function findQuote(texts, quote) {
-  const want = String(quote).replace(/\s+/g, ' ').trim();
-  if (!want) return null;
+export function findQuotes(texts, quotes) {
   // The page's text with whitespace runs collapsed, and where each character came from.
-  let flat = '';
-  const from = [];
+  const chars = [], from = [];
+  let space = false;
   for (let n = 0; n < texts.length; n++) {
     const s = texts[n];
     for (let i = 0; i < s.length; i++) {
-      const space = /\s/.test(s[i]);
-      if (space && flat.endsWith(' ')) continue;
-      flat += space ? ' ' : s[i];
+      const c = s[i];
+      const blank = /\s/.test(c);
+      if (blank && space) continue;
+      space = blank;
+      chars.push(blank ? ' ' : c);
       from.push([n, i]);
     }
   }
-  const at = flat.indexOf(want);
-  if (at < 0) return null;
-  const last = from[at + want.length - 1];
-  return { start: from[at], end: [last[0], last[1] + 1] };
+  const flat = chars.join('');
+  return quotes.map(quote => {
+    const want = String(quote).replace(/\s+/g, ' ').trim();
+    const at = want ? flat.indexOf(want) : -1;
+    if (at < 0) return null;
+    const last = from[at + want.length - 1];
+    return { start: from[at], end: [last[0], last[1] + 1] };
+  });
 }
 
 /**

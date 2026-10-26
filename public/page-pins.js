@@ -1,5 +1,5 @@
 // page-pins.js — comment pins, drawn inside the sandboxed page. viewer.js
-// injects pagePins as source, after the window.artifact bridge, with findQuote
+// injects pagePins as source, after the window.artifact bridge, with findQuotes
 // and anchorFor from comments.js as its arguments, so it uses nothing else.
 //
 // The viewer sends only what a pin needs: each anchored thread's label, its
@@ -11,12 +11,14 @@
 // An anchor is an element id, found with getElementById, else a quote of the
 // page's text; it is never used as a selector or as markup.
 
-export function pagePins(findQuote, anchorFor) {
+export function pagePins(findQuotes, anchorFor) {
   const PIN = 28;
+  const MAX_PINS = 500, MAX_ANCHOR = 500; // the ticket route's anchor limit
+  const SETTLE_MS = 250, EVERY_MS = 1000;  // re-find anchors after a change, at most once a second
   let wanted = [];     // [{ key, anchor, resolved }] from the viewer
   let colors = {};
   let targets = [];    // [{ pin, node, box, el }]: box() is the anchor's viewport rectangle
-  let host = null, root = null, placed = '', selected = '', frame = 0, relocating = 0;
+  let host = null, root = null, placed = '', selected = '', frame = 0, relocating = 0, relocated = 0;
 
   const send = message => parent.postMessage({ __artifactPins: 1, ...message }, '*');
 
@@ -30,16 +32,29 @@ export function pagePins(findQuote, anchorFor) {
     return nodes;
   }
 
-  /** The anchor's element and its rectangle, or null when it is not on this page. */
-  function locate(anchor, nodes) {
-    const el = document.getElementById(anchor);
-    if (el) return { node: el, box: () => el.getBoundingClientRect() };
-    const hit = findQuote(nodes.map(n => n.data), anchor);
-    if (!hit) return null;
-    const range = document.createRange();
-    range.setStart(nodes[hit.start[0]], hit.start[1]);
-    range.setEnd(nodes[hit.end[0]], hit.end[1]);
-    return { node: nodes[hit.start[0]].parentElement, box: () => range.getClientRects()[0] || range.getBoundingClientRect() };
+  /**
+   * Each wanted anchor's element and rectangle, or nothing when it is not on
+   * this page: ids first, then every quote against the page's text, collapsed once.
+   */
+  function locateAll() {
+    const found = new Map();
+    const quotes = [];
+    for (const pin of wanted) {
+      const el = document.getElementById(pin.anchor);
+      if (el) found.set(pin, { node: el, box: () => el.getBoundingClientRect() });
+      else quotes.push(pin);
+    }
+    if (quotes.length) {
+      const nodes = textNodes();
+      findQuotes(nodes.map(n => n.data), quotes.map(p => p.anchor)).forEach((hit, i) => {
+        if (!hit) return;
+        const range = document.createRange();
+        range.setStart(nodes[hit.start[0]], hit.start[1]);
+        range.setEnd(nodes[hit.end[0]], hit.end[1]);
+        found.set(quotes[i], { node: nodes[hit.start[0]].parentElement, box: () => range.getClientRects()[0] || range.getBoundingClientRect() });
+      });
+    }
+    return found;
   }
 
   function ensureHost() {
@@ -70,12 +85,9 @@ export function pagePins(findQuote, anchorFor) {
 
   // Find every anchor again (after new threads or a change to the page), then draw.
   function relocate() {
-    const nodes = textNodes();
-    targets = [];
-    for (const pin of wanted) {
-      const at = locate(pin.anchor, nodes);
-      if (at) targets.push({ pin, ...at, el: null });
-    }
+    relocated = Date.now();
+    const found = locateAll();
+    targets = wanted.filter(pin => found.has(pin)).map(pin => ({ pin, ...found.get(pin), el: null }));
     ensureHost();
     root.replaceChildren(...targets.map(t => (t.el = button(t.pin))));
     draw();
@@ -109,8 +121,8 @@ export function pagePins(findQuote, anchorFor) {
     const d = e.data;
     if (e.source !== parent || !d || d.__artifactPins !== 1) return;
     if (d.type === 'pins' && Array.isArray(d.pins)) {
-      wanted = d.pins.filter(p => p && Number.isInteger(p.key) && typeof p.anchor === 'string' && p.anchor && p.anchor.length <= 4000)
-        .slice(0, 500).map(p => ({ key: p.key, anchor: p.anchor, resolved: p.resolved === true }));
+      wanted = d.pins.filter(p => p && Number.isInteger(p.key) && typeof p.anchor === 'string' && p.anchor && p.anchor.length <= MAX_ANCHOR)
+        .slice(0, MAX_PINS).map(p => ({ key: p.key, anchor: p.anchor, resolved: p.resolved === true }));
       colors = d.colors && typeof d.colors === 'object' ? d.colors : {};
       placed = null;
       relocate();
@@ -121,10 +133,12 @@ export function pagePins(findQuote, anchorFor) {
   });
   addEventListener('scroll', schedule, true);
   addEventListener('resize', schedule);
-  // A page that builds itself with script: find the anchors again once it settles.
+  // A page that builds itself with script: find the anchors again once it
+  // settles, and no more than once a second however often it changes.
   new MutationObserver(() => {
     clearTimeout(relocating);
-    relocating = setTimeout(() => { if (wanted.length) relocate(); }, 250);
+    const wait = Math.max(SETTLE_MS, relocated + EVERY_MS - Date.now());
+    relocating = setTimeout(() => { if (wanted.length) relocate(); }, wait);
   }).observe(document.documentElement, { childList: true, subtree: true, characterData: true });
 
   document.addEventListener('selectionchange', () => {

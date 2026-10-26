@@ -8,7 +8,7 @@ import { renderDiagrams, renderPikchr } from './diagrams.js';
 import { embedFonts } from './fonts.js';
 import { zip } from './zip.js';
 import { preparePublication } from './export.js';
-import { anchorFor, arrange, controls, findQuote, thread } from './comments.js';
+import { anchorFor, arrange, controls, findQuotes, thread } from './comments.js';
 import { pagePins } from './page-pins.js';
 
 const $ = id => document.getElementById(id);
@@ -114,7 +114,7 @@ const RUNTIME = `(function(){
     t.scrollIntoView({ block: 'start' });
   }, true);
 })();
-(${pagePins})(${findQuote}, ${anchorFor});`;
+(${pagePins})(${findQuotes}, ${anchorFor});`;
 
 // The page renders in a sandboxed iframe with an opaque origin, which cannot
 // load this page's blob: URLs. So the other files of the check-in are inlined:
@@ -402,15 +402,21 @@ addEventListener('message', e => {
       view.querySelector('.anchor')?.replaceWith(anchorLine(t) ?? '');
     }
   } else if (d.type === 'open' && Number.isInteger(d.key)) {
+    // A pin's click. The page can send these at will, so the panel is changed
+    // in place, never rebuilt, and focus never leaves a reply being written.
     const t = threads.find(x => x.label === d.key);
-    if (!t) return;
+    const view = t && views.get(t.uuid);
+    if (!view || (focused === t.uuid && view.open && !$('threadPanel').hidden)) return;
     focused = t.uuid;
     expanded.set(t.uuid, true);
     openPanel();
-    renderThreads();
-    const view = views.get(t.uuid);
-    view?.scrollIntoView({ block: 'nearest' });
-    view?.querySelector('summary')?.focus();
+    for (const other of document.querySelectorAll('#threadPanel .thread.focus')) other.classList.remove('focus');
+    view.classList.add('focus');
+    view.open = true;
+    const typing = document.activeElement;
+    if (typing?.matches('#threadPanel textarea') && typing.value.trim()) return;
+    view.scrollIntoView({ block: 'nearest' });
+    view.querySelector('summary').focus();
   } else if (d.type === 'selection' && typeof d.anchor === 'string' && controls(info).commentBox) {
     selection = Array.from(d.anchor).slice(0, 500).join('');
     renderAnchor();

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { anchorFor, arrange, findQuote, thread } from '../public/comments.js';
+import { anchorFor, arrange, findQuotes, thread } from '../public/comments.js';
 
 const ticket = (status, changes, fields = {}) => ({
   uuid: 'a'.repeat(40), status, changed: '2026-10-26T00:00:00Z',
@@ -8,17 +8,27 @@ const ticket = (status, changes, fields = {}) => ({
   changes: changes.map(([user, comment, f = {}]) => ({ artifact: 'b'.repeat(40), user, time: '2026-10-26T00:00:00Z', comment, fields: f })),
 });
 
-// A quote anchor is matched in the page's text nodes with whitespace runs
+// Quote anchors are matched in the page's text nodes with whitespace runs
 // collapsed, so a selection made across elements or line breaks still finds
-// its place in the same page rendered again.
-test('findQuote: a quote across text nodes, whitespace-insensitive', () => {
+// its place in the same page rendered again. The page text is collapsed once
+// for all the anchors, so anchors that match nothing cost one search each.
+test('findQuotes: quotes across text nodes, whitespace-insensitive, in one pass', () => {
   const texts = ['Intro', '\n  The heading ', 'reads', '\n oddly here.'];
-  assert.deepEqual(findQuote(texts, 'heading reads oddly'), { start: [1, 7], end: [3, 7] });
-  assert.deepEqual(findQuote(texts, '  heading\nreads  '), { start: [1, 7], end: [2, 5] }, 'the quote is normalized too');
-  assert.deepEqual(findQuote(['abc'], 'abc'), { start: [0, 0], end: [0, 3] });
-  assert.equal(findQuote(texts, 'not on the page'), null);
-  assert.equal(findQuote(texts, '   '), null, 'a blank quote matches nothing');
-  assert.equal(findQuote([], 'x'), null);
+  const [a, b, none, blank] = findQuotes(texts, ['heading reads oddly', '  heading\nreads  ', 'not on the page', '   ']);
+  assert.deepEqual(a, { start: [1, 7], end: [3, 7] });
+  assert.deepEqual(b, { start: [1, 7], end: [2, 5] }, 'the quote is normalized too');
+  assert.equal(none, null);
+  assert.equal(blank, null, 'a blank quote matches nothing');
+  assert.deepEqual(findQuotes(['abc'], ['abc']), [{ start: [0, 0], end: [0, 3] }]);
+  assert.deepEqual(findQuotes([], ['x']), [null]);
+  assert.deepEqual(findQuotes(texts, []), []);
+  // Many anchors that match nothing, against a large page: one answer each, in order.
+  const page = Array.from({ length: 2000 }, (_, i) => `paragraph ${i} with   some\ttext `);
+  const misses = Array.from({ length: 500 }, (_, i) => `x${i} `.repeat(100).slice(0, 500));
+  const hits = findQuotes(page, [...misses, 'paragraph 1999 with some text']);
+  assert.equal(hits.length, 501);
+  assert.ok(hits.slice(0, 500).every(h => h === null));
+  assert.deepEqual(hits[500], { start: [1999, 0], end: [1999, 31] });
 });
 
 // A selection that is an element's whole text anchors to the element's id,

@@ -5,6 +5,7 @@
 //
 //   const page = await frameEval(cdpUrl);  // the browser's DevTools WebSocket
 //   await page.eval('document.title');
+//   await page.eval('parent.parent', f => f.url === 'about:srcdoc');  // a frame inside the page
 //   page.close();
 
 export async function frameEval(cdpUrl) {
@@ -27,7 +28,9 @@ export async function frameEval(cdpUrl) {
     ws.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
   });
 
-  async function attach() {
+  const inTree = (tree, wanted) => (wanted(tree.frame) ? tree.frame : (tree.childFrames ?? []).map(c => inTree(c, wanted)).find(Boolean));
+
+  async function attach(wanted) {
     // A sandboxed frame may run in its own process (its own target) or in the viewer's.
     const { targetInfos } = await call('Target.getTargets');
     const target = targetInfos.find(t => t.type === 'iframe' && t.url.startsWith('blob:'))
@@ -36,15 +39,15 @@ export async function frameEval(cdpUrl) {
     const { sessionId } = await call('Target.attachToTarget', { targetId: target.targetId, flatten: true });
     await call('Runtime.enable', {}, sessionId);
     const { frameTree } = await call('Page.getFrameTree', {}, sessionId);
-    const blob = target.type === 'iframe' ? frameTree.frame : frameTree.childFrames?.find(f => f.frame.url.startsWith('blob:'))?.frame;
-    if (!blob) throw new Error('no page frame');
-    return { sessionId, frameId: blob.id };
+    const frame = inTree(frameTree, wanted);
+    if (!frame) throw new Error('no such frame');
+    return { sessionId, frameId: frame.id };
   }
 
   return {
-    async eval(expression) {
+    async eval(expression, wanted = f => f.url.startsWith('blob:')) {
       for (let tries = 0; tries < 20; tries++) {
-        const { sessionId, frameId } = await attach();
+        const { sessionId, frameId } = await attach(wanted);
         const ctx = contexts.find(c => c.sessionId === sessionId && c.auxData?.frameId === frameId && c.auxData?.isDefault);
         if (ctx) {
           const r = await call('Runtime.evaluate', { expression, contextId: ctx.id, returnByValue: true, awaitPromise: true }, sessionId);

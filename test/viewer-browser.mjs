@@ -42,9 +42,9 @@ export async function viewerQA({ base, a, api, output }) {
   const byTitle = async title => (await tickets()).find(t => t.fields.title === title);
   // agent-browser cannot enter the opaque-origin page frame; DevTools can.
   let page = null;
-  const inFrame = async source => {
+  const inFrame = async (source, wanted) => {
     page ??= await frameEval(run('get', 'cdp-url').trim());
-    return page.eval(source);
+    return page.eval(source, wanted);
   };
   // The thread a label names, as the panel shows it.
   const panel = label => evaluate(`(() => {
@@ -108,6 +108,52 @@ export async function viewerQA({ base, a, api, output }) {
     assert.ok(Math.abs(pinOf(heading).x - near.h.x) < 40 && Math.abs(pinOf(heading).y - near.h.y) < 40, JSON.stringify({ pin: pinOf(heading), at: near.h }));
     assert.ok(Math.abs(pinOf(fox).x - near.q.x) < 40 && Math.abs(pinOf(fox).y - near.q.y) < 40, JSON.stringify({ pin: pinOf(fox), at: near.q }));
     assert.ok(drawn.every(p => p.w >= 24 && p.h >= 24), 'pins are big enough to hit');
+
+    // What the page is told: anchors, numbers, resolved flags and colours; no ticket text, no token.
+    await inFrame(`(window.__told = [], addEventListener('message', e => { if (e.data && e.data.__artifactPins === 1) window.__told.push(e.data); }), true)`);
+    evaluate(`document.documentElement.dataset.theme = 'dark'`); // a theme change sends the pins again
+    run('wait', '--fn', `document.documentElement.dataset.theme === 'dark'`);
+    evaluate(`document.documentElement.dataset.theme = 'light'`);
+    settle();
+    const told = await inFrame('window.__told');
+    assert.ok(told.length >= 2, JSON.stringify(told));
+    for (const m of told) {
+      assert.deepEqual(Object.keys(m).sort(), ['__artifactPins', 'colors', 'pins', 'type'], JSON.stringify(m));
+      assert.equal(m.type, 'pins');
+      assert.deepEqual(Object.keys(m.colors).sort(), ['accent', 'muted', 'surface']);
+      assert.ok(Object.values(m.colors).every(c => /^#[0-9A-Fa-f]{6}$/.test(c)), JSON.stringify(m.colors));
+      for (const pin of m.pins) {
+        assert.deepEqual(Object.keys(pin).sort(), ['anchor', 'key', 'resolved']);
+        assert.ok(Number.isInteger(pin.key) && typeof pin.anchor === 'string' && typeof pin.resolved === 'boolean');
+      }
+      const raw = JSON.stringify(m);
+      for (const secret of [a.read, a.write, a.comment, 'About the fox', 'first line', 'Shortened in']) assert.ok(!raw.includes(secret), `the page is not told ${secret.slice(0, 12)}`);
+    }
+
+    // Only the page's own frame speaks for the pins: the viewer's window, or a
+    // frame nested in the page, is ignored. The same message from the page is taken.
+    const forged = { __artifactPins: 1, type: 'selection', anchor: 'FORGED' };
+    evaluate(`window.postMessage(${JSON.stringify(forged)}, '*')`);
+    await inFrame(`new Promise(r => { const f = document.createElement('iframe'); f.id = 'nested'; f.srcdoc = '<p>nested</p>'; f.onload = r; document.body.append(f); })`);
+    await inFrame(`(parent.parent.postMessage(${JSON.stringify(forged)}, '*'),
+      parent.parent.postMessage({ __artifactPins: 1, type: 'placed', keys: [] }, '*'),
+      parent.parent.postMessage({ __artifactPins: 1, type: 'open', key: ${gone} }, '*'), true)`, f => f.url === 'about:srcdoc');
+    settle();
+    assert.ok(!evaluate(`document.getElementById('commentAnchor').textContent`).includes('FORGED'));
+    assert.equal(panel(heading).anchored, 'yes', 'a forged placement changes nothing');
+    assert.equal(panel(gone).focus, false, 'a forged pin click opens nothing');
+    await inFrame(`(document.getElementById('nested').remove(), parent.postMessage({ __artifactPins: 1, type: 'selection', anchor: 'FROM THE PAGE' }, '*'), true)`);
+    run('wait', '--fn', `document.getElementById('commentAnchor').textContent.includes('FROM THE PAGE')`);
+    run('click', '#anchorClear');
+
+    // A page sending pin clicks never takes focus from a reply being written.
+    press(`#threadPanel .thread[data-label="${general}"] .reply textarea`);
+    run('keyboard', 'type', 'half a reply');
+    await inFrame(`(parent.postMessage({ __artifactPins: 1, type: 'open', key: ${gone} }, '*'), parent.postMessage({ __artifactPins: 1, type: 'open', key: ${gone} }, '*'), true)`);
+    settle();
+    assert.equal(evaluate(`(() => { const t = document.activeElement; return t.matches('#threadPanel .thread[data-label="${general}"] .reply textarea') && t.value; })()`), 'half a reply');
+    assert.equal(panel(gone).focus, true, 'the pin still marks its thread');
+    evaluate(`(() => { const t = document.activeElement; t.value = ''; t.dispatchEvent(new Event('input')); t.blur(); })()`);
 
     // Untrusted text, titles, anchors and authors render as text, in the panel and the page.
     assert.equal(evaluate('window.__xss ?? null'), null);

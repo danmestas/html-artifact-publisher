@@ -116,6 +116,18 @@ Environment (must be set before running):
 - When running in a headless or non-interactive environment without a display
   server, clipboard will silently fall back to "unavailable" — this is expected.
 
+## Appearance preflight
+
+Before publishing or updating, follow **artifact-design**: complete light and dark
+palettes, explicit tokenized body colors, and no shipped root `data-theme` pin.
+Test the viewer's Light / Dark / System choices, including explicit choices
+opposite the OS setting and changes while open. Optional attachments must follow
+the same contract: tokenized inline SVG, self-themed SVG files, or paired light/dark
+image assets with CSS selection. Publish both variants with relative `src` paths;
+see artifact-design's attachment example and private-viewer `srcset` limitation.
+Fixed-color photos/screenshots keep their real colors on an appropriate surface.
+Public snapshots have no chrome; verify their browser/system appearance separately.
+
 ## Page API
 
 Inside the viewer, pages can use `window.artifact`: `canWrite()`, `files()`,

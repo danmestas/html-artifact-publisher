@@ -133,15 +133,26 @@ slight letter-spacing to uppercase labels. Use
 **Neutrals.** Choose the greys. Tint them slightly toward the accent hue so
 they look intended. Pure white or near-black grounds are fine when chosen.
 
-**Both themes through tokens.** The viewer has no theme toggle and never sets a
-`data-theme` attribute; the page follows the OS through
-`prefers-color-scheme`. Define every color once on `:root` (light values),
-redefine only the tokens inside the dark media query, and style every
-component through tokens. `body` must set an explicit `background` and `color`
-because the iframe is white by default. Give dark its own care: lower the
-accent's lightness or saturation so it doesn't glare, and recheck contrast.
-A page with one deliberate look (a terminal screen, a poster) may skip the dark
-block, but still sets every color explicitly.
+**Build both themes, matching the chrome.** Every new page must have complete
+light and dark palettes; do not ship a fixed-dark page just because the first
+screenshot looks good. Follow the viewer's **Light / Dark / System** behavior.
+The chrome sets `data-theme="light|dark"` on its own root for an explicit choice
+and removes it for System. Its CSS sets the used `color-scheme`; the browser
+exposes that scheme to the sandboxed iframe through `prefers-color-scheme`,
+including when the reader changes appearance while the page is open. The viewer
+does **not** copy its `data-theme` attribute into the artifact or expose a theme
+message API. Do not read the parent DOM or browser storage to discover the choice.
+Standalone public snapshots have no chrome and follow the browser/system scheme.
+
+Use the same token pattern as the chrome: complete light values on bare `:root`,
+a guarded dark media override, and an explicit dark selector with the same values.
+The explicit selectors also let you test the page on its own by setting its root
+`data-theme`; leave that attribute **absent in the shipped HTML**, and never pin
+it from a script. Style every component through tokens. `body` must set an
+explicit token `background` and `color`; set `color-scheme` with each palette so
+native controls and scrollbars match. Give dark its own contrast and accent
+checks, not a blanket inversion. A single-theme treatment is an exception only
+when the user explicitly requests it; explain that it will not follow appearance.
 
 ```css
 :root {
@@ -154,15 +165,74 @@ block, but still sets every color explicitly.
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --bg: #141517;   --surface: #1d1f22; --fg: #e8e6e2;
     --muted: #a19d96; --line: #34363a;  --accent: #8db4dc;
     --ok: #6cc28f;   --warn: #e0a64a;   --bad: #f08a80;
     color-scheme: dark;
   }
 }
+:root[data-theme="dark"] {
+  --bg: #141517;   --surface: #1d1f22; --fg: #e8e6e2;
+  --muted: #a19d96; --line: #34363a;  --accent: #8db4dc;
+  --ok: #6cc28f;   --warn: #e0a64a;   --bad: #f08a80;
+  color-scheme: dark;
+}
 body { background: var(--bg); color: var(--fg); font-family: var(--font-body); }
 ```
+
+**Theme-aware attachments (optional).** Publish supporting files alongside
+`index.html`, referencing them by relative paths. Attaching a file does not
+recolor it. Choose the appropriate technique:
+
+- **Inline SVG:** use the page's tokens and `currentColor` for text, strokes,
+  fills and the drawing surface. This is best for an interactive figure.
+- **Separate SVG file:** it cannot inherit the page's custom properties through
+  `<img>`. Give the SVG its own complete light palette and a
+  `prefers-color-scheme: dark` override, or supply two variants. Keep fonts and
+  resources self-contained; do not rely on scripts in an SVG image.
+- **PNG/WebP/JPEG or fixed-color SVG diagrams:** export a light and a dark
+  variant with the same dimensions and content. Use two ordinary `<img src>`
+  elements and CSS to select one, as below. The private viewer rewrites local
+  `src` paths but does not rewrite `srcset`; do not rely on a local
+  `<picture><source srcset>` pair there.
+- **Photos, logos and screenshots:** preserve their real colors. Place them on
+  a tokenized surface with a border/padding if needed; never apply a global
+  `filter: invert()` to make an attachment dark. A screenshot may intentionally
+  show a different theme; label that context rather than changing the evidence.
+- **PDFs and other fixed-format attachments:** the page theme does not change
+  their contents. Supply separately labelled light/dark files if necessary;
+  do not promise automatic theming or add a download button the sandbox cannot
+  support. For in-page reading, prefer accessible HTML or image previews.
+
+```html
+<figure class="theme-attachment">
+  <img class="asset-light" src="images/flow-light.svg"
+       alt="Request flow from browser through the Worker to storage" width="960" height="480">
+  <img class="asset-dark" src="images/flow-dark.svg"
+       alt="Request flow from browser through the Worker to storage" width="960" height="480">
+  <figcaption>The same request flow in the reader's appearance.</figcaption>
+</figure>
+```
+
+```css
+.theme-attachment { background: var(--surface); color: var(--fg); }
+.theme-attachment img { max-width: 100%; height: auto; }
+.theme-attachment .asset-light { display: block; }
+.theme-attachment .asset-dark { display: none; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .asset-light { display: none; }
+  :root:not([data-theme="light"]) .asset-dark { display: block; }
+}
+:root[data-theme="dark"] .asset-light { display: none; }
+:root[data-theme="dark"] .asset-dark { display: block; }
+```
+
+Use identical meaningful alt text for equivalent variants; `display: none`
+removes the inactive image from the accessibility tree. Do not use the `hidden`
+attribute here: CSS chooses the visible variant. Test both files in the actual
+viewer and public snapshot if publishing one. Check labels, transparent edges,
+contrast and missing assets in each theme, not just the surrounding page.
 
 **Layout and spacing.** Space sibling groups with flex or grid and `gap`, not
 per-element margins. Keep a side gutter of at least 16 px at every width. Watch
@@ -285,7 +355,14 @@ page needs other viewers' changes. See **artifact-runtime**.
    pass, not a loop:
    - `grep -nE 'https?://|onclick=|on[a-z]+="|javascript:|localStorage|sessionStorage|download|import |fetch\(' ` over your files; every hit is either legitimate (a plain outbound `<a href>`) or must go.
    - Every color comes from a token defined on `:root`; `body` sets background
-     and color; the dark block only redefines tokens.
+     and color; both dark blocks redefine the same tokens and set `color-scheme`.
+   - Verify System with light and dark OS settings, Light with a dark OS, and
+     Dark with a light OS. Change appearance while the artifact is open: text,
+     surfaces, controls, charts, diagrams and optional attachment variants must
+     all follow without reloading. Do not ship a pinned root `data-theme`.
+   - Inspect both themes at phone and desktop widths, including attachment
+     contrast and labels. Recheck standalone public snapshots against the
+     browser/system scheme; they have no viewer appearance selector.
    - No fixed full-width top bar, no `100vh` hero, nothing wider than 360 px
      outside an `overflow-x: auto` wrapper.
    - `<title>` is a real name; content is visible at rest.
@@ -312,8 +389,14 @@ page needs other viewers' changes. See **artifact-runtime**.
     color-scheme: light;
   }
   @media (prefers-color-scheme: dark) {
-    :root { --bg: #161513; --fg: #ebe8e1; --muted: #a39f95; --line: #36332e;
-            --accent: #e0a07a; color-scheme: dark; }
+    :root:not([data-theme="light"]) {
+      --bg: #161513; --fg: #ebe8e1; --muted: #a39f95; --line: #36332e;
+      --accent: #e0a07a; color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #161513; --fg: #ebe8e1; --muted: #a39f95; --line: #36332e;
+    --accent: #e0a07a; color-scheme: dark;
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 var(--font); }

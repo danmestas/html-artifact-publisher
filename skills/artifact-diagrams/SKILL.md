@@ -27,8 +27,13 @@ iframe with a strict CSP (see **publish-html-page** for the publishing side and
 - **No inline event handlers.** `onclick=` / `onmouseover=` are blocked. If parts of the
   diagram are interactive (highlight a path, toggle "before / after"), attach listeners with
   `addEventListener` in an inline `<script>`.
-- **Theme follows the OS.** The viewer renders Pikchr in light and dark and swaps them
-  with `prefers-color-scheme`; hand-written SVG uses CSS custom properties.
+- **Theme follows the chrome.** Build light and dark. The iframe's
+  `prefers-color-scheme` follows the viewer's Light / Dark / System choice via
+  the chrome's used `color-scheme`; standalone snapshots follow browser/system.
+  Pikchr swaps its two rendered variants automatically; do not pin a diagram
+  with `data-theme` unless explicitly requested. Hand-written inline SVG uses
+  page tokens. For attached SVG/image files, follow artifact-design's
+  theme-aware attachment guidance; external SVG cannot inherit page tokens.
 - **Phone to desktop.** The viewer gives the page the full width under its top bar - as little
   as ~360 px on a phone.
 - **No image export from the page.** Downloads are blocked in the viewer. The Pikchr
@@ -180,14 +185,15 @@ silently pick up the first's marker.
 With page tokens such as:
 
 ```css
-:root { --ink: #1d1f23; --ink-2: #555a63; --panel: #f3f4f6; --accent: #2563c9; --surface: #ffffff; }
+:root { --ink: #1d1f23; --ink-2: #555a63; --panel: #f3f4f6; --accent: #2563c9; --surface: #ffffff; color-scheme: light; }
 @media (prefers-color-scheme: dark) {
-  :root { --ink: #e9eaec; --ink-2: #a7acb5; --panel: #22252a; --accent: #5b9bf0; --surface: #15171a; }
+  :root:not([data-theme="light"]) { --ink: #e9eaec; --ink-2: #a7acb5; --panel: #22252a; --accent: #5b9bf0; --surface: #15171a; color-scheme: dark; }
 }
+:root[data-theme="dark"] { --ink: #e9eaec; --ink-2: #a7acb5; --panel: #22252a; --accent: #5b9bf0; --surface: #15171a; color-scheme: dark; }
 body { background: var(--surface); color: var(--ink); }
 ```
 
-Why it holds up: every colour is a token, so the OS theme repaints it; the arrowhead is a
+Why it holds up: every colour is a token, so appearance changes repaint it; the arrowhead is a
 marker filled with `currentColor`, so it always matches its line; the line ends 2 px before
 the target box so the head is not buried in the box stroke; `min-width: 480px` inside an
 `overflow-x: auto` wrapper keeps labels at a readable size on a phone, where the figure

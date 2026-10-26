@@ -90,19 +90,45 @@ button:focus-visible, a:focus-visible, input:focus-visible { outline: 2px solid 
 .collaboration summary { cursor: pointer; padding: 14px 16px; font-weight: 500; }
 .collaboration-hint { margin: 0; padding: 0 16px 12px; }
 button:disabled { cursor: wait; opacity: .6; }
-/* Comments: the thread list and the comment box. Pins and the full thread panel are #18. */
-.popover.comments { right: 0; width: 420px; max-height: min(80vh, 640px); overflow-y: auto; overscroll-behavior: contain; }
-.thread { padding: 10px 16px; border-top: 1px solid var(--line); }
-.thread h3 { margin: 0 0 6px; font-size: 14px; display: flex; gap: 8px; align-items: baseline; justify-content: space-between; }
-.thread .message { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
-.thread .who { font-size: 12.5px; color: var(--muted); }
-#threadList:empty::after { content: 'No comments yet.'; display: block; padding: 0 16px 12px; color: var(--muted); font-size: 12.5px; }
-#commentForm { display: flex; flex-direction: column; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--line); background: var(--bar); }
+/* ── Comments: the thread panel beside the page, a sheet on a phone ───── */
+#threadPanel {
+  flex: none; width: 380px; display: flex; flex-direction: column; overflow-y: auto; overscroll-behavior: contain; scroll-padding-top: 60px;
+  background: var(--surface); color: var(--ink); border-left: 1px solid var(--line);
+}
+.panel-head { display: flex; align-items: center; gap: 8px; padding: 8px 8px 8px 16px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--surface); z-index: 1; }
+.panel-head #commentsNote { flex: 1; font-size: 12.5px; }
+#threadPanel > h3 { margin: 0; padding: 14px 16px 6px; font-size: 12.5px; font-weight: 600; color: var(--muted); }
+.thread { border-bottom: 1px solid var(--line); }
+.thread > summary { display: flex; gap: 8px; align-items: baseline; padding: 12px 16px; cursor: pointer; list-style: none; min-height: 44px; }
+.thread > summary::-webkit-details-marker { display: none; }
+.thread > summary .title { flex: 1; min-width: 0; font-weight: 600; overflow-wrap: anywhere; }
+.thread .num {
+  flex: none; display: inline-grid; place-items: center; min-width: 22px; height: 22px; padding: 0 5px; border-radius: 11px 11px 11px 3px;
+  background: var(--accent); color: var(--surface); font-size: 11.5px; font-weight: 600;
+}
+.thread.resolved .num { background: var(--muted); }
+.thread.resolved > summary .title { color: var(--ink-2); font-weight: 500; }
+.thread.focus { box-shadow: inset 3px 0 0 var(--accent); background: var(--accent-wash); }
+.thread-body { padding: 0 16px 12px; display: flex; flex-direction: column; gap: 8px; }
+.thread .anchor { margin: 0; font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
+.thread .anchor.unanchored { color: var(--accent-ink); }
+.thread .anchor button { padding: 0; border: none; background: none; color: var(--accent-ink); text-align: left; text-decoration: underline; text-underline-offset: 3px; min-height: 32px; }
+.thread .message { margin: 2px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.thread .who { font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
+.thread .checkins { margin: 0; font-size: 12.5px; }
+.thread .checkins a { color: var(--accent-ink); font-family: var(--mono); text-underline-offset: 3px; }
+.reply { display: flex; flex-direction: column; gap: 8px; }
+.reply .resolve { height: 36px; padding: 0 12px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface); font-weight: 500; }
+#threadList:empty::after { content: 'No comments yet.'; display: block; padding: 12px 16px; color: var(--muted); font-size: 12.5px; }
+#commentForm { display: flex; flex-direction: column; gap: 8px; padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--bar); }
 #commentForm[hidden] { display: none; }
 #commentForm label { font-weight: 500; }
-#commentText { width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--surface); color: var(--ink); font: inherit; resize: vertical; }
-.comment-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.comment-actions .hint { font-size: 12.5px; color: var(--muted); }
+.anchor-row { display: flex; align-items: center; gap: 8px; }
+.anchor-row .hint { flex: 1; min-width: 0; font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
+#anchorClear { height: 32px; padding: 0 10px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--surface); }
+#commentText, .reply textarea { width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--surface); color: var(--ink); font: inherit; resize: vertical; }
+.comment-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.comment-actions .hint { flex: 1; font-size: 12.5px; color: var(--muted); }
 .popover.more { right: 0; width: 240px; padding: 6px; display: flex; flex-direction: column; }
 .popover-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 14px 16px 10px; }
 .popover-foot { padding: 10px 16px; border-top: 1px solid var(--line); background: var(--bar); font-size: 12.5px; }
@@ -156,7 +182,8 @@ button:disabled { cursor: wait; opacity: .6; }
 #msg.err { color: var(--danger); max-width: 40ch; text-align: center; }
 #ring { width: 34px; height: 34px; border-radius: 50%; border: 3px solid var(--line); border-top-color: var(--accent); animation: spin .65s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
-#frame { display: none; flex: 1; width: 100%; border: none; background: #FFFFFF; }
+#stage { flex: 1; display: flex; min-height: 0; }
+#frame { display: none; flex: 1 1 0; min-width: 0; border: none; background: #FFFFFF; }
 
 #toast {
   position: fixed; left: 50%; bottom: max(20px, env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); z-index: 5;
@@ -176,6 +203,12 @@ button:disabled { cursor: wait; opacity: .6; }
   .primary { justify-content: center; gap: 6px; padding: 0 10px; font-size: 12px; }
   .chip, .icon, .primary { height: 44px; }
   .icon { width: 44px; }
-  .popover.versions, .popover.share, .popover.comments { position: fixed; left: 12px; right: 12px; top: auto; bottom: max(12px, env(safe-area-inset-bottom, 0px)); width: auto; }
+  #threadPanel {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 4; width: auto; max-height: 70vh;
+    border-left: none; border-top: 1px solid var(--line-strong); border-radius: 14px 14px 0 0;
+    box-shadow: 0 -12px 40px rgba(0, 0, 0, 0.2); padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  .panel-head { border-radius: 14px 14px 0 0; }
+  .popover.versions, .popover.share { position: fixed; left: 12px; right: 12px; top: auto; bottom: max(12px, env(safe-area-inset-bottom, 0px)); width: auto; }
 }
 @media (prefers-reduced-motion: reduce) { #ring { animation: none; } }

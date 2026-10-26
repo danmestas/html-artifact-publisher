@@ -8,7 +8,8 @@ import { renderDiagrams, renderPikchr } from './diagrams.js';
 import { embedFonts } from './fonts.js';
 import { zip } from './zip.js';
 import { preparePublication } from './export.js';
-import { controls, thread } from './comments.js';
+import { anchorFor, arrange, controls, findQuote, thread } from './comments.js';
+import { pagePins } from './page-pins.js';
 
 const $ = id => document.getElementById(id);
 const NONCE = document.querySelector('meta[name="artifact-nonce"]')?.content ?? '';
@@ -40,6 +41,7 @@ let info = null;     // { title, role, tip, timeline } as last loaded
 let shown = null;    // { checkin, files, blobs } being shown
 let frameUrl = '';   // blob: URL of the rendered page, revoked on the next render
 let renders = 0;     // a newer render() supersedes one still awaiting diagrams or fonts
+let frameReady = false; // the page has loaded and can take pins
 
 function fail(message) {
   $('msg').textContent = message;
@@ -67,8 +69,9 @@ function resolvePath(ref, from) {
   return decodeURIComponent(url.pathname.slice(1));
 }
 
-// Injected first into every page: the window.artifact bridge and in-page
-// anchor scrolling (blob: documents do not scroll to #ids on their own).
+// Injected first into every page: the window.artifact bridge, in-page
+// anchor scrolling (blob: documents do not scroll to #ids on their own) and
+// the comment pins (page-pins.js).
 const RUNTIME = `(function(){
   var n = 0, pending = {};
   addEventListener('message', function (e) {
@@ -110,7 +113,8 @@ const RUNTIME = `(function(){
     try { history.pushState(null, '', h); } catch (_) {}
     t.scrollIntoView({ block: 'start' });
   }, true);
-})();`;
+})();
+(${pagePins})(${findQuote}, ${anchorFor});`;
 
 // The page renders in a sandboxed iframe with an opaque origin, which cannot
 // load this page's blob: URLs. So the other files of the check-in are inlined:
@@ -182,9 +186,12 @@ async function render() {
   if (frameUrl) URL.revokeObjectURL(frameUrl);
   frameUrl = URL.createObjectURL(new Blob(['<!DOCTYPE html>\n' + doc.documentElement.outerHTML], { type: 'text/html' }));
   const frame = $('frame');
+  frameReady = false;
   frame.onload = () => {
     $('shell').style.display = 'none';
     frame.style.display = 'block';
+    frameReady = true;
+    sendPins();
   };
   frame.src = frameUrl;
   document.title = doc.title || info.title || 'Artifact';
@@ -252,22 +259,163 @@ function renderChrome() {
 }
 
 // ─── Comments: each thread is a ticket in the artifact's repository ─────────
+//
+// The panel lists the threads; the page draws a pin at each anchor it finds
+// (page-pins.js) and tells the viewer which it placed. The page is sent
+// anchors and labels only, never ticket text, and never a token.
 
 let threads = [];
 let threadsTruncated = false;
+let pins = [];           // what the page was last sent
+let placed = null;       // labels the page placed, or null before it answered
+let selection = '';      // the anchor of the reader's selection in the page
+let focused = '';        // uuid of the thread a pin opened
+const expanded = new Map(); // uuid -> open, once the reader toggled it
+const drafts = new Map();   // uuid -> reply text not yet sent
+const views = new Map();    // uuid -> its element in the panel
+
+const quoted = s => `“${s}”`;
+
+function anchored(t) {
+  if (!t.anchor) return 'none';
+  if (!placed) return 'pending';
+  return placed.has(t.label) ? 'yes' : 'no';
+}
+
+function anchorLine(t) {
+  const state = anchored(t);
+  if (state === 'none') return null;
+  if (state === 'no') return el('p', { className: 'anchor unanchored', textContent: `Not found in this version: ${quoted(t.anchor)}` });
+  if (state === 'pending') return el('p', { className: 'anchor', textContent: `On ${quoted(t.anchor)}` });
+  const show = el('button', { type: 'button', textContent: `On ${quoted(t.anchor)}` });
+  show.addEventListener('click', () => post({ type: 'reveal', key: t.label }));
+  return el('p', { className: 'anchor' }, show);
+}
+
+function threadView(t, can) {
+  const view = el('details', { className: `thread${t.resolved ? ' resolved' : ''}${t.uuid === focused ? ' focus' : ''}` },
+    el('summary', {},
+      el('span', { className: 'num', textContent: String(t.label) }),
+      el('span', { className: 'title', textContent: t.title }),
+      el('span', { className: `tag${t.resolved ? ' latest' : ''}`, textContent: t.status })),
+    el('div', { className: 'thread-body' },
+      anchorLine(t),
+      ...t.messages.filter((m, i) => i === 0 || m.text || m.status).map(m => el('div', {},
+        el('div', { className: 'who', textContent: `${m.user} · ${ago(m.time)}${m.status ? ` · marked ${m.status}` : ''}` }),
+        m.text ? el('p', { className: 'message', textContent: m.text }) : null)),
+      t.checkins.length ? el('p', { className: 'checkins' }, 'Answered in ',
+        ...t.checkins.flatMap((c, i) => [i ? ', ' : null, el('a', { href: fragment({ token: link.token, at: c }), textContent: shortId(c) })])) : null,
+      can.commentBox ? replyForm(t) : null));
+  view.dataset.label = String(t.label);
+  view.dataset.anchored = anchored(t);
+  view.open = expanded.get(t.uuid) ?? !t.resolved;
+  // Remember only what the reader changed, so a thread resolved elsewhere still collapses.
+  view.addEventListener('toggle', () => (view.open === !t.resolved ? expanded.delete(t.uuid) : expanded.set(t.uuid, view.open)));
+  views.set(t.uuid, view);
+  return view;
+}
+
+function replyForm(t) {
+  const text = el('textarea', { rows: 2, maxLength: 8000, value: drafts.get(t.uuid) ?? '' });
+  text.setAttribute('aria-label', `Reply to ${t.title}`);
+  text.addEventListener('input', () => drafts.set(t.uuid, text.value));
+  const status = el('span', { className: 'hint' });
+  status.setAttribute('role', 'status');
+  const resolve = el('button', { type: 'button', className: 'resolve', textContent: t.resolved ? 'Reopen' : 'Resolve' });
+  const send = el('button', { type: 'submit', className: 'primary', textContent: 'Reply' });
+  const form = el('form', { className: 'reply' }, text, el('div', { className: 'comment-actions' }, status, resolve, send));
+  const change = async (body, doing) => {
+    resolve.disabled = send.disabled = true;
+    status.textContent = doing;
+    try {
+      await art.comment({ ticketUuid: t.uuid, ...body });
+      if (body.text) drafts.delete(t.uuid);
+      if (body.status) expanded.delete(t.uuid);
+      await loadThreads();
+      // The thread moved (newest-changed first, resolved last): keep it in sight.
+      views.get(t.uuid)?.scrollIntoView({ block: 'nearest' });
+    } catch (err) {
+      status.textContent = `Could not save: ${err.message}`;
+      resolve.disabled = send.disabled = false;
+    }
+  };
+  form.addEventListener('submit', e => {
+    e.preventDefault();
+    const reply = text.value.trim();
+    if (reply) change({ text: reply }, 'Posting…');
+  });
+  resolve.addEventListener('click', () => change({ status: t.resolved ? 'Open' : 'Closed' }, t.resolved ? 'Reopening…' : 'Resolving…'));
+  return form;
+}
 
 function renderThreads() {
+  const can = controls(info);
+  const { open, resolved, pins: next } = arrange(threads);
   $('commentCount').textContent = threads.length ? `${threads.length}${threadsTruncated ? '+' : ''}` : '';
   $('commentsNote').textContent = [
     threadsTruncated ? `Showing the newest ${threads.length}` : '',
-    controls(info).commentBox ? '' : 'Read only',
+    can.commentBox ? '' : 'Read only',
   ].filter(Boolean).join(' · ');
-  $('threadList').replaceChildren(...threads.map(t => el('article', { className: 'thread' },
-    el('h3', {}, el('span', { textContent: t.title }), el('span', { className: 'tag', textContent: t.status })),
-    ...t.messages.filter(m => m.text || m.status).map(m => el('div', {},
-      el('div', { className: 'who', textContent: `${m.user} · ${ago(m.time)}${m.status ? ` · marked ${m.status}` : ''}` }),
-      m.text ? el('p', { className: 'message', textContent: m.text }) : null)))));
+  views.clear();
+  $('threadList').replaceChildren(...open.map(t => threadView(t, can)));
+  $('resolvedList').replaceChildren(...resolved.map(t => threadView(t, can)));
+  $('resolvedHead').hidden = !resolved.length;
+  renderAnchor();
+  if (JSON.stringify(next) !== JSON.stringify(pins)) {
+    pins = next;
+    placed = null;
+    sendPins();
+  }
 }
+
+function renderAnchor() {
+  $('commentAnchor').textContent = selection ? `On ${quoted(selection)}` : 'Select text in the page to comment on it.';
+  $('anchorClear').hidden = !selection;
+}
+
+/** A message to the page's pins (page-pins.js). The page's origin is opaque, so '*'. */
+function post(message) {
+  const page = $('frame').contentWindow;
+  if (frameReady && page) page.postMessage({ __artifactPins: 1, ...message }, '*');
+}
+
+function sendPins() {
+  const style = getComputedStyle(document.documentElement);
+  const colors = Object.fromEntries(['accent', 'surface', 'muted'].map(k => [k, style.getPropertyValue(`--${k}`).trim()]));
+  placed = null;
+  post({ type: 'pins', pins, colors });
+}
+
+// The theme changed: redraw the pins in its colours.
+new MutationObserver(sendPins).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', sendPins);
+
+addEventListener('message', e => {
+  const d = e.data;
+  if (e.source !== $('frame').contentWindow || !d || d.__artifactPins !== 1) return;
+  if (d.type === 'placed' && Array.isArray(d.keys)) {
+    placed = new Set(d.keys.filter(Number.isInteger));
+    for (const view of document.querySelectorAll('#threadPanel .thread')) {
+      const t = threads.find(x => String(x.label) === view.dataset.label);
+      if (!t) continue;
+      view.dataset.anchored = anchored(t);
+      view.querySelector('.anchor')?.replaceWith(anchorLine(t) ?? '');
+    }
+  } else if (d.type === 'open' && Number.isInteger(d.key)) {
+    const t = threads.find(x => x.label === d.key);
+    if (!t) return;
+    focused = t.uuid;
+    expanded.set(t.uuid, true);
+    openPanel();
+    renderThreads();
+    const view = views.get(t.uuid);
+    view?.scrollIntoView({ block: 'nearest' });
+    view?.querySelector('summary')?.focus();
+  } else if (d.type === 'selection' && typeof d.anchor === 'string' && controls(info).commentBox) {
+    selection = Array.from(d.anchor).slice(0, 500).join('');
+    renderAnchor();
+  }
+});
 
 async function loadThreads() {
   if (!controls(info).threads) return;
@@ -279,16 +427,41 @@ async function loadThreads() {
   } catch { /* offline or gone: keep what is shown */ }
 }
 
+function openPanel() {
+  closePopovers();
+  $('threadPanel').hidden = false;
+  $('commentsBtn').setAttribute('aria-expanded', 'true');
+}
+
+$('commentsBtn').addEventListener('click', e => {
+  e.stopPropagation();
+  if ($('threadPanel').hidden) {
+    openPanel();
+    loadThreads();
+  } else {
+    $('threadClose').click();
+  }
+});
+$('threadClose').addEventListener('click', () => {
+  $('threadPanel').hidden = true;
+  $('commentsBtn').setAttribute('aria-expanded', 'false');
+  focused = '';
+  for (const view of document.querySelectorAll('#threadPanel .thread.focus')) view.classList.remove('focus');
+});
+$('threadPanel').addEventListener('click', e => e.stopPropagation());
+$('anchorClear').addEventListener('click', () => { selection = ''; renderAnchor(); });
+
 $('commentForm').addEventListener('submit', async e => {
   e.preventDefault();
   const text = $('commentText').value.trim();
   if (!text) return;
-  const button = $('commentForm').querySelector('button');
+  const button = $('commentForm').querySelector('button[type=submit]');
   button.disabled = true;
   $('commentStatus').textContent = 'Posting…';
   try {
-    await art.comment({ text });
+    await art.comment(selection ? { text, anchor: selection } : { text });
     $('commentText').value = '';
+    selection = '';
     $('commentStatus').textContent = 'Posted.';
     await loadThreads();
   } catch (err) {
@@ -460,7 +633,7 @@ function renderShare() {
 }
 
 // One popover open at a time; Escape or a click elsewhere closes it.
-const popovers = [['versionBtn', 'versionMenu'], ['shareBtn', 'shareMenu'], ['commentsBtn', 'commentsMenu'], ['moreBtn', 'moreMenu']];
+const popovers = [['versionBtn', 'versionMenu'], ['shareBtn', 'shareMenu'], ['moreBtn', 'moreMenu']];
 function closePopovers(except) {
   for (const [btn, menu] of popovers) {
     if (menu === except) continue;
@@ -476,7 +649,6 @@ for (const [btn, menu] of popovers) {
     $(menu).hidden = !open;
     $(btn).setAttribute('aria-expanded', String(open));
     if (open && menu === 'shareMenu') loadPublications();
-    if (open && menu === 'commentsMenu') loadThreads();
   });
   $(menu).addEventListener('click', e => e.stopPropagation());
 }

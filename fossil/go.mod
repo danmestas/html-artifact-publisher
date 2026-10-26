@@ -3,7 +3,7 @@ module github.com/danmestas/html-artifact-publisher/fossil
 go 1.26.0
 
 require (
-	github.com/danmestas/go-libfossil v0.12.1-0.20261017202753-2d0575a12b1c
+	github.com/danmestas/go-libfossil v0.16.3-0.20261026130907-f5d72f495b48
 	github.com/danmestas/go-libfossil/db/driver/modernc v0.3.0
 )
 

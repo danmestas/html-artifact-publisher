@@ -759,13 +759,14 @@ function openDelete(item) {
   const form = node('form');
   form.append(node('p', { textContent: `Permanently delete “${item.title}” and its entire history? Private source links will stop working. Independent public copies remain published; unpublish them from Published links. This cannot be undone.` }));
   const input = formField(form, 'Type DELETE to confirm', node('input', { id: 'delete-confirm', required: true, autocomplete: 'off', pattern: 'DELETE' }));
-  const cancel = button('Keep artifact', () => $('dialog').close());
-  form.append(cancel);
-  submit(form, 'Permanently delete artifact', async () => {
+  const cancel = button('Cancel', () => $('dialog').close());
+  const confirm = submit(form, 'Permanently delete artifact', async () => {
     if (input.value !== 'DELETE') throw new Error('Type DELETE to confirm.');
     await api(`/api/artifacts/${encodeURIComponent(item.id)}`, { method: 'DELETE' });
     notify('Artifact deleted.');
   }, true);
+  confirm.classList.remove('full');
+  form.append(node('div', { className: 'actions' }, cancel, confirm));
   openDialog('Delete artifact', form);
   cancel.focus();
 }

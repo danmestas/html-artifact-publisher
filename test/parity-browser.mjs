@@ -67,10 +67,10 @@ export async function parityQA({base,api,owner,browserOwner,member,run,evaluate,
     assert.deepEqual(evaluate('[...document.querySelectorAll(".access-badge")].map(e=>e.textContent)'),['Can edit']);
     run('cookies','set','artifact_session',browserOwner.cookie.split('=')[1],'--url',base,'--httpOnly','--sameSite','Lax');
     run('open',base+'/?q=Parity+browser&sort=name');wait('.artifact-preview iframe');
-    click('.artifact-preview');wait('#frame');
+    click('.artifact-preview');wait('#bar:not([hidden])');
     assert.ok(evaluate('location.pathname').startsWith('/v/'),'preview activation opens normal viewer');
     run('back');wait('.artifact-preview iframe');
-    click('.artifact-preview');wait('#frame');
+    click('.artifact-preview');wait('#bar:not([hidden])');
     click('#backLibrary');wait('.artifact-title');
     assert.equal(evaluate('document.getElementById("sort").value'),'name');
     assert.equal(evaluate('document.getElementById("search").value'),'Parity browser');
@@ -99,6 +99,8 @@ export async function parityQA({base,api,owner,browserOwner,member,run,evaluate,
       assert.equal(evaluate('getComputedStyle(document.documentElement).colorScheme'),expected);
       selectQA();run('screenshot',join(output,`selects-library-${theme}-${width}.png`));
       click('.artifact-title');wait('#frame');
+      // The frame is static shell markup; toolbar actions need loaded artifact metadata.
+      wait('#bar:not([hidden])');
       assert.equal(evaluate('getComputedStyle(document.documentElement).colorScheme'),expected);
       assert.equal(evaluate('document.getElementById("viewer-theme").value'),theme);
       click('#moreBtn');selectQA();

@@ -18,6 +18,7 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
   const wait=selector=>run('wait',selector);
   const click=selector=>run('click',selector);
   const evidence=[],fixtures=[];
+  let failure;
   const selectQA=()=>{
     const selects=evaluate(`Array.from(document.querySelectorAll('select'),e=>{
       const s=getComputedStyle(e),c=document.createElement('canvas').getContext('2d');c.font=s.font;
@@ -39,7 +40,7 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
   };
   try {
     for(let i=0;i<28;i++) {
-      const r=await api('/api/artifacts',{method:'POST',cookie:owner.cookie,body:{title:i===0?'A very long artifact title '.repeat(10):`Browser pagination fixture ${i}`,ttlSeconds:null,files:{'index.html':Buffer.from('<h1>Local-only QA fixture</h1>').toString('base64')}}});
+      const r=await api('/api/artifacts',{method:'POST',cookie:owner.cookie,body:{icon:i===0?'chart':'document',title:i===0?'A very long artifact title '.repeat(10):`Browser pagination fixture ${i}`,ttlSeconds:null,files:{'index.html':Buffer.from('<h1>Local-only QA fixture</h1>').toString('base64')}}});
       assert.equal(r.status,201,r.text);fixtures.push(r.json.id);
     }
     await api(`/api/artifacts/${fixtures[0]}/star`,{method:'PUT',cookie:owner.cookie,body:{starred:true}});
@@ -73,12 +74,30 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
     await parityQA({base,api,owner,browserOwner,member,run,evaluate,wait,click,output,selectQA});
     run('set','viewport','390','844');
     run('open',base+'/?view=starred');wait('.artifact-title');
+    for (const width of [1440,390]) for (const theme of ['light','dark']) for (const layout of ['grid','list']) {
+      // Layout controls are intentionally hidden on phones; choose the preference on desktop first.
+      run('set','viewport','1440','1000');
+      click(`[data-layout="${layout}"]`);
+      run('set','viewport',String(width),width===390?'844':'1000');
+      evaluate(`document.documentElement.dataset.theme=${JSON.stringify(theme)}`);
+      wait('.artifact-title .artifact-icon svg');
+      const icon=evaluate(`(()=>{const e=document.querySelector('.artifact-title .artifact-icon');const s=e.querySelector('svg');return {hidden:e.getAttribute('aria-hidden'),path:s.querySelector('path').getAttribute('d'),wrapperWidth:e.getBoundingClientRect().width,width:s.getBoundingClientRect().width,color:getComputedStyle(s).stroke,layout:document.querySelector('.artifact-grid')?'grid':'list'}})()`);
+      assert.equal(icon.hidden,'true');assert.match(icon.path,/M4 3v17/);assert.ok(icon.width>=14,JSON.stringify(icon));assert.ok(icon.wrapperWidth>=14,JSON.stringify(icon));assert.notEqual(icon.color,'none');assert.equal(icon.layout,layout);
+      run('screenshot',join(output,`artifact-icon-${width}-${theme}-${layout}.png`));
+    }
+    run('set','viewport','1440','1000');
+    click('[data-layout="grid"]');
+    run('set','viewport','390','844');
+    evaluate('document.documentElement.dataset.theme="light"');
     const longTitle=evaluate(`(()=>{const e=document.querySelector('.artifact-title');return {height:e.getBoundingClientRect().height,wrap:getComputedStyle(e).whiteSpace,clipped:e.scrollWidth>e.clientWidth}})()`);
     assert.notEqual(longTitle.wrap,'nowrap','phone titles must wrap');
     assert.equal(longTitle.clipped,false,'long title must not be clipped');
     assert.ok(longTitle.height>=44,'opening target must be at least 44px');
     run('screenshot',join(output,'long-title-phone.png'));
     run('open',base+'/v/'+fixtures[0]);wait('#bar:not([hidden])');
+    const favicon=evaluate(`(()=>{const e=document.querySelector('link[rel="icon"]');return {type:e.type,svg:decodeURIComponent(e.href.split(',')[1])}})()`);
+    assert.equal(favicon.type,'image/svg+xml');assert.match(favicon.svg,/M4 3v17/);assert.match(favicon.svg,/prefers-color-scheme:dark/);
+    run('screenshot',join(output,'artifact-icon-viewer.png'));
     assert.equal(evaluate('document.getElementById("shareBtn").getAttribute("aria-label")'),'Share artifact');
     assert.equal(evaluate('document.getElementById("backLibrary")?.hidden'),false,'account viewer offers library navigation');
     click('#backLibrary');wait('#app:not([hidden])');
@@ -128,7 +147,7 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
     const secondPage=evaluate('[...document.querySelectorAll(".artifact-title")].map(e=>new URL(e.href).pathname)');
     assert.ok(secondPage.length>0 && secondPage.every(href=>!firstPage.includes(href)),'next page advances without duplicates');
     const secondPageUrl=evaluate('location.pathname+location.search');
-    click('#content article:first-child .artifact-title');wait('#frame');click('#backLibrary');wait('.artifact-title');run('wait','[aria-busy="false"]');
+    click('#content article:first-child .artifact-title');wait('#bar:not([hidden])');click('#backLibrary');wait('.artifact-title');run('wait','[aria-busy="false"]');
     assert.equal(evaluate('location.pathname+location.search'),secondPageUrl,'Library returns to the same pagination cursor');
     assert.equal(evaluate('document.getElementById("page-number").textContent'),'Page 2');
     assert.deepEqual(evaluate('[...document.querySelectorAll(".artifact-title")].map(e=>new URL(e.href).pathname)'),secondPage);
@@ -138,7 +157,7 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
     run('fill','#search','very long artifact');run('press','Enter');run('wait','[aria-busy="false"]');
     run('wait','--fn','document.querySelectorAll(".artifact-title").length===1');
     const filteredUrl=evaluate('location.pathname+location.search');
-    click('.artifact-title');wait('#frame');
+    click('.artifact-title');wait('#bar:not([hidden])');
     const filteredViewer=evaluate('location.pathname+location.search');
     click('#shareBtn');
     assert.equal(evaluate('document.getElementById("libraryLink").value'),base+filteredViewer.split('?')[0],'shared link excludes private browsing context');
@@ -147,10 +166,10 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
     assert.equal(evaluate('location.pathname+location.search'),filteredUrl,'Library preserves the filtered view');
     assert.equal(evaluate('document.getElementById("search").value'),'very long artifact');
     assert.equal(evaluate('document.querySelectorAll(".artifact-title").length'),1);
-    click('.artifact-title');wait('#frame');run('back');wait('.artifact-title');
+    click('.artifact-title');wait('#bar:not([hidden])');run('back');wait('.artifact-title');
     assert.equal(evaluate('location.pathname+location.search'),filteredUrl,'browser Back preserves the filtered view');
     for(const unsafe of ['https://example.com/','//example.com/','javascript:alert(1)','/api/auth/logout']) {
-      run('open',base+filteredViewer.split('?')[0]+'?returnTo='+encodeURIComponent(unsafe));wait('#frame');
+      run('open',base+filteredViewer.split('?')[0]+'?returnTo='+encodeURIComponent(unsafe));wait('#bar:not([hidden])');
       assert.equal(evaluate('document.getElementById("backLibrary").getAttribute("href")'),'/','return location stays on the library route');
     }
     // Publish using actual file chooser/form, including literal hostile title.
@@ -189,7 +208,7 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
     run('open',base+'/?view=shared');wait('.artifact-title');
     assert.equal(evaluate('[...document.querySelectorAll("[data-owner-only]")].every(e=>e.hidden)'),true);
     item();assert.equal(evaluate('[...document.querySelectorAll("#dialog-body button")].some(e=>e.textContent==="Manage access")'),false);
-    click('#dialog-close');run('open',base+href);wait('#frame');
+    click('#dialog-close');run('open',base+href);wait('#bar:not([hidden])');
     assert.equal(evaluate('document.getElementById("deleteBtn").hidden'),true);
     assert.equal(evaluate('document.getElementById("role").textContent'),'Can edit');
     click('#shareBtn');assert.equal(evaluate('document.querySelectorAll("#readLink,#editLink,#cloneCmd").length'),0);
@@ -199,7 +218,7 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
     const before=await api(`/api/artifacts/${id}`,{cookie:owner.cookie});
     const changed=await api(`/api/artifacts/${id}`,{method:'PUT',cookie:owner.cookie,body:{parent:before.json.tip,message:'Browser history fixture',files:{'index.html':Buffer.from('<h1>Changed version</h1>').toString('base64')}}});
     assert.equal(changed.status,200,changed.text);
-    run('open',base+href); wait('#frame');
+    run('open',base+href); wait('#bar:not([hidden])');
     click('#titleBtn');wait('#role');
     assert.equal(evaluate('document.getElementById("title").textContent'),'Browser renamed');
     assert.equal(evaluate('document.getElementById("deleteBtn").hidden'),false);
@@ -269,8 +288,14 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
     assert.ok(evaluate('document.getElementById("login-feedback").textContent.includes("invited account")'));
     writeFileSync(join(output,'layout-evidence.json'),JSON.stringify(evidence,null,2));
     return {permutations:evidence.length,output};
+  } catch (error) {
+    failure=error;
+    throw error;
   } finally {
-    try {run('close');} finally {
+    try {run('close');} catch (error) {
+      if(failure) throw new AggregateError([failure,error],'Browser verification and cleanup failed');
+      throw error;
+    } finally {
       for(const id of fixtures) await api(`/api/artifacts/${id}`,{method:'DELETE',cookie:owner.cookie});
     }
   }

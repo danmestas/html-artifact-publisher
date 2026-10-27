@@ -16,7 +16,8 @@ env_required:
 Publish a self-contained HTML file (or a directory of files) to a shareable
 URL at the configured `HTML_PUBLISHER_URL`. Each artifact is a Fossil
 repository stored on the server (one Durable Object per artifact): every
-publish or update is a check-in, so the artifact keeps its version history.
+publish or file update is a check-in, so the artifact keeps its version history.
+Icon-only metadata updates do not create a check-in.
 Content is not encrypted; access is controlled by tokens carried in the URL
 fragment — a read token for viewers and a write token for editors.
 
@@ -39,6 +40,7 @@ node scripts/publish-html.mjs list
 node scripts/publish-html.mjs delete <edit-url>
 
   --title <text>     Human-readable title (default: filename)
+  --icon <name>      document | chart | calendar | code | slides | checklist | notes | image | map | book | calculator | recipe
   --ttl <duration>   1h | 6h | 24h | 7d | 30d | never  (default: 7d)
   --slug <slug>      Optional vanity slug
   --message <text>   Check-in comment (default: "Publish <name>" / "Update <name>")
@@ -48,6 +50,19 @@ node scripts/publish-html.mjs delete <edit-url>
   --copy             Copy viewer URL to clipboard even with --json
   --no-clipboard     Never attempt to copy the viewer URL to clipboard
   --help             Show full usage
+```
+
+The optional `--icon` is stable artifact metadata used by the outer viewer's
+browser tab and the library in both layouts. Default: `document`. Omit it on
+updates to preserve the existing icon; use `--icon document` to reset it.
+An explicit different icon can be saved with identical files without creating
+a new file version. The supplied HTML and any custom favicon remain untouched.
+Examples (keep the edit URL private):
+
+```bash
+node scripts/publish-html.mjs report.html --title "Freight Audit" --icon chart
+node scripts/publish-html.mjs update "$EDIT_URL" report.html --message "Revise audit"
+node scripts/publish-html.mjs update "$EDIT_URL" report.html --icon notes --message "Change icon"
 ```
 
 Clipboard behavior:

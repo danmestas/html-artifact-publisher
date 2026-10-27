@@ -144,7 +144,10 @@ function wakeOnTicket(env: Env, ctx: ExecutionContext, id: string, ticket: strin
 
 // ─── Handlers ────────────────────────────────────────────────────────────────
 
+import { validIcon, ICON_NAMES } from '../public/icons.js';
+
 interface CreateBody {
+  icon?: string | null;
   title?: string;
   slug?: string;
   ttlSeconds?: number | null;
@@ -163,6 +166,7 @@ async function handleCreate(req: Request, env: Env): Promise<Response> {
   if (b.slug != null && !/^[a-z0-9-]{1,64}$/.test(b.slug)) {
     return json({ error: 'slug must be 1-64 chars: lowercase letters, digits, hyphens' }, 400);
   }
+  if (!validIcon(b.icon)) return json({ error: `icon must be null or one of: ${ICON_NAMES.join(', ')}` }, 400);
   const pointers = pointersIn(b.files);
   const shas = Object.values(pointers).map(p => p.sha256);
   const missing = await missingBlobs(env, pointers, await registry(env).allowedBlobs('', [principal(actor)], shas));
@@ -175,7 +179,7 @@ async function handleCreate(req: Request, env: Env): Promise<Response> {
   const readToken = genToken();
   const writeToken = genToken();
 
-  if (!(await registry(env).add({ id, slug: b.slug ?? null, title, createdAt: now, updatedAt: now, expiresAt, tip: '', ownerId: actor.user?.id ?? 'instance-owner' }))) {
+  if (!(await registry(env).add({ id, slug: b.slug ?? null, title, createdAt: now, updatedAt: now, expiresAt, tip: '', ownerId: actor.user?.id ?? 'instance-owner', icon: b.icon ?? 'document' }))) {
     return json({ error: 'Slug already in use' }, 409);
   }
   const r = await repo(env, id).create({
@@ -212,7 +216,7 @@ async function handleList(req: Request, env: Env): Promise<Response> {
   const origin = new URL(req.url).origin;
   const entries = actor.legacy ? await registry(env).list(limit) : (await registry(env).library(actor.user!, { admin: false, view: 'all', status: 'active', cursor: '', q: '', ownerId: '', limit })).artifacts;
   const artifacts = entries.map(e => ({
-    id: e.id, title: e.title, tip: e.tip,
+    id: e.id, title: e.title, tip: e.tip, icon: e.icon ?? 'document',
     createdAt: isoOrNull(e.createdAt), updatedAt: isoOrNull(e.updatedAt), expiresAt: isoOrNull(e.expiresAt),
     viewerUrl: `${origin}/v/${e.slug ?? e.id}`,
   }));
@@ -220,6 +224,7 @@ async function handleList(req: Request, env: Env): Promise<Response> {
 }
 
 interface UpdateBody {
+  icon?: string | null;
   parent?: string;
   message?: string;
   user?: string;
@@ -247,7 +252,7 @@ async function handleArtifact(req: Request, env: Env, ctx: ExecutionContext, id:
         stub.op(who, { op: 'uvGet', name: ATTACHED_FILE }) as Promise<FossilReply<{ data: string | null }>>,
       ]);
       return json({
-        id, title: meta?.title, role, expiresAt: isoOrNull(meta?.expiresAt ?? null), ...r.result, canManage,
+        id, title: meta?.title, icon: entry?.icon ?? 'document', role, expiresAt: isoOrNull(meta?.expiresAt ?? null), ...r.result, canManage,
         attached: attachedFrom(flag.ok ? flag.result?.data : null),
         ...(readToken ? { readToken } : {}), ...(commentToken ? { commentToken } : {}),
       });
@@ -259,6 +264,7 @@ async function handleArtifact(req: Request, env: Env, ctx: ExecutionContext, id:
       }
       if (b.title !== undefined && actor.user && !canManage) return json({ error: 'Artifact owner required to rename' }, 403);
       if ((await stub.role(who)) !== 'write') return reply(await stub.op(who, { op: 'commit' }));
+      if (!validIcon(b.icon)) return json({ error: `icon must be null or one of: ${ICON_NAMES.join(', ')}` }, 400);
       const pointers = pointersIn(b.files);
       const allowed = await registry(env).allowedBlobs(id, uploaders(id, actor), Object.values(pointers).map(p => p.sha256));
       // Record the references before checking R2, so no other artifact's deletion removes these blobs mid-commit.
@@ -269,10 +275,15 @@ async function handleArtifact(req: Request, env: Env, ctx: ExecutionContext, id:
       const r = (await stub.op(who, {
         op: 'commit', parent: b.parent, files: b.files, comment: String(b.message ?? 'Update').slice(0, 1000), user,
       })) as FossilReply<{ tip: string }>;
-      if (!r.ok || !r.result) return reply(r);
       const title = typeof b.title === 'string' ? b.title.slice(0, 300) : undefined;
+      if (r.code === 'unchanged' && r.result?.tip && b.icon !== undefined && (b.icon ?? 'document') !== (entry?.icon ?? 'document')) {
+        if (title) await stub.rename(title);
+        await registry(env).touch(id, undefined, title, b.icon);
+        return json({ tip: r.result.tip, parent: r.result.tip });
+      }
+      if (!r.ok || !r.result) return reply(r);
       if (title) await stub.rename(title);
-      await registry(env).touch(id, r.result.tip, title);
+      await registry(env).touch(id, r.result.tip, title, b.icon);
       wakeOnHeader(env, ctx, req, id, r.result.tip, user);
       return json(r.result);
     }

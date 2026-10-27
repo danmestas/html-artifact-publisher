@@ -199,6 +199,22 @@ node scripts/publish-html.mjs watch <edit-or-comment-url> [--since <hash>] [--in
 
 `update` exits with code `3` when someone published after it read the tip: nothing was saved, and running it again builds on the newer version. It exits `1` with "nothing changed" when every file matches the tip.
 
+### Artifact icons
+
+Publish with `--icon chart` (or `document`, `calendar`, `code`, `slides`,
+`checklist`, `notes`, `image`, `map`, `book`, `calculator`, `recipe`) for a stable,
+generic library icon and outer viewer tab favicon. Older artifacts default to
+`document`. The supplied HTML and its custom favicon are never rewritten.
+Updates without `--icon` preserve it; `--icon document` resets it. A different
+explicit icon can be saved with unchanged files without creating a check-in.
+
+The HTTP create/update bodies and public client's `createArtifact` options and
+`Artifact.publish` fourth argument accept optional `icon` with the same names.
+Omission preserves the icon on updates; JSON `null` clears it to `document`.
+Unknown names and non-string values other than null are rejected before mutation.
+GET artifact and list responses include `icon`; only authorized writers can
+change it. Icons are current metadata, not part of a selected file version.
+
 ### Output (`--json`)
 
 ```json

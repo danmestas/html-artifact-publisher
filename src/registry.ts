@@ -10,10 +10,10 @@ const PUBLICATION_COLUMNS = 'id, artifact_id AS artifactId, owner_id AS ownerId,
 
 export interface Entry {
   id: string; slug: string | null; title: string; createdAt: number; updatedAt: number;
-  expiresAt: number | null; tip: string; ownerId?: string; archived?: boolean;
+  expiresAt: number | null; tip: string; ownerId?: string; archived?: boolean; icon?: string;
 }
 export type Account = { id: string; email: string; name: string; role: 'owner' | 'member'; status: 'active' | 'invited' | 'disabled' };
-type Row = { id: string; slug: string | null; title: string; created_at: number; updated_at: number; expires_at: number | null; tip: string; owner_id: string | null; archived: number };
+type Row = { id: string; slug: string | null; title: string; created_at: number; updated_at: number; expires_at: number | null; tip: string; owner_id: string | null; archived: number; icon: string };
 const now = () => Math.floor(Date.now() / 1000);
 const LIVE = '(expires_at IS NULL OR expires_at > ?)';
 
@@ -37,6 +37,7 @@ export class Registry extends DurableObject<Env> {
     const cols = sql.exec<{ name: string }>('PRAGMA table_info(artifacts)').toArray();
     if (!cols.some(c => c.name === 'owner_id')) sql.exec('ALTER TABLE artifacts ADD COLUMN owner_id TEXT');
     if (!cols.some(c => c.name === 'archived')) sql.exec('ALTER TABLE artifacts ADD COLUMN archived INTEGER NOT NULL DEFAULT 0');
+    if (!cols.some(c => c.name === 'icon')) sql.exec("ALTER TABLE artifacts ADD COLUMN icon TEXT NOT NULL DEFAULT 'document'");
     sql.exec(`CREATE INDEX IF NOT EXISTS artifacts_name_order ON artifacts(title COLLATE NOCASE,id);
       CREATE INDEX IF NOT EXISTS artifacts_library_order ON artifacts(updated_at DESC,id DESC);
       CREATE INDEX IF NOT EXISTS artifacts_owner ON artifacts(owner_id,archived,updated_at DESC,id DESC);
@@ -127,7 +128,7 @@ export class Registry extends DurableObject<Env> {
       if (sql.exec(`SELECT 1 FROM artifacts WHERE slug = ? AND ${LIVE}`, e.slug, now()).toArray().length) return false;
       sql.exec('DELETE FROM artifacts WHERE slug = ?', e.slug);
     }
-    sql.exec('INSERT INTO artifacts (id,slug,title,created_at,updated_at,expires_at,tip,owner_id) VALUES (?,?,?,?,?,?,?,?)', e.id,e.slug,e.title,e.createdAt,e.updatedAt,e.expiresAt,e.tip,e.ownerId ?? 'instance-owner');
+    sql.exec('INSERT INTO artifacts (id,slug,title,created_at,updated_at,expires_at,tip,owner_id,icon) VALUES (?,?,?,?,?,?,?,?,?)', e.id,e.slug,e.title,e.createdAt,e.updatedAt,e.expiresAt,e.tip,e.ownerId ?? 'instance-owner',e.icon ?? 'document');
     return true;
   }
   async resolve(key: string): Promise<string | null> {
@@ -137,8 +138,8 @@ export class Registry extends DurableObject<Env> {
     const r = this.ctx.storage.sql.exec<Row>('SELECT * FROM artifacts WHERE id = ?', id).toArray()[0];
     return r ? toEntry(r) : null;
   }
-  async touch(id: string, tip: string, title?: string): Promise<void> {
-    this.ctx.storage.sql.exec('UPDATE artifacts SET tip = ?, updated_at = ?, title = COALESCE(?,title) WHERE id = ?',tip,now(),title ?? null,id);
+  async touch(id: string, tip?: string, title?: string, icon?: string | null): Promise<void> {
+    this.ctx.storage.sql.exec('UPDATE artifacts SET tip = COALESCE(?,tip), updated_at = ?, title = COALESCE(?,title), icon = COALESCE(?,icon) WHERE id = ?',tip ?? null,now(),title ?? null,icon === null ? 'document' : icon ?? null,id);
   }
   /** Delete an artifact's listing, and the R2 blobs no other artifact points at. */
   async remove(id: string): Promise<void> {
@@ -302,4 +303,4 @@ export class Registry extends DurableObject<Env> {
     return this.ctx.storage.sql.exec<{ id: string; actorName: string; action: string; artifactId: string | null; artifactTitle: string | null; createdAt: number }>('SELECT e.id,a.name AS actorName,e.action,e.artifact_id AS artifactId,e.artifact_title AS artifactTitle,e.created_at AS createdAt FROM activity e LEFT JOIN accounts a ON a.id=e.actor_id ORDER BY e.created_at DESC,e.id DESC LIMIT ?',limit).toArray();
   }
 }
-function toEntry(r: Row): Entry { return { id:r.id,slug:r.slug,title:r.title,createdAt:r.created_at,updatedAt:r.updated_at,expiresAt:r.expires_at,tip:r.tip,ownerId:r.owner_id ?? 'instance-owner',archived:!!r.archived }; }
+function toEntry(r: Row): Entry { return { id:r.id,slug:r.slug,title:r.title,createdAt:r.created_at,updatedAt:r.updated_at,expiresAt:r.expires_at,tip:r.tip,ownerId:r.owner_id ?? 'instance-owner',archived:!!r.archived,icon:r.icon ?? 'document' }; }

@@ -55,6 +55,47 @@ async function create(files, extra = {}) {
   return { ...r.json, read: tokenOf(r.json.viewerUrl), write: tokenOf(r.json.editUrl), comment: r.json.commentUrl && tokenOf(r.json.commentUrl) };
 }
 
+test('artifact icon API preserves metadata, rejects invalid writes and permits unchanged-file icon changes', async () => {
+  const files = { 'index.html': Buffer.from('<title>Untouched</title><link rel="icon" href="custom.svg"><h1>Icon</h1>').toString('base64') };
+  const a = await create(files, { icon: 'chart' });
+  const path = `/api/artifacts/${a.id}`;
+  const info = async () => (await api(path, { token: a.read })).json;
+  assert.equal((await info()).icon, 'chart');
+  assert.equal((await api('/api/artifacts', { bearer: owner })).json.artifacts.find(x => x.id === a.id).icon, 'chart');
+  for (const icon of ['__proto__', 'constructor', 'toString', '<svg/>', 'https://example.com/icon.svg', '', 1, true, {}, []]) {
+    const result = await api(path, { method: 'PUT', token: a.write, body: { parent: a.tip, files: { 'index.html': Buffer.from('must not land').toString('base64') }, icon } });
+    assert.equal(result.status, 400, JSON.stringify(icon));
+    assert.equal((await info()).tip, a.tip);
+    assert.equal((await info()).icon, 'chart');
+    assert.equal((await api('/api/artifacts', { method: 'POST', bearer: owner, body: { files, icon } })).status, 400);
+  }
+  assert.equal((await api(path, { method: 'PUT', token: a.read, body: { parent: a.tip, files, icon: 'map' } })).status, 403);
+  const update = icon => api(path, { method: 'PUT', token: a.write, body: { parent: a.tip, files, ...(icon === undefined ? {} : { icon }) } });
+  const metadata = await api(path, { method: 'PUT', token: a.write, body: { parent: a.tip.slice(0, 12), files, icon: 'map', title: 'Renamed metadata' } });
+  assert.equal(metadata.status, 200);
+  assert.equal(metadata.json.tip, a.tip, 'accepted abbreviated parents return canonical tip');
+  assert.equal(metadata.json.parent, a.tip);
+  assert.equal((await info()).title, 'Renamed metadata');
+  assert.equal((await info()).icon, 'map');
+  assert.equal((await info()).tip, a.tip, 'metadata-only update does not create a check-in');
+  assert.equal((await update(undefined)).json.code, 'unchanged');
+  assert.equal((await info()).icon, 'map');
+  assert.equal((await update(null)).status, 200);
+  assert.equal((await info()).icon, 'document');
+  const legacy = await create(files);
+  assert.equal((await api(`/api/artifacts/${legacy.id}`, { token: legacy.read })).json.icon, 'document');
+  const art = new Artifact(base, a.id, a.write);
+  const changed = await art.publish(a.tip, { 'next.html': '<h1>Next</h1>' }, 'Content update', { icon: 'book' });
+  assert.equal((await info()).icon, 'book');
+  await art.publish(changed.tip, { 'next.html': '<h1>Newest</h1>' }, 'Preserve icon');
+  assert.equal((await info()).icon, 'book');
+  const stale = await update('chart');
+  assert.equal(stale.status, 409);
+  assert.equal(stale.json.code, 'conflict');
+  assert.equal((await info()).icon, 'book');
+  assert.equal(await (await fetch(`${base}${path}/files/index.html?at=${a.tip}`, { headers: { Authorization: `Token ${a.read}` } })).text(), Buffer.from(files['index.html'], 'base64').toString());
+});
+
 // A stock fossil binary, with its global state kept in the test's directory.
 const stockFossil = process.env.FOSSIL ?? 'fossil';
 const haveStockFossil = (() => {
@@ -722,7 +763,8 @@ function repoSQL(id, sql) {
   const state = join(work, 'state');
   for (const file of readdirSync(state, { recursive: true })) {
     if (!String(file).endsWith('.sqlite')) continue;
-    const db = new DatabaseSync(join(state, String(file)));
+    // Workerd owns these live fixture databases; wait boundedly for its short write locks.
+    const db = new DatabaseSync(join(state, String(file)), { timeout: 1000 });
     try {
       if (db.prepare("SELECT 1 FROM sqlite_master WHERE name = '_artifact'").get() && db.prepare('SELECT 1 FROM _artifact WHERE id = ?').get(id)) {
         return db.prepare(sql).all();

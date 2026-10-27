@@ -44,6 +44,23 @@ function fixture(t) {
   return { registry: new Registry(ctx, { BLOBS: bucket }), db, objects, bucket };
 }
 
+test('artifact icons persist through add, touch and legacy defaults', async t => {
+  const { registry } = fixture(t);
+  const entry = { id: 'icon-test', slug: null, title: 'Icon', createdAt: 1, updatedAt: 1, expiresAt: null, tip: 'first' };
+  await registry.add(entry);
+  assert.equal((await registry.get(entry.id)).icon, 'document');
+  await registry.touch(entry.id, 'second', undefined, 'chart');
+  assert.equal((await registry.get(entry.id)).icon, 'chart');
+  await registry.touch(entry.id, 'third');
+  assert.equal((await registry.get(entry.id)).icon, 'chart');
+  await registry.touch(entry.id, 'fourth', undefined, null);
+  assert.equal((await registry.list(10))[0].icon, 'document');
+  await registry.touch(entry.id, 'newer-tip');
+  await registry.touch(entry.id, undefined, 'Metadata title', 'map');
+  assert.equal((await registry.get(entry.id)).tip, 'newer-tip', 'metadata updates never replace a concurrent content tip');
+  assert.equal((await registry.get(entry.id)).title, 'Metadata title');
+});
+
 test('cleanup removes failed and abandoned staging but preserves live and current builds', async t => {
   const { registry, db, objects } = fixture(t);
   const begin = () => registry.beginPublication('source', 'owner', 'Snapshot', 'a'.repeat(64));

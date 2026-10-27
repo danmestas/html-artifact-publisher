@@ -7,6 +7,8 @@ import { Artifact, ConflictError, parseFragment, fragment, readFileList } from '
 import { renderDiagrams, renderPikchr } from './diagrams.js';
 import { embedFonts } from './fonts.js';
 import { zip } from './zip.js';
+import { setArtifactFavicon } from './icons.js';
+setArtifactFavicon('document');
 import { preparePublication } from './export.js';
 import { anchorFor, arrange, controls, decodePointAnchor, encodePointAnchor, findQuotes, responderNote, thread } from './comments.js';
 import { pagePins } from './page-pins.js';
@@ -1087,6 +1089,7 @@ async function fetchTextBlobs(bundle) {
 
 async function reload(show) {
   info = await art.info();
+  setArtifactFavicon(info.icon);
   if (show) {
     shown = await art.bundle(link.at);
     await fetchTextBlobs(shown);

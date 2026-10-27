@@ -298,7 +298,7 @@ func commit(r *libfossil.Repo, req request) (any, error) {
 		files = append(files, libfossil.FileToCommit{Name: name, Content: data})
 	}
 	if len(files) == 0 {
-		return nil, fail("unchanged", "nothing changed: every file matches check-in %s", short(tip))
+		return map[string]any{"tip": tip}, fail("unchanged", "nothing changed: every file matches check-in %s", short(tip))
 	}
 	_, uuid, err := r.Commit(libfossil.CommitOpts{
 		Files: files, Comment: req.Comment, User: req.User, Time: time.Now().UTC(), ParentID: parent,
@@ -370,6 +370,9 @@ func main() {
 		result, err := handle(req, body)
 		if err != nil {
 			reply["error"], reply["code"] = err.Error(), "internal"
+			if result != nil {
+				reply["result"] = result
+			}
 			var c coded
 			if errors.As(err, &c) {
 				reply["code"] = c.code

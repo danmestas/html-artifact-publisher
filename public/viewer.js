@@ -971,7 +971,7 @@ for (const [btn, input] of [['uploadFilesBtn', 'uploadFiles'], ['uploadFolderBtn
 }
 
 // Every file of the version shown, with the real bytes of images and other blobs.
-$('downloadBtn').addEventListener('click', async () => {
+for (const id of ['downloadBtn', 'downloadFilesBtn']) $(id).addEventListener('click', async () => {
   closePopovers();
   notice('Preparing the download…');
   try {

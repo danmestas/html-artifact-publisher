@@ -14,6 +14,7 @@ import { pagePins } from './page-pins.js';
 const $ = id => document.getElementById(id);
 const NONCE = document.querySelector('meta[name="artifact-nonce"]')?.content ?? '';
 const WATCH_MS = 60_000;
+const COMMENT_WATCH_MS = 5_000;
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
@@ -271,6 +272,9 @@ function renderChrome() {
 
 let threads = [];
 let threadsTruncated = false;
+let threadSnapshot = '';
+let threadRequest = 0;
+let threadsLoading = 0;
 let pins = [];           // what the page was last sent
 let placed = null;       // labels the page placed, or null before it answered
 let selection = '';      // the anchor of the reader's selection in the page
@@ -305,31 +309,49 @@ function anchorLine(t) {
 }
 
 function threadView(t, can) {
-  const view = el('details', { className: `thread${t.resolved ? ' resolved' : ''}${t.uuid === focused ? ' focus' : ''}` },
-    el('summary', {},
-      el('span', { className: 'num', textContent: String(t.label) }),
-      el('span', { className: 'title', textContent: t.title }),
-      el('span', { className: `tag${t.resolved ? ' latest' : ''}`, textContent: t.status })),
-    el('div', { className: 'thread-body' },
-      anchorLine(t),
-      ...t.messages.filter((m, i) => i === 0 || m.text || m.status).map(m => el('div', {},
-        el('div', { className: 'who', textContent: `${m.user} · ${ago(m.time)}${m.status ? ` · marked ${m.status}` : ''}` }),
-        m.text ? el('p', { className: 'message', textContent: m.text }) : null)),
-      t.checkins.length ? el('p', { className: 'checkins' }, 'Answered in ',
-        ...t.checkins.flatMap((c, i) => [i ? ', ' : null, el('a', { href: fragment({ token: link.token, at: c }), textContent: shortId(c) })])) : null,
-      can.commentBox ? replyForm(t) : null));
+  let view = views.get(t.uuid);
+  if (!view) {
+    view = el('details', {}, el('summary'), el('div', { className: 'thread-body' }));
+    view.querySelector('summary').addEventListener('click', e => {
+      if ($('threadPanel').dataset.mode !== 'index') return;
+      e.preventDefault();
+      const current = threads.find(item => item.uuid === t.uuid);
+      if (!current) return;
+      activateThread(current);
+      if (anchored(current) === 'yes') post({ type: 'reveal', key: current.label });
+    });
+    // Remember only what the reader changed, using the latest status after a refresh.
+    view.addEventListener('toggle', () => {
+      const current = threads.find(item => item.uuid === t.uuid);
+      if (current) view.open === !current.resolved ? expanded.delete(t.uuid) : expanded.set(t.uuid, view.open);
+    });
+    views.set(t.uuid, view);
+  }
+  view.className = `thread${t.resolved ? ' resolved' : ''}${t.uuid === focused ? ' focus' : ''}`;
+  view.querySelector('summary').replaceChildren(
+    el('span', { className: 'num', textContent: String(t.label) }),
+    el('span', { className: 'title', textContent: t.title }),
+    el('span', { className: `tag${t.resolved ? ' latest' : ''}`, textContent: t.status }));
+  const body = view.querySelector('.thread-body');
+  let reply = body.querySelector('.reply');
+  if (!can.commentBox) { reply?.remove(); reply = null; }
+  if (can.commentBox && !reply) { reply = replyForm(t); body.append(reply); }
+  // Keep the form itself: drafts, selection, focus, and pending/error state belong to it.
+  for (const child of [...body.children]) if (child !== reply) child.remove();
+  const content = [anchorLine(t),
+    ...t.messages.filter((m, i) => i === 0 || m.text || m.status).map(m => el('div', {},
+      el('div', { className: 'who', textContent: `${m.user} · ${ago(m.time)}${m.status ? ` · marked ${m.status}` : ''}` }),
+      m.text ? el('p', { className: 'message', textContent: m.text }) : null)),
+    t.checkins.length ? el('p', { className: 'checkins' }, 'Answered in ',
+      ...t.checkins.flatMap((c, i) => [i ? ', ' : null, el('a', { href: fragment({ token: link.token, at: c }), textContent: shortId(c) })])) : null];
+  for (const child of content) if (child) body.insertBefore(child, reply);
+  if (reply) {
+    reply.querySelector('textarea').setAttribute('aria-label', `Reply to ${t.title}`);
+    reply.querySelector('.resolve').textContent = t.resolved ? 'Reopen' : 'Resolve';
+  }
   view.dataset.label = String(t.label);
   view.dataset.anchored = anchored(t);
   view.open = expanded.get(t.uuid) ?? (!t.resolved && t.uuid === focused);
-  view.querySelector('summary').addEventListener('click', e => {
-    if ($('threadPanel').dataset.mode !== 'index') return;
-    e.preventDefault();
-    activateThread(t);
-    if (anchored(t) === 'yes') post({ type: 'reveal', key: t.label });
-  });
-  // Remember only what the reader changed, so a thread resolved elsewhere still collapses.
-  view.addEventListener('toggle', () => (view.open === !t.resolved ? expanded.delete(t.uuid) : expanded.set(t.uuid, view.open)));
-  views.set(t.uuid, view);
   return view;
 }
 
@@ -348,8 +370,9 @@ function replyForm(t) {
     status.textContent = doing;
     try {
       await art.comment({ ticketUuid: t.uuid, ...body });
-      if (body.text) drafts.delete(t.uuid);
+      if (body.text) { drafts.delete(t.uuid); text.value = ''; }
       if (body.status) expanded.delete(t.uuid);
+      status.textContent = '';
       await loadThreads();
       // The thread moved (newest-changed first, resolved last): keep it in sight.
       views.get(t.uuid)?.scrollIntoView({ block: 'nearest' });
@@ -364,7 +387,10 @@ function replyForm(t) {
     const reply = text.value.trim();
     if (reply) change({ text: reply }, 'Posting…');
   });
-  resolve.addEventListener('click', () => change({ status: t.resolved ? 'Open' : 'Closed' }, t.resolved ? 'Reopening…' : 'Resolving…'));
+  resolve.addEventListener('click', () => {
+    const current = threads.find(item => item.uuid === t.uuid);
+    if (current) change({ status: current.resolved ? 'Open' : 'Closed' }, current.resolved ? 'Reopening…' : 'Resolving…');
+  });
   return form;
 }
 
@@ -377,10 +403,31 @@ function renderThreads() {
     threadsTruncated ? `Showing the newest ${threads.length}` : '',
     can.commentBox ? '' : 'Read only',
   ].filter(Boolean).join(' · ');
-  views.clear();
-  $('threadList').replaceChildren(...open.map(t => threadView(t, can)));
-  $('resolvedList').replaceChildren(...resolved.map(t => threadView(t, can)));
+  const active = document.activeElement;
+  if (active?.matches('.reply textarea')) {
+    const editing = [...views].find(([, view]) => view.contains(active));
+    if (editing) expanded.set(editing[0], true);
+  }
+  const scroll = $('threadPanel').scrollTop;
+  const inputScroll = active?.scrollTop;
+  for (const [id, items] of [['threadList', open], ['resolvedList', resolved]]) {
+    const list = $(id), nodes = items.map(t => threadView(t, can));
+    nodes.forEach((node, i) => { if (list.children[i] !== node) list.insertBefore(node, list.children[i] ?? null); });
+    const keep = new Set(nodes);
+    for (const child of [...list.children]) if (!keep.has(child)) child.remove();
+  }
+  for (const uuid of views.keys()) if (!threads.some(t => t.uuid === uuid)) views.delete(uuid);
   $('resolvedHead').hidden = !resolved.length;
+  if ($('threadPanel').dataset.mode === 'thread') {
+    const current = threads.find(t => t.uuid === focused);
+    if (current) $('panelTitle').textContent = `Comment ${current.label}`;
+  }
+  // Moving a thread between groups can blur its form on browsers without moveBefore.
+  if (active?.isConnected && active.closest('.reply')) {
+    if (document.activeElement !== active) active.focus({ preventScroll: true });
+    active.scrollTop = inputScroll;
+  }
+  $('threadPanel').scrollTop = scroll;
   renderAnchor();
   if (JSON.stringify(next) !== JSON.stringify(pins)) {
     pins = next;
@@ -481,15 +528,28 @@ addEventListener('message', e => {
   }
 });
 
-async function loadThreads() {
-  if (!controls(info).threads) return;
+async function loadThreads(background = false) {
+  if (!controls(info).threads || (background && (commentBusy || threadsLoading))) return;
+  const request = ++threadRequest;
+  threadsLoading++;
   try {
     const result = await art.tickets();
+    if (request !== threadRequest || (background && commentBusy)) return;
+    const snapshot = JSON.stringify(result);
+    if (snapshot === threadSnapshot) return;
     threads = result.tickets.map(thread);
     threadsTruncated = result.truncated;
+    threadSnapshot = snapshot;
     renderThreads();
   } catch { /* offline or gone: keep what is shown */ }
+  finally { threadsLoading--; }
 }
+
+function refreshThreads() {
+  if (document.visibilityState === 'visible' && art && info && !$('threadPanel').hidden) loadThreads(true);
+}
+setInterval(refreshThreads, COMMENT_WATCH_MS);
+document.addEventListener('visibilitychange', refreshThreads);
 
 function renderResponder() {
   const n = responderNote(info);
@@ -546,6 +606,7 @@ function openPanel(mode = 'index', point = null) {
     trackAnchor('');
   }
   positionPanel();
+  loadThreads(true);
 }
 function activateThread(t, point = null) {
   const view = views.get(t.uuid);
@@ -562,7 +623,6 @@ $('commentsBtn').addEventListener('click', e => {
   e.stopPropagation();
   if ($('threadPanel').hidden || $('threadPanel').dataset.mode !== 'index') {
     openPanel();
-    loadThreads();
   } else closePanel(true);
 });
 $('threadClose').addEventListener('click', () => closePanel(true));

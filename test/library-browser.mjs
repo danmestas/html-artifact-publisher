@@ -18,6 +18,25 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
   const wait=selector=>run('wait',selector);
   const click=selector=>run('click',selector);
   const evidence=[],fixtures=[];
+  const selectQA=()=>{
+    const selects=evaluate(`Array.from(document.querySelectorAll('select'),e=>{
+      const s=getComputedStyle(e),c=document.createElement('canvas').getContext('2d');c.font=s.font;
+      return {name:e.id||e.getAttribute('aria-label'),padding:parseFloat(s.paddingInlineEnd),checkLabel:e.getClientRects().length>0&&e.matches('.toolbar select,.grant select'),label:c.measureText(e.selectedOptions[0]?.textContent||'').width,available:e.clientWidth-parseFloat(s.paddingLeft)-parseFloat(s.paddingRight)};
+    })`);
+    assert.ok(selects.length,'exercise real application selects');
+    for(const select of selects) {
+      assert.ok(select.padding>=32,`${select.name}: reserve space between selected text and the inset caret (${select.padding}px)`);
+      if(select.checkLabel) assert.ok(select.label<=select.available+1,`${select.name}: selected label fits without clipping (${select.label}px in ${select.available}px)`);
+    }
+  };
+  const dialogSelectQA=name=>{
+    for(const width of [1440,390]) for(const theme of ['light','dark']) {
+      run('set','viewport',String(width),'1000');
+      evaluate(`document.documentElement.dataset.theme=${JSON.stringify(theme)}`);
+      selectQA();
+      run('screenshot',join(output,`selects-${name}-${theme}-${width}.png`));
+    }
+  };
   try {
     for(let i=0;i<28;i++) {
       const r=await api('/api/artifacts',{method:'POST',cookie:owner.cookie,body:{title:i===0?'A very long artifact title '.repeat(10):`Browser pagination fixture ${i}`,ttlSeconds:null,files:{'index.html':Buffer.from('<h1>Local-only QA fixture</h1>').toString('base64')}}});
@@ -31,7 +50,7 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
     click('#verify-button'); wait('#app:not([hidden])'); wait('.artifact-title');
     assert.equal(evaluate('document.getElementById("page-error").hidden'),true);
     const { parityQA } = await import('./parity-browser.mjs');
-    await parityQA({base,api,owner,browserOwner,member,run,evaluate,wait,click,output});
+    await parityQA({base,api,owner,browserOwner,member,run,evaluate,wait,click,output,selectQA});
     run('set','viewport','390','844');
     run('open',base+'/?view=starred');wait('.artifact-title');
     const longTitle=evaluate(`(()=>{const e=document.querySelector('.artifact-title');return {height:e.getBoundingClientRect().height,wrap:getComputedStyle(e).whiteSpace,clipped:e.scrollWidth>e.clientWidth}})()`);
@@ -73,6 +92,7 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
         assert.ok(result.contrast>=4.5,JSON.stringify(result));
         if(width===390) {assert.equal(result.nav,'none');assert.ok(result.headerHeight<=90,JSON.stringify(result));assert.ok(result.rows.every(h=>h>=72&&h<=88),JSON.stringify(result));}
         evidence.push(result);
+        selectQA();
         run('screenshot',join(output,`${view}-${theme}-${width}.png`));
       }
     }
@@ -135,10 +155,13 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
     run('find','role','button','click','--name','Rename'); wait('#rename-title');
     run('fill','#rename-title','Browser renamed'); click('#dialog-body button[type=submit]'); run('wait','--fn','!document.getElementById("dialog").open'); run('wait','[aria-busy="false"]');
     item(); run('find','role','button','click','--name','Manage access'); wait('#share-person');
+    dialogSelectQA('add-access');
     const eligible=evaluate('document.getElementById("share-person").value'); assert.ok(eligible,'sharing selects an eligible account');
     run('select','#share-person',member.user.id);run('select','#share-permission','write');
     click('#dialog-body button[type=submit]');run('wait','--fn','!document.getElementById("dialog").open');run('wait','[aria-busy="false"]');
     assert.equal((await api(`/api/artifacts/${id}/sharing`,{cookie:owner.cookie})).json.grants.length,1);
+    item();run('find','role','button','click','--name','Manage access');wait('.grant select');
+    dialogSelectQA('existing-access');click('#dialog-close');
     item();run('find','role','button','click','--name','Star artifact');run('wait','--fn','!document.getElementById("dialog").open');run('wait','[aria-busy="false"]');
     assert.ok((await api('/api/library?view=starred',{cookie:owner.cookie})).json.artifacts.some(a=>a.id===id));
     // Named write grantees get editing, never management or capability links.
@@ -157,7 +180,7 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
     const changed=await api(`/api/artifacts/${id}`,{method:'PUT',cookie:owner.cookie,body:{parent:before.json.tip,message:'Browser history fixture',files:{'index.html':Buffer.from('<h1>Changed version</h1>').toString('base64')}}});
     assert.equal(changed.status,200,changed.text);
     run('open',base+href); wait('#frame');
-    run('wait','#role');
+    click('#titleBtn');wait('#role');
     assert.equal(evaluate('document.getElementById("title").textContent'),'Browser renamed');
     assert.equal(evaluate('document.getElementById("deleteBtn").hidden'),false);
     assert.ok(evaluate('document.getElementById("frame").getAttribute("sandbox").includes("allow-scripts")'));
@@ -186,6 +209,7 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
     run('open',base+'/?view=admin&status=archived');wait('.artifact-title');item();run('find','role','button','click','--name','Restore to library');
     click('#dialog-body button[type=submit]');run('wait','--fn','!document.getElementById("dialog").open');run('wait','[aria-busy="false"]');
     run('open',base+'/?view=mine');wait('.artifact-title');item();run('find','role','button','click','--name','Transfer ownership');wait('#transfer-owner');
+    dialogSelectQA('transfer');
     run('select','#transfer-owner',member.user.id);run('check','#transfer-confirm');click('#dialog-body button[type=submit]');run('wait','--fn','!document.getElementById("dialog").open');run('wait','[aria-busy="false"]');
     const sharing=await api(`/api/artifacts/${id}/sharing`,{cookie:owner.cookie});assert.equal(sharing.json.ownerId,member.user.id);assert.equal(sharing.json.grants.length,0);
     run('cookies','set','artifact_session',member.cookie.split('=')[1],'--url',base,'--httpOnly','--sameSite','Lax');

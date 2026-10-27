@@ -24,7 +24,14 @@
   --accent: #E39A5B; --accent-ink: #F0B582; --accent-soft: #3A2A1C; --accent-wash: #2C2219; --accent-edge: #6B4A2C;
   --ok-ink: #9BD3A6; --ok-soft: #1F3324; --danger: #F08C80; color-scheme: dark;
 }
-#viewer-theme { font: inherit; color: var(--ink); background: var(--bar); border: 1px solid var(--line); border-radius: 5px; height: 32px; max-width: 110px; padding: 0 8px; }
+#viewer-theme { font: inherit; color: var(--ink); background-color: var(--bar); border: 1px solid var(--line); border-radius: 5px; height: 32px; max-width: 110px; padding: 0 32px 0 8px; }
+select {
+  appearance: none;
+  background-image: linear-gradient(45deg, transparent 40%, currentColor 40%, currentColor 60%, transparent 60%), linear-gradient(-45deg, transparent 40%, currentColor 40%, currentColor 60%, transparent 60%);
+  background-position: right 17px center, right 12px center;
+  background-size: 5px 5px; background-repeat: no-repeat;
+}
+@media (forced-colors: active) { select { appearance: auto; background-image: none; } }
 *, *::before, *::after { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
 body { display: flex; flex-direction: column; background: var(--ground); color: var(--ink); font: 14px/1.45 var(--sans); }

@@ -18,6 +18,8 @@ let startupLog='';
 let ownerAccount, memberA, memberB;
 async function api(path, { method='GET', cookie, bearer, token, body, origin=base } = {}) {
   const headers = origin === null ? {} : { Origin:origin };
+  // Synchronous browser commands block Node from retiring idle pooled sockets.
+  if (process.env.ACCOUNTS_BROWSER_QA === '1') headers.Connection='close';
   if (cookie) headers.Cookie=cookie;
   if (bearer) headers.Authorization=`Bearer ${bearer}`;
   if (token) headers.Authorization=`Token ${token}`;

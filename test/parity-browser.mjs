@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 
 // Uses the existing suite's single browser tab and throwaway accounts/server.
-export async function parityQA({base,api,owner,browserOwner,member,run,evaluate,wait,click,output}) {
+export async function parityQA({base,api,owner,browserOwner,member,run,evaluate,wait,click,output,selectQA}) {
   const ids=[];
   const cdpURL=run('get','cdp-url').trim();
   const endpoints=await (await fetch(`http://${new URL(cdpURL).host}/json/list`)).json();
@@ -80,6 +80,7 @@ export async function parityQA({base,api,owner,browserOwner,member,run,evaluate,
     run('open',base+'/?view=admin&q=Parity+browser&sort=name');wait('.artifact-row');
     assert.match(evaluate('document.querySelector(".inventory-head").textContent'),/OwnerVisibility \/ statusUpdated/);
     assert.deepEqual(evaluate('[...document.querySelectorAll(".artifact-row:first-child .cell .sr-only")].map(e=>e.textContent)'),['Owner: ','Visibility and status: ','Updated: ']);
+    run('set','viewport','390','1000');selectQA();
     const fallback=await api('/api/artifacts',{method:'POST',cookie:owner.cookie,body:{title:'Unavailable preview fixture',ttlSeconds:null,files:{'index.html':Buffer.from('<script>window.interactiveOnly=true</script>').toString('base64')}}});
     assert.equal(fallback.status,201);ids.push(fallback.json.id);
     run('set','media','dark');run('open',base+'/p/'+fallback.json.id);run('wait','--load','networkidle');
@@ -96,9 +97,12 @@ export async function parityQA({base,api,owner,browserOwner,member,run,evaluate,
       run('select','#theme',theme);
       const expected=theme==='light'?'light':'dark';
       assert.equal(evaluate('getComputedStyle(document.documentElement).colorScheme'),expected);
+      selectQA();run('screenshot',join(output,`selects-library-${theme}-${width}.png`));
       click('.artifact-title');wait('#frame');
       assert.equal(evaluate('getComputedStyle(document.documentElement).colorScheme'),expected);
       assert.equal(evaluate('document.getElementById("viewer-theme").value'),theme);
+      click('#moreBtn');selectQA();
+      run('screenshot',join(output,`selects-viewer-${theme}-${width}.png`));run('press','Escape');
       if(width===390) {
         assert.notEqual(evaluate('getComputedStyle(document.querySelector("#shareBtn .label")).display'),'none');
         assert.ok(evaluate('document.getElementById("bar").getBoundingClientRect().height<=112'),'phone viewer controls fit two rows');

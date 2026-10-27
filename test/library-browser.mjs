@@ -49,6 +49,26 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
     assert.equal((await api('/api/session')).json.user,null);
     click('#verify-button'); wait('#app:not([hidden])'); wait('.artifact-title');
     assert.equal(evaluate('document.getElementById("page-error").hidden'),true);
+    for(const width of [1440,390,320]) for(const theme of ['light','dark']) {
+      run('set','viewport',String(width),'1000');
+      evaluate(`document.documentElement.dataset.theme=${JSON.stringify(theme)}`);
+      click('#content article:first-child .artifact-menu');
+      run('find','role','button','click','--name','Delete artifact…');wait('#delete-confirm');
+      assert.equal(evaluate('document.activeElement.textContent'),'Cancel','deletion starts with the safe Cancel action focused');
+      const unfocused=evaluate('getComputedStyle(document.getElementById("delete-confirm")).borderColor');
+      run('press','Shift+Tab');
+      assert.equal(evaluate('document.activeElement.id'),'delete-confirm','confirmation input is keyboard reachable');
+      run('fill','#delete-confirm','DELETE');
+      const layout=evaluate(`(()=>{const input=document.getElementById('delete-confirm'),actions=document.querySelector('#dialog-body .actions'),dialog=document.getElementById('dialog'),s=getComputedStyle(input);return {outline:s.outlineStyle,border:s.borderColor,gap:actions.getBoundingClientRect().top-input.getBoundingClientRect().bottom,overflow:dialog.scrollWidth>dialog.clientWidth||document.documentElement.scrollWidth>innerWidth}})()`);
+      assert.equal(layout.outline,'none','input uses its border rather than an oversized outside focus ring');
+      assert.notEqual(layout.border,unfocused,'focused input still has a visible focus indicator');
+      assert.ok(layout.gap>=16,`actions are separated from the confirmation input (${layout.gap}px)`);
+      assert.equal(layout.overflow,false,'delete dialog fits desktop and phone widths');
+      run('screenshot',join(output,`delete-dialog-${theme}-${width}.png`));
+      run('find','role','button','click','--name','Cancel');
+      run('wait','--fn','!document.getElementById("dialog").open');
+      assert.equal(evaluate('document.activeElement.matches(".artifact-menu")'),true,'Cancel returns focus to the triggering artifact');
+    }
     const { parityQA } = await import('./parity-browser.mjs');
     await parityQA({base,api,owner,browserOwner,member,run,evaluate,wait,click,output,selectQA});
     run('set','viewport','390','844');

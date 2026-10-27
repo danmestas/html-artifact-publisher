@@ -6,7 +6,7 @@ export function pagePins(findQuotes, anchorFor, encodePointAnchor, decodePointAn
   const PIN = 28;
   const MAX_PINS = 500, MAX_ANCHOR = 500;
   const SETTLE_MS = 250, EVERY_MS = 1000;
-  let wanted = [], colors = {}, targets = [];
+  let wanted = [], colors = {}, targets = [], visible = true;
   let host = null, root = null, highlight = null, placementLayer = null;
   let placed = '', selected = '', frame = 0, relocating = 0, relocated = 0;
   let placing = false, tracked = '', trackedTarget = null;
@@ -126,7 +126,7 @@ export function pagePins(findQuotes, anchorFor, encodePointAnchor, decodePointAn
     for (const t of targets) {
       const r = t.box();
       const shown = r && (r.width > 0 || r.height > 0);
-      t.el.style.display = shown ? 'grid' : 'none';
+      t.el.style.display = shown && visible ? 'grid' : 'none';
       if (!shown) continue;
       keys.push(t.pin.key);
       const spot = `${Math.round(r.left)},${Math.round(r.top)}`;
@@ -188,6 +188,7 @@ export function pagePins(findQuotes, anchorFor, encodePointAnchor, decodePointAn
       wanted = d.pins.filter(p => p && Number.isInteger(p.key) && typeof p.anchor === 'string' && p.anchor && p.anchor.length <= MAX_ANCHOR && !p.anchor.includes('\0'))
         .slice(0, MAX_PINS).map(p => ({ key: p.key, anchor: p.anchor, resolved: p.resolved === true }));
       colors = d.colors && typeof d.colors === 'object' ? d.colors : {};
+      visible = d.visible !== false;
       placed = null;
       relocate();
     } else if (d.type === 'placement' && typeof d.active === 'boolean') setPlacement(d.active);

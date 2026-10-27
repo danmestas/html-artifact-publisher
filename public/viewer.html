@@ -121,6 +121,11 @@
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
       </button>
     </div>
+    <div class="marker-preference">
+      <button id="showCommentMarkers" type="button" role="switch" aria-checked="true" aria-describedby="markerHelp"><span>Show comment markers</span><span class="switch-track" aria-hidden="true"></span></button>
+      <p id="markerHelp">Only changes your view. Comments stay available below.</p>
+      <p id="markerStatus" role="status">Markers visible on the page</p>
+    </div>
     <p id="responderNote" class="responder" role="status"><strong id="responderHead"></strong> <span id="responderName"></span> <span id="responderContact" class="muted"></span></p>
     <div class="comment-tools"><button id="placeComment" class="primary" type="button" hidden>Place a comment</button><button id="generalComment" type="button" hidden>General comment</button></div>
     <form id="commentForm" hidden>

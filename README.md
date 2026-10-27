@@ -98,7 +98,7 @@ On the Workers Paid plan ($5/month) a modest deployment stays inside the include
 
 ## Prerequisites
 
-- [Node.js 22+](https://nodejs.org/) (CI uses Node 24)
+- [Node.js 24+](https://nodejs.org/), the version CI uses. Publishing with `scripts/publish-html.mjs` alone works on Node 22+.
 - [Go 1.26+](https://go.dev/dl/) and exactly [TinyGo 0.43.0](https://github.com/tinygo-org/tinygo/releases/tag/v0.43.0) to build the Fossil engine (see [Building the Fossil engine](#building-the-fossil-engine))
 - A Cloudflare account on the Workers Paid plan
 

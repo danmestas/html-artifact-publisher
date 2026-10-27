@@ -46,7 +46,7 @@ Some rough examples:
 - Optional: a custom domain or subdomain for the publisher (otherwise it lives at `https://html-artifact-publisher.<your-subdomain>.workers.dev`).
 
 **Tools (an agent can check these):**
-- Git, and Node.js 22 or newer.
+- Git, and Node.js 24 or newer (the version CI uses; the tests need it).
 - Go 1.26 and exactly TinyGo 0.43.0, to build the Fossil engine. See [Building the Fossil engine](../README.md#building-the-fossil-engine). If you deploy only through GitHub Actions, CI builds it for you and you can skip these.
 
 ## Step by step

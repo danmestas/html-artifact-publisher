@@ -50,7 +50,11 @@ export async function viewerQA({ base, a, api, output, attach }) {
     evaluate(`document.querySelector(${JSON.stringify(selector)}).scrollIntoView({ block: 'center' })`);
     run('click', selector);
   };
-  const tickets = async () => (await api(`/api/artifacts/${a.id}/tickets`, { token: a.read })).json.tickets;
+  const tickets = async () => {
+    // Let Node drain closed keep-alive sockets after synchronous browser commands.
+    await new Promise(resolve => setImmediate(resolve));
+    return (await api(`/api/artifacts/${a.id}/tickets`, { token: a.read })).json.tickets;
+  };
   const byTitle = async title => (await tickets()).find(t => t.fields.title === title);
   // agent-browser cannot enter the opaque-origin page frame; DevTools can.
   let page = null;
@@ -381,6 +385,31 @@ export async function viewerQA({ base, a, api, output, attach }) {
     await clickPin(headingNow);
     wait(`#threadPanel .thread.focus[data-label="${headingNow}"]`);
     run('screenshot', join(output, 'comment-link-phone-pin.png'));
+
+    // A reply from another client appears in the open thread, even while typing.
+    press('#threadPanel .thread.focus .reply textarea');
+    run('keyboard', 'type', 'Keep this unfinished reply');
+    evaluate(`(() => { const t = document.activeElement; window.__draft = t; t.setSelectionRange(5, 9); })()`);
+    const remoteThread = await byTitle('About the heading');
+    const remote = await api(`/api/artifacts/${a.id}/tickets`, {
+      method: 'POST', token: a.write, body: { ticketUuid: remoteThread.uuid, text: 'A live reply from another client.' },
+    });
+    assert.equal(remote.status, 200, remote.text);
+    assert.equal((await api(`/api/artifacts/${a.id}`, { token: a.read })).json.tip, a.tip, 'comments do not publish a version');
+    run('wait', '--fn', `document.querySelector('#threadPanel .thread.focus')?.textContent.includes('A live reply from another client.')`);
+    assert.deepEqual(evaluate(`(() => { const t = document.activeElement; return { same: t === window.__draft, value: t.value, start: t.selectionStart, end: t.selectionEnd, mode: document.getElementById('threadPanel').dataset.mode }; })()`),
+      { same: true, value: 'Keep this unfinished reply', start: 5, end: 9, mode: 'thread' }, 'live replies preserve the active draft and selection');
+    run('screenshot', join(output, 'comment-live-reply-with-draft.png'));
+    for (const status of ['Closed', 'Open']) {
+      await new Promise(resolve => setImmediate(resolve));
+      const changed = await api(`/api/artifacts/${a.id}/tickets`, {
+        method: 'POST', token: a.write, body: { ticketUuid: remoteThread.uuid, status },
+      });
+      assert.equal(changed.status, 200, changed.text);
+      run('wait', '--fn', `document.querySelector('#threadPanel .thread.focus summary .tag')?.textContent === ${JSON.stringify(status)}`);
+      assert.deepEqual(evaluate(`(() => { const t = document.activeElement, view = document.querySelector('#threadPanel .thread.focus'); return { open: view.open, same: t === window.__draft, value: t.value, start: t.selectionStart, end: t.selectionEnd, action: view.querySelector('.resolve').textContent }; })()`),
+        { open: true, same: true, value: 'Keep this unfinished reply', start: 5, end: 9, action: status === 'Closed' ? 'Reopen' : 'Resolve' }, 'remote status changes do not collapse an active draft');
+    }
 
     // ── The read link: threads and pins, no comment box, reply or resolve ──
     run('set', 'viewport', '1280', '900');

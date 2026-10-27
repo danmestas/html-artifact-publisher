@@ -4,7 +4,7 @@
 // fixture artifact; this drives the viewer as each link holder would.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { frameEval } from './helpers/frame-eval.mjs';
 
@@ -85,6 +85,15 @@ export async function viewerQA({ base, a, api, output, attach }) {
     run('mouse', 'up');
     return pin;
   };
+  const download = selector => {
+    const path = join(output, `download-${process.pid}.zip`);
+    run('download', selector, path);
+    const bytes = readFileSync(path);
+    rmSync(path);
+    assert.equal(bytes.readUInt32LE(0), 0x04034b50, 'download is a ZIP archive');
+    assert.ok(bytes.includes(Buffer.from('index.html')), 'download includes the artifact page');
+    return bytes;
+  };
   const settle = () => run('wait', '400');
   let failure;
 
@@ -99,7 +108,8 @@ export async function viewerQA({ base, a, api, output, attach }) {
     assert.deepEqual(toolbar, { height: 45, overflow: false, back: true }, 'one compact toolbar row with a library return');
     run('click', '#titleBtn');
     wait('#titleMenu:not([hidden])');
-    assert.equal(evaluate(`document.querySelectorAll('#titleMenu #versionBtn, #titleMenu #shareBtn, #titleMenu #downloadBtn').length`), 0, 'controls have one home');
+    assert.equal(evaluate(`document.querySelectorAll('#titleMenu #versionBtn, #titleMenu #shareBtn').length`), 0, 'version and sharing controls have one home');
+    assert.equal(evaluate(`document.querySelector('#titleMenu #downloadFilesBtn')?.textContent`), 'Download files…', 'commenters can download from artifact details');
     run('press', 'Escape');
     assert.equal(evaluate(`document.getElementById('titleMenu').hidden`), true, 'Escape closes title details without navigating');
     run('click', '#shareBtn');
@@ -415,6 +425,9 @@ export async function viewerQA({ base, a, api, output, attach }) {
     run('set', 'viewport', '1280', '900');
     run('open', `${base}/v/${a.id}#${a.read}`);
     wait('#bar:not([hidden])');
+    run('click', '#titleBtn');
+    download('#downloadFilesBtn');
+    assert.equal(evaluate(`document.getElementById('titleMenu').hidden`), true, 'downloading closes artifact details');
     run('click', '#commentsBtn');
     wait('#threadPanel .thread');
     settle();
@@ -472,9 +485,14 @@ export async function viewerQA({ base, a, api, output, attach }) {
     assert.equal(evaluate(`['uploadFilesBtn','uploadFolderBtn','deleteBtn'].every(id => !document.getElementById(id).hidden && document.getElementById('titleMenu').contains(document.getElementById(id)))`), true);
     assert.equal(evaluate(`document.documentElement.scrollWidth <= innerWidth`), true);
     run('screenshot', join(output, 'edit-link-phone-old-version.png'));
-    run('press', 'Escape');
+    assert.equal(download('#downloadFilesBtn').includes(Buffer.from('version.txt')), false, 'artifact details downloads the selected old version, not the latest');
     run('click', '#backLatest');
     run('wait', '--fn', `document.getElementById('oldStrip').hidden`);
+    run('click', '#titleBtn');
+    assert.ok(download('#downloadFilesBtn').includes(Buffer.from('version.txt')), 'artifact details downloads files added in the latest version');
+    run('click', '#shareBtn');
+    run('click', '#exportTab');
+    assert.ok(download('#downloadBtn').includes(Buffer.from('version.txt')), 'Share export retains its download action');
     run('click', '#moreBtn');
     run('select', '#viewer-theme', 'dark');
     assert.equal(evaluate(`document.documentElement.dataset.theme`), 'dark');

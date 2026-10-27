@@ -656,7 +656,7 @@ test('wake: a push of N tickets wakes N, and at most 40', { skip: !haveStockFoss
 
 if (process.env.VIEWER_BROWSER_QA === '1') test('real browser: comment pins, thread panel, resolve and the read link', async () => {
   const { viewerQA, XSS } = await import('./viewer-browser.mjs');
-  const a = await create({ 'index.html': b64('<!doctype html><h1 id="intro">Heading text</h1><p>The quick brown <em>fox</em> jumps over the lazy dog.</p>') });
+  const a = await create({ 'index.html': b64('<!doctype html><h1 id="intro">Heading text</h1><p>The quick brown <em>fox</em> jumps over the lazy dog.</p>') }, { title: 'A long artifact title for a compact toolbar on even the narrowest phone' });
   const post = async (token, body) => {
     const r = await api(`/api/artifacts/${a.id}/tickets`, { method: 'POST', token, body });
     assert.ok(r.status === 200 || r.status === 201, r.text);

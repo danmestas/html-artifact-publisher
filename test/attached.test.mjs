@@ -42,9 +42,9 @@ test('attached.json: the three fields, validated; anything else reads as absent'
 
 test('responderNote: what the thread panel says about a responder', () => {
   assert.deepEqual(responderNote({ attached: { responder: 'local session', since: null, contact: null } }),
-    { attached: true, headline: 'A responder is attached', name: 'local session', contact: '' });
+    { attached: true, headline: 'A responder is registered. Registration does not verify that it is online.', name: 'local session', contact: '' });
   assert.deepEqual(responderNote({ attached: { responder: 'r', since: null, contact: 'dan@example.com' } }).contact, 'dan@example.com');
-  const none = { attached: false, headline: 'Comments are recorded; nothing is listening right now', name: '', contact: '' };
+  const none = { attached: false, headline: 'No responder is registered. Comments remain available for later review.', name: '', contact: '' };
   assert.deepEqual(responderNote({ attached: null }), none);
   assert.deepEqual(responderNote({}), none, 'an older server');
   assert.deepEqual(responderNote({ attached: { responder: 7 } }), none, 'never trusts the reply blindly');

@@ -6,7 +6,7 @@ description: Design rules and the page contract for HTML pages published with ht
 # Artifact design
 
 A published page is shown by our viewer inside a sandboxed iframe, under the
-viewer's own 52 px bar, with a strict Content-Security-Policy and no network.
+viewer's own 45 px bar, with a strict Content-Security-Policy and no network.
 This skill covers what the page must do to render correctly there, and how to
 make it look considered rather than generated. Publishing itself is covered by
 **publish-html-page**; the `window.artifact` API (stored data, history,
@@ -238,7 +238,7 @@ contrast and missing assets in each theme, not just the surrounding page.
 per-element margins. Keep a side gutter of at least 16 px at every width. Watch
 selector specificity so one rule doesn't quietly undo another's spacing.
 
-**Respect the viewer bar.** The page sits below the viewer's 52 px bar, which
+**Respect the viewer bar.** The page sits below the viewer's 45 px bar, which
 already shows the title, version, Share and Comment. Do not add a fixed
 full-width top bar that repeats it; a page header that scrolls away, or a
 sticky in-page toolbar for a tool, is fine. Avoid `100vh` heroes: the frame is

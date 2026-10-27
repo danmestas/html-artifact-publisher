@@ -17,20 +17,32 @@ export const XSS = {
 
 export async function viewerQA({ base, a, api, output, attach }) {
   mkdirSync(output, { recursive: true });
-  const session = 'viewer-comments-qa';
+  const session = `viewer-comments-qa-${process.pid}`;
+  let viewerTab = '';
   const run = (...args) => {
+    const exec = (...command) => execFileSync('agent-browser', ['--session', session, ...command], {
+      encoding: 'utf8', timeout: 45000, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, AGENT_BROWSER_IDLE_TIMEOUT_MS: '600000' },
+    });
     try {
-      return execFileSync('agent-browser', ['--session', session, ...args], {
-        encoding: 'utf8', timeout: 45000, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, AGENT_BROWSER_IDLE_TIMEOUT_MS: '60000' },
-      });
+      if (viewerTab && !['close', 'tab', 'get'].includes(args[0])) exec('tab', viewerTab);
+      const result = exec(...args);
+      if (args[0] === 'open') {
+        const tabs = JSON.parse(exec('--json', 'tab', 'list')).data.tabs;
+        viewerTab = tabs.find(t => t.url.startsWith(`${base}/v/${a.id}#`))?.tabId ?? '';
+        assert.ok(viewerTab, 'the fixture viewer has its own browser tab');
+      }
+      return result;
     } catch (e) {
-      throw new Error(`agent-browser ${args.join(' ')}: ${e.stdout ?? ''}${e.stderr ?? ''}`.slice(0, 2000));
+      const command = args[0] === 'open' ? 'open [private fixture]' : args.join(' ');
+      throw new Error(`agent-browser ${command} (${e.code ?? e.status ?? 'failed'}, ${e.signal ?? 'no signal'}): ${e.stdout ?? ''}${e.stderr ?? ''}`.slice(0, 2000));
     }
   };
   const evaluate = source => {
-    const result = JSON.parse(run('--json', 'eval', source));
+    run('frame', 'main');
+    const result = JSON.parse(run('--json', 'eval', `({ top: window === top, viewer: !!document.getElementById('bar'), protocol: location.protocol, value: (${source}) })`));
     assert.equal(result.success, true, JSON.stringify(result));
-    return result.data.result;
+    assert.equal(result.data.result.top && result.data.result.viewer, true, JSON.stringify(result.data.result));
+    return result.data.result.value;
   };
   const wait = selector => run('wait', selector);
   // agent-browser does not scroll the panel, an inner scroller, to what it clicks.
@@ -69,13 +81,33 @@ export async function viewerQA({ base, a, api, output, attach }) {
     return pin;
   };
   const settle = () => run('wait', '400');
+  let failure;
 
   try {
     // ── The comment link: pins, panel, reply, resolve, reopen, new anchored comment ──
     run('set', 'viewport', '1280', '900');
     run('open', `${base}/v/${a.id}#${a.comment}`);
     wait('#bar:not([hidden])');
+    evaluate(`(window.__qaErrors = [], addEventListener('error', e => window.__qaErrors.push(e.message)), addEventListener('unhandledrejection', e => window.__qaErrors.push(String(e.reason))), true)`);
     evaluate(`document.documentElement.dataset.theme = 'light'`);
+    const toolbar = evaluate(`(() => { const b = document.getElementById('bar').getBoundingClientRect(); return { height: b.height, overflow: document.documentElement.scrollWidth > innerWidth, back: !document.getElementById('backLibrary').hidden }; })()`);
+    assert.deepEqual(toolbar, { height: 45, overflow: false, back: true }, 'one compact toolbar row with a library return');
+    run('click', '#titleBtn');
+    wait('#titleMenu:not([hidden])');
+    assert.equal(evaluate(`document.querySelectorAll('#titleMenu #versionBtn, #titleMenu #shareBtn, #titleMenu #downloadBtn').length`), 0, 'controls have one home');
+    run('press', 'Escape');
+    assert.equal(evaluate(`document.getElementById('titleMenu').hidden`), true, 'Escape closes title details without navigating');
+    run('click', '#shareBtn');
+    run('click', '#exportTab');
+    wait('#exportPane:not([hidden])');
+    assert.equal(evaluate(`document.getElementById('downloadBtn').closest('[role=tabpanel]').id`), 'exportPane');
+    run('press', 'ArrowLeft');
+    assert.equal(evaluate(`document.activeElement.id`), 'shareTab', 'Share/Export tabs support keyboard navigation');
+    run('press', 'Escape');
+    assert.equal(evaluate(`document.getElementById('shareMenu').hidden`), true, 'Escape closes Share without navigating');
+    run('click', '#moreBtn');
+    assert.equal(evaluate(`document.getElementById('moreMenu').querySelectorAll('button').length`), 0, 'More owns appearance only');
+    run('press', 'Escape');
     run('click', '#commentsBtn');
     wait('#threadPanel:not([hidden])');
     wait('#threadPanel .thread[data-anchored="no"]');
@@ -86,7 +118,7 @@ export async function viewerQA({ base, a, api, output, attach }) {
     const gone = labelOf('Where did it go');
     const xss = labelOf(XSS.text.split('\n')[0].trim());
     const general = labelOf('No anchor at all');
-    assert.ok(heading && fox && gone && xss && general, 'every thread is listed');
+    assert.ok(heading && fox && gone && xss && general, `every thread is listed: ${JSON.stringify({ heading, fox, gone, xss, general, state: evaluate(`({ titles: [...document.querySelectorAll('#threadPanel summary .title')].map(e => e.textContent), errors: window.__qaErrors, mode: document.getElementById('threadPanel')?.dataset.mode, list: document.getElementById('threadList')?.innerHTML.slice(0, 160), protocol: location.protocol, isTop: window === top, title: document.title, path: location.protocol === 'blob:' ? '(artifact frame)' : location.pathname })`) })}`);
 
     // Anchor resolution: element id, then quote; a stale anchor is unanchored, not a broken pin.
     assert.equal(panel(heading).anchored, 'yes');
@@ -118,6 +150,9 @@ export async function viewerQA({ base, a, api, output, attach }) {
     const told = await inFrame('window.__told');
     assert.ok(told.length >= 2, JSON.stringify(told));
     for (const m of told) {
+      const raw = JSON.stringify(m);
+      for (const secret of [a.read, a.write, a.comment, 'About the fox', 'first line', 'Shortened in']) assert.ok(!raw.includes(secret), 'the page is told no tokens or ticket text');
+      if (m.type !== 'pins') continue;
       assert.deepEqual(Object.keys(m).sort(), ['__artifactPins', 'colors', 'pins', 'type'], JSON.stringify(m));
       assert.equal(m.type, 'pins');
       assert.deepEqual(Object.keys(m.colors).sort(), ['accent', 'muted', 'surface']);
@@ -126,8 +161,6 @@ export async function viewerQA({ base, a, api, output, attach }) {
         assert.deepEqual(Object.keys(pin).sort(), ['anchor', 'key', 'resolved']);
         assert.ok(Number.isInteger(pin.key) && typeof pin.anchor === 'string' && typeof pin.resolved === 'boolean');
       }
-      const raw = JSON.stringify(m);
-      for (const secret of [a.read, a.write, a.comment, 'About the fox', 'first line', 'Shortened in']) assert.ok(!raw.includes(secret), `the page is not told ${secret.slice(0, 12)}`);
     }
 
     // Only the page's own frame speaks for the pins: the viewer's window, or a
@@ -144,15 +177,22 @@ export async function viewerQA({ base, a, api, output, attach }) {
     assert.equal(panel(gone).focus, false, 'a forged pin click opens nothing');
     await inFrame(`(document.getElementById('nested').remove(), parent.postMessage({ __artifactPins: 1, type: 'selection', anchor: 'FROM THE PAGE' }, '*'), true)`);
     run('wait', '--fn', `document.getElementById('commentAnchor').textContent.includes('FROM THE PAGE')`);
+    run('click', '#generalComment');
     run('click', '#anchorClear');
+    run('click', '#cancelComment');
+    run('click', '#commentsBtn');
+    wait('#threadPanel .thread');
 
     // A page sending pin clicks never takes focus from a reply being written.
+    press(`#threadPanel .thread[data-label="${general}"] summary`);
     press(`#threadPanel .thread[data-label="${general}"] .reply textarea`);
     run('keyboard', 'type', 'half a reply');
-    await inFrame(`(parent.postMessage({ __artifactPins: 1, type: 'open', key: ${gone} }, '*'), parent.postMessage({ __artifactPins: 1, type: 'open', key: ${gone} }, '*'), true)`);
+    const typingBefore = evaluate(`({ active: document.activeElement.tagName, value: document.activeElement.value, mode: document.getElementById('threadPanel').dataset.mode, focused: document.querySelector('#threadPanel .thread.focus')?.dataset.label })`);
+    assert.equal(typingBefore.value, 'half a reply', JSON.stringify(typingBefore));
+    await inFrame(`(parent.postMessage({ __artifactPins: 1, type: 'open', key: ${gone} }, '*'), parent.postMessage({ __artifactPins: 1, type: 'open', key: ${gone} }, '*'), parent.postMessage({ __artifactPins: 1, type: 'cancel' }, '*'), true)`);
     settle();
-    assert.equal(evaluate(`(() => { const t = document.activeElement; return t.matches('#threadPanel .thread[data-label="${general}"] .reply textarea') && t.value; })()`), 'half a reply');
-    assert.equal(panel(gone).focus, true, 'the pin still marks its thread');
+    assert.equal(evaluate(`(() => { const t = document.activeElement; return t.matches('#threadPanel .thread[data-label="${general}"] .reply textarea') && t.value; })()`), 'half a reply', JSON.stringify(evaluate(`({ active: document.activeElement.tagName, value: document.activeElement.value, mode: document.getElementById('threadPanel').dataset.mode, focused: document.querySelector('#threadPanel .thread.focus')?.dataset.label })`)));
+    assert.equal(panel(gone).focus, false, 'a page message cannot replace the thread being written');
     evaluate(`(() => { const t = document.activeElement; t.value = ''; t.dispatchEvent(new Event('input')); t.blur(); })()`);
 
     // Untrusted text, titles, anchors and authors render as text, in the panel and the page.
@@ -177,7 +217,14 @@ export async function viewerQA({ base, a, api, output, attach }) {
     // Reply, resolve and reopen through the panel.
     const thread = `#threadPanel .thread[data-label="${fox}"]`;
     run('fill', `${thread} .reply textarea`, 'Agreed, shortened.');
+    // Hold the real request at the network boundary to exercise pending replies.
+    evaluate(`(() => { const fetch = window.fetch; window.fetch = (...args) => args[1]?.method === 'POST' && String(args[0]).endsWith('/tickets') ? new Promise(resolve => { window.__releaseReply = () => { window.fetch = fetch; resolve(fetch(...args)); }; }) : fetch(...args); })()`);
     press(`${thread} .reply button[type=submit]`);
+    run('wait', '--fn', `typeof window.__releaseReply === 'function'`);
+    await inFrame(`(parent.postMessage({ __artifactPins: 1, type: 'open', key: ${gone} }, '*'), parent.postMessage({ __artifactPins: 1, type: 'dismiss' }, '*'), true)`);
+    settle();
+    assert.equal(evaluate(`!document.getElementById('threadPanel').hidden && document.querySelector('#threadPanel .thread.focus')?.dataset.label`), fox, 'page messages cannot replace or hide a pending reply');
+    evaluate(`(window.__releaseReply(), delete window.__releaseReply, true)`);
     run('wait', '--fn', `[...document.querySelectorAll('#threadPanel .thread .message')].some(m => m.textContent === 'Agreed, shortened.')`);
     let t = await byTitle('About the fox');
     assert.equal(t.changes.at(-1).comment, 'Agreed, shortened.');
@@ -197,12 +244,14 @@ export async function viewerQA({ base, a, api, output, attach }) {
     assert.equal((await byTitle('About the fox')).status, 'Open');
 
     // A new comment on selected text anchors to the quote and gets a pin.
+    run('click', '#commentsBtn');
     await inFrame(`(() => {
       const t = document.querySelector('p').lastChild;
       const r = document.createRange(); r.setStart(t, t.data.indexOf('lazy')); r.setEnd(t, t.data.indexOf('dog') + 3);
       getSelection().removeAllRanges(); getSelection().addRange(r);
     })()`);
     run('wait', '--fn', `document.getElementById('commentAnchor').textContent.includes('lazy dog')`);
+    press('#generalComment');
     run('fill', '#commentText', 'Which dog?');
     run('click', '#commentForm button[type=submit]');
     run('wait', '--fn', `[...document.querySelectorAll('#threadPanel .thread summary .title')].some(e => e.textContent === 'Which dog?')`);
@@ -212,6 +261,80 @@ export async function viewerQA({ base, a, api, output, attach }) {
     assert.equal(panel(dog).anchored, 'yes');
     assert.ok((await pins()).some(p => p.label === dog));
 
+    // Explicit placement accepts blank space; writing and reopening use real tickets.
+    const frameBox = () => evaluate(`(() => { const r = document.getElementById('frame').getBoundingClientRect(); return { x: r.left, y: r.top, width: r.width, height: r.height }; })()`);
+    const mouseAt = (x, y) => {
+      const f = frameBox();
+      run('mouse', 'move', String(Math.round(f.x + x)), String(Math.round(f.y + y)));
+      run('mouse', 'down'); run('mouse', 'up');
+    };
+    press('#placeComment');
+    wait('#placementHint:not([hidden])');
+    mouseAt(1000, 280);
+    wait('#threadPanel[data-mode="draft"]:not([hidden])');
+    run('fill', '#commentText', 'Comment in blank space');
+    run('press', 'Escape');
+    run('click', '#commentsBtn');
+    assert.equal(evaluate(`document.getElementById('placeComment').textContent`), 'Continue draft');
+    press('#placeComment');
+    assert.equal(evaluate(`document.getElementById('commentText').value`), 'Comment in blank space', 'closing preserves a draft');
+    run('click', '#commentForm button[type=submit]');
+    run('wait', '--fn', `document.getElementById('threadPanel').dataset.mode === 'thread'`);
+    const blank = await byTitle('Comment in blank space');
+    assert.ok(blank.fields.subsystem.startsWith('hap-point:'), 'a real location anchor is persisted');
+    let blankLabel = labelOf('Comment in blank space');
+    settle();
+    assert.equal(panel(blankLabel).anchored, 'yes');
+    assert.ok((await pins()).some(p => p.label === blankLabel), 'a marker remains at the posted location');
+    const popover = evaluate(`(() => { const r = document.getElementById('threadPanel').getBoundingClientRect(); return { x: r.left, y: r.top, right: r.right, bottom: r.bottom }; })()`);
+    assert.ok(popover.x > 500 && popover.right <= 1280 && popover.y >= 45 && popover.bottom <= 900, JSON.stringify(popover));
+    run('click', '#threadClose');
+    await clickPin(blankLabel);
+    wait('#threadPanel[data-mode="thread"]:not([hidden])');
+    assert.ok(panel(blankLabel).text.includes('Comment in blank space'));
+    run('reload');
+    wait('#bar:not([hidden])');
+    run('click', '#commentsBtn');
+    run('wait', '--fn', `[...document.querySelectorAll('#threadPanel summary .title')].some(e => e.textContent === 'Comment in blank space')`);
+    blankLabel = labelOf('Comment in blank space');
+    settle();
+    assert.ok((await pins()).some(p => p.label === blankLabel), 'the marker survives reload');
+
+    // Page messages alone cannot start placement, and explicit cancel clears drafts.
+    const beforePoint = (await tickets()).length;
+    await inFrame(`(parent.postMessage({ __artifactPins: 1, type: 'point', anchor: ${JSON.stringify(blank.fields.subsystem)}, x: 20, y: 20 }, '*'), true)`);
+    settle();
+    assert.equal(evaluate(`document.getElementById('threadPanel').dataset.mode`), 'index');
+    assert.equal((await tickets()).length, beforePoint);
+    press('#placeComment');
+    run('press', 'Enter');
+    wait('#threadPanel[data-mode="draft"]:not([hidden])');
+    run('fill', '#commentText', 'Discard this draft');
+    run('click', '#cancelComment');
+    run('click', '#commentsBtn');
+    assert.equal(evaluate(`document.getElementById('commentText').value`), '');
+    assert.equal((await tickets()).length, beforePoint);
+
+    // An element location follows reflow, rather than staying at a viewport pixel.
+    press('#placeComment');
+    const headingBox = await inFrame(`(() => { const r = document.getElementById('intro').getBoundingClientRect(); return { x: r.left + 45, y: r.top + 12 }; })()`);
+    mouseAt(headingBox.x, headingBox.y);
+    wait('#threadPanel[data-mode="draft"]:not([hidden])');
+    run('fill', '#commentText', 'Location on heading');
+    run('click', '#commentForm button[type=submit]');
+    run('wait', '--fn', `document.getElementById('threadPanel').dataset.mode === 'thread'`);
+    const located = await byTitle('Location on heading');
+    assert.equal(JSON.parse(located.fields.subsystem.slice('hap-point:'.length)).id, 'intro');
+    const locatedLabel = labelOf('Location on heading');
+    settle();
+    const beforeMove = (await pins()).find(p => p.label === locatedLabel);
+    await inFrame(`(document.getElementById('intro').style.marginTop = '220px', true)`);
+    settle();
+    const afterMove = (await pins()).find(p => p.label === locatedLabel);
+    assert.ok(afterMove.y - beforeMove.y > 100, JSON.stringify({ beforeMove, afterMove }));
+    await inFrame(`(document.getElementById('intro').style.marginTop = '', true)`);
+    run('click', '#commentsBtn');
+
     // Dark theme: the panel follows the viewer's tokens.
     evaluate(`document.documentElement.dataset.theme = 'dark'`);
     const dark = evaluate(`(() => { const s = getComputedStyle(document.getElementById('threadPanel')); return { bg: s.backgroundColor, ink: s.color }; })()`);
@@ -220,14 +343,14 @@ export async function viewerQA({ base, a, api, output, attach }) {
     run('screenshot', join(output, 'comment-link-desktop-dark.png'));
     evaluate(`document.documentElement.dataset.theme = 'light'`);
 
-    // Phone width: the panel is a sheet, nothing overflows, pins still hit.
+    // Phone width: comments stay in a bounded dropdown, pins still hit.
     run('set', 'viewport', '390', '844');
     settle();
-    const sheet = evaluate(`(() => { const p = document.getElementById('threadPanel'); const s = getComputedStyle(p); const r = p.getBoundingClientRect();
-      return { position: s.position, bottom: Math.round(innerHeight - r.bottom), width: Math.round(r.width), overflow: document.documentElement.scrollWidth > innerWidth }; })()`);
-    assert.equal(sheet.position, 'fixed', JSON.stringify(sheet));
-    assert.ok(sheet.bottom >= 0 && sheet.bottom <= 16 && sheet.width <= 390 && !sheet.overflow, JSON.stringify(sheet));
-    run('screenshot', join(output, 'comment-link-phone-sheet.png'));
+    const dropdown = evaluate(`(() => { const p = document.getElementById('threadPanel'); const s = getComputedStyle(p); const r = p.getBoundingClientRect();
+      return { position: s.position, top: r.top, bottom: r.bottom, width: r.width, overflow: document.documentElement.scrollWidth > innerWidth, toolbar: document.getElementById('bar').offsetHeight }; })()`);
+    assert.equal(dropdown.position, 'absolute', JSON.stringify(dropdown));
+    assert.ok(dropdown.top >= 45 && dropdown.bottom <= 844 && dropdown.width <= 390 && !dropdown.overflow && dropdown.toolbar === 45, JSON.stringify(dropdown));
+    run('screenshot', join(output, 'comment-link-phone-dropdown.png'));
     run('click', '#threadClose');
     settle();
     const headingNow = labelOf('About the heading'); // labels moved: new threads come first
@@ -247,18 +370,26 @@ export async function viewerQA({ base, a, api, output, attach }) {
       note: document.getElementById('commentsNote').textContent })`);
     assert.deepEqual({ ...readOnly, threads: readOnly.threads > 0 }, { form: true, replies: 0, resolves: 0, threads: true, note: 'Read only' });
     assert.ok((await pins()).length >= 3, 'readers see the pins');
+    const cue = evaluate(`(() => { const c = document.getElementById('readCue'), f = document.getElementById('frame'); return { visible: !c.hidden, clear: c.getBoundingClientRect().bottom <= f.getBoundingClientRect().top, placeHidden: document.getElementById('placeComment').hidden, sandbox: f.getAttribute('sandbox') }; })()`);
+    assert.ok(cue.visible && cue.clear && cue.placeHidden && !cue.sandbox.includes('allow-same-origin'), JSON.stringify(cue));
+    await inFrame(`(parent.postMessage({ __artifactPins: 1, type: 'point', anchor: ${JSON.stringify(blank.fields.subsystem)}, x: 20, y: 20 }, '*'), true)`);
+    settle();
+    assert.equal(evaluate(`document.getElementById('threadPanel').dataset.mode`), 'index', 'a read link cannot be made a composer by page messages');
+    run('set', 'viewport', '360', '780');
+    assert.equal(evaluate(`document.getElementById('bar').offsetHeight === 45 && document.documentElement.scrollWidth <= innerWidth`), true, 'long title remains one row at 360px');
+    run('set', 'viewport', '1280', '900');
     run('screenshot', join(output, 'read-link-desktop.png'));
 
     // ── The responder banner above the threads: from attached.json, no republish ──
     const banner = () => evaluate(`(() => { const n = document.getElementById('responderNote'); return { attached: n.dataset.attached, text: n.textContent.trim().replace(/\\s+/g, ' '), kids: n.querySelectorAll('*:not(strong):not(span)').length }; })()`);
-    assert.deepEqual(banner(), { attached: 'false', text: 'Comments are recorded; nothing is listening right now', kids: 0 });
+    assert.deepEqual(banner(), { attached: 'false', text: 'No responder is registered. Comments remain available for later review.', kids: 0 });
     if (attach) {
       attach(JSON.stringify({ responder: XSS.text.split('\n')[0], contact: XSS.author }));
       run('reload');
       wait('#bar:not([hidden])');
       run('click', '#commentsBtn');
       wait('#responderNote[data-attached="true"]');
-      assert.deepEqual(banner(), { attached: 'true', text: `A responder is attached ${XSS.text.split('\n')[0]} (${XSS.author})`, kids: 0 });
+      assert.deepEqual(banner(), { attached: 'true', text: `A responder is registered. Registration does not verify that it is online. ${XSS.text.split('\n')[0]} (${XSS.author})`, kids: 0 });
       assert.deepEqual(evaluate('[window.__xss]'), [null], 'markup in the file never ran');
       run('screenshot', join(output, 'responder-attached.png'));
       attach(null);
@@ -267,9 +398,40 @@ export async function viewerQA({ base, a, api, output, attach }) {
       run('click', '#commentsBtn');
       wait('#responderNote[data-attached="false"]');
     }
+    // Editors keep management in the title dropdown and can restore old versions.
+    const update = await api(`/api/artifacts/${a.id}`, { method: 'PUT', token: a.write, body: { parent: a.tip, message: 'Toolbar version check', files: { 'version.txt': Buffer.from('second version').toString('base64') } } });
+    assert.equal(update.status, 200);
+    run('set', 'viewport', '360', '780');
+    run('open', `${base}/v/${a.id}#${a.write}@${a.tip}`);
+    wait('#bar:not([hidden])');
+    wait('#oldStrip:not([hidden])');
+    assert.equal(evaluate(`document.getElementById('oldStrip').offsetHeight`), 26);
+    assert.equal(evaluate(`document.getElementById('restoreBtn').hidden`), false);
+    assert.equal(evaluate(`document.getElementById('readCue').hidden`), true);
+    run('click', '#titleBtn');
+    assert.equal(evaluate(`['uploadFilesBtn','uploadFolderBtn','deleteBtn'].every(id => !document.getElementById(id).hidden && document.getElementById('titleMenu').contains(document.getElementById(id)))`), true);
+    assert.equal(evaluate(`document.documentElement.scrollWidth <= innerWidth`), true);
+    run('screenshot', join(output, 'edit-link-phone-old-version.png'));
+    run('press', 'Escape');
+    run('click', '#backLatest');
+    run('wait', '--fn', `document.getElementById('oldStrip').hidden`);
+    run('click', '#moreBtn');
+    run('select', '#viewer-theme', 'dark');
+    assert.equal(evaluate(`document.documentElement.dataset.theme`), 'dark');
+    run('select', '#viewer-theme', 'light');
+    assert.equal(evaluate(`document.documentElement.dataset.theme`), 'light');
+    run('select', '#viewer-theme', 'system');
+    assert.equal(evaluate(`document.documentElement.hasAttribute('data-theme')`), false);
     return { output };
+  } catch (error) {
+    failure = error;
+    try {
+      run('screenshot', join(output, 'failure.png'));
+      console.error(run('--json', 'eval', `({ top: window === top, protocol: location.protocol, title: document.title, viewer: !!document.getElementById('bar'), panel: document.getElementById('threadPanel')?.hidden, threads: document.querySelectorAll('.thread').length, errors: window.__qaErrors })`));
+    } catch { /* preserve the original failure if the browser stopped responding */ }
+    throw error;
   } finally {
     page?.close();
-    run('close');
+    try { run('close'); } catch (error) { if (!failure) throw error; }
   }
 }

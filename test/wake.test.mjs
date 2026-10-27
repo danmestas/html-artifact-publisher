@@ -231,10 +231,17 @@ test('failing sinks resolve: HTTP errors, network errors and timeouts are logged
   const q = quiet();
   await wake(env, event, { fetch: recorder(500).fetch, log: q.log });
   await wake(env, event, { fetch: async () => { throw new Error('boom'); }, log: q.log });
-  await wake(env, event, {
-    log: q.log, timeoutMs: 20,
-    fetch: (_u, init) => new Promise((_, reject) => init.signal.addEventListener('abort', () => reject(init.signal.reason))),
-  });
+  // AbortSignal.timeout's timer doesn't hold Node 22's event loop open, and this
+  // fetch waits on nothing else: keep the loop alive until the abort arrives.
+  const alive = setInterval(() => {}, 1000);
+  try {
+    await wake(env, event, {
+      log: q.log, timeoutMs: 20,
+      fetch: (_u, init) => new Promise((_, reject) => init.signal.addEventListener('abort', () => reject(init.signal.reason))),
+    });
+  } finally {
+    clearInterval(alive);
+  }
   assert.equal(q.lines.length, 3);
   assert.match(q.lines[0], /500/);
   assert.ok(q.lines.every(l => !l.includes('hook-secret-9')));

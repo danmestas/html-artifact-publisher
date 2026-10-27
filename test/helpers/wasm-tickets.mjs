@@ -90,4 +90,13 @@ const unknown = call({ op: 'ticketSet', ticketUuid: '0'.repeat(40), fields: { st
 assert.notEqual(unknown.ok, true);
 assert.equal(ok({ op: 'ticketList' }).length, 2, 'a failed write leaves the tickets as they were');
 
+const unchanged = call({ op: 'commit', parent: tip.slice(0, 12), files: { 'index.html': b64('<h1>page</h1>') } });
+assert.equal(unchanged.ok, undefined);
+assert.equal(unchanged.code, 'unchanged');
+assert.deepEqual(unchanged.result, { tip }, 'unchanged replies carry the canonical tip validated at the commit boundary');
+const newer = ok({ op: 'commit', parent: tip, files: { 'index.html': b64('<h1>Newer</h1>') } });
+assert.notEqual(newer.tip, tip);
+assert.equal(unchanged.result.tip, tip, 'a later commit cannot change the acknowledged metadata-only base');
+assert.equal(call({ op: 'commit', parent: tip, files: { 'index.html': b64('<h1>page</h1>') } }).code, 'conflict');
+
 console.log(JSON.stringify({ tickets: tickets.length, changes: changes.length, since: since.length, info: Boolean(tipUuid) }));

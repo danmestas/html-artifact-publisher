@@ -301,6 +301,17 @@ constructions, colon reveals, scare quotes, stock filler phrases.
 
 ## 5. Naming the artifact
 
+On initial publish choose and pass the closest generic icon with
+`--icon document|chart|calendar|code|slides|checklist|notes|image|map|book|calculator|recipe`.
+Use `document` if no better fit; do not randomize or re-pick on ordinary updates.
+Use a generic description, not a brand. This stable
+metadata controls the outer viewer tab favicon and decorative library icon;
+`document` is the default. Updates without `--icon` preserve the choice. The
+publisher does not alter the supplied HTML or its favicon. Keep any existing
+custom favicon; for a new standalone page, choose a matching simple symbol for
+a self-contained SVG favicon with browser-scheme-aware colors. The starter's
+document glyph is an example, not a symbol to copy for every artifact.
+
 The CLI `--title` option names the artifact in the viewer bar and in
 `list` (without it the filename is used, so always pass it). The page's
 `<title>` sets the browser tab; give both the same name. Make it a name, not a
@@ -381,6 +392,7 @@ page needs other viewers' changes. See **artifact-runtime**.
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Kiln Firing Log</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2327313d' stroke-width='1.7'%3E%3Cstyle%3E@media(prefers-color-scheme:dark){svg{stroke:%23e5e9ef}}%3C/style%3E%3Cpath d='M6 3h8l4 4v14H6zM14 3v5h4M9 12h6m-6 4h6'/%3E%3C/svg%3E">
 <style>
   :root {
     /* Layout: one column, 44rem measure, table scrolls on phones */

@@ -11,6 +11,7 @@ import { basename, dirname, join, relative, sep } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { userInfo } from 'node:os';
 import { Artifact, ConflictError, createArtifact, listArtifacts, parseFragment } from '../public/client.js';
+import { ICON_NAMES, validIcon } from '../public/icons.js';
 import { loadPikchr, pikchrBlocks } from './pikchr.mjs';
 import { redact, runWatch } from './watch.mjs';
 
@@ -26,6 +27,8 @@ Usage:
 
 Publish options:
   --title <text>     Title for the artifact (default: filename)
+  --icon <name>      Generic icon (publish and update; omitted updates preserve it).
+                     ${ICON_NAMES.join(', ')}
   --ttl <duration>   Time-to-live: 1h, 6h, 24h, 7d, 30d, never (default: 7d)
   --slug <slug>      Optional vanity slug
   --message <text>   Check-in comment (default: "Publish <name>" / "Update <name>")
@@ -67,7 +70,7 @@ Links:
 // ---------------------------------------------------------------------------
 
 const args = process.argv.slice(2);
-const flagsWithValues = new Set(['--title', '--ttl', '--slug', '--message', '--notes', '--out', '--since', '--interval', '--cache']);
+const flagsWithValues = new Set(['--icon', '--title', '--ttl', '--slug', '--message', '--notes', '--out', '--since', '--interval', '--cache']);
 const hasFlag = flag => args.includes(flag);
 const flagValue = flag => {
   const i = args.indexOf(flag);
@@ -88,6 +91,8 @@ if (hasFlag('--help') || hasFlag('-h')) {
 const COMMANDS = new Set(['publish', 'update', 'read', 'history', 'list', 'delete', 'watch']);
 const command = COMMANDS.has(positional[0]) ? positional.shift() : 'publish';
 
+const icon = flagValue('--icon');
+if (hasFlag('--icon') && (!icon || !validIcon(icon))) die(`--icon must be one of: ${ICON_NAMES.join(', ')}`);
 const jsonOnly = hasFlag('--json');
 const shouldCopy = !hasFlag('--no-clipboard') && (!jsonOnly || hasFlag('--copy'));
 const user = process.env.USER || safeUser();
@@ -219,6 +224,7 @@ async function publish() {
 
   const result = await createArtifact(base, token, {
     title,
+    icon,
     files,
     user,
     message: flagValue('--message') ?? `Publish ${sourceName}`,
@@ -259,7 +265,7 @@ async function update() {
   let result;
   try {
     result = await link.art.publish(tip, files, flagValue('--message') ?? `Update ${basename(filePath)}`, {
-      title: flagValue('--title'), user,
+      title: flagValue('--title'), user, icon,
     });
   } catch (e) {
     if (e instanceof ConflictError) die(`${e.message}. Nothing was saved.`, 3);

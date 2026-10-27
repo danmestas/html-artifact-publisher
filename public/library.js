@@ -1,5 +1,6 @@
 import { encodeFiles, readFileList, withBlobs } from './client.js';
 import { isBlob } from './blobs.js';
+import { iconSvg } from './icons.js';
 
 const $ = id => document.getElementById(id);
 const LIBRARY_VIEWS = ['all', 'mine', 'shared', 'starred', 'archived'];
@@ -442,6 +443,9 @@ function renderArtifacts(items, inventory) {
   const list = node('div', { className: grid ? 'artifact-grid' : 'artifact-list', role: 'list' });
   for (const item of items) {
     const title = node('a', { className: 'artifact-title', href: viewerUrl(item), title: item.title, textContent: item.title || 'Untitled artifact' });
+    const icon = node('span', { className: 'artifact-icon', ariaHidden: 'true' });
+    icon.innerHTML = iconSvg(item.icon);
+    title.prepend(icon);
     if (item.starred) title.prepend(node('span', { className: 'star-mark', textContent: '★', ariaLabel: 'Starred' }));
     const summary = node('div', {}, title, node('div', { className: 'shelf-meta' },
       node('span', { className: 'access-badge', textContent: item.accessLabel }),

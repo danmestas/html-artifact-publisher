@@ -8,6 +8,7 @@
 //   await art.publish(tip, { 'index.html': bytes }, 'Fix the totals');  // throws ConflictError if tip moved
 
 import { isBlob, parsePointer, pointerFor } from './blobs.js';
+import { validIcon } from './icons.js';
 
 const enc = new TextEncoder();
 
@@ -136,9 +137,10 @@ export class Artifact {
   }
 
   /** A new check-in on top of `parent`, which must still be the tip. Returns { tip, parent }. */
-  async publish(parent, files, message, { title, user } = {}) {
+  async publish(parent, files, message, { title, user, icon } = {}) {
+    if (!validIcon(icon)) throw new TypeError('Invalid artifact icon');
     const stored = await withBlobs(files, `${this.base}/blobs`, this.auth);
-    return call(this.base, { method: 'PUT', auth: this.auth, body: { parent, files: encodeFiles(stored), message, title, user } });
+    return call(this.base, { method: 'PUT', auth: this.auth, body: { parent, files: encodeFiles(stored), message, title, user, icon } });
   }
 
   remove() { return call(this.base, { method: 'DELETE', auth: this.auth }); }
@@ -160,10 +162,11 @@ export class Artifact {
 }
 
 /** Owner calls, with the bearer token. */
-export async function createArtifact(origin, bearer, { title, slug, ttlSeconds, message, user, files }) {
+export async function createArtifact(origin, bearer, { title, slug, ttlSeconds, message, user, files, icon }) {
+  if (!validIcon(icon)) throw new TypeError('Invalid artifact icon');
   const stored = await withBlobs(files, `${origin}/api/blobs`, `Bearer ${bearer}`);
   return call(`${origin}/api/artifacts`, {
-    method: 'POST', auth: `Bearer ${bearer}`, body: { title, slug, ttlSeconds, message, user, files: encodeFiles(stored) },
+    method: 'POST', auth: `Bearer ${bearer}`, body: { title, slug, ttlSeconds, message, user, icon, files: encodeFiles(stored) },
   });
 }
 

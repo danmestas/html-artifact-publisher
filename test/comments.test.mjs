@@ -1,6 +1,25 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { anchorFor, arrange, findQuotes, thread } from '../public/comments.js';
+import { anchorFor, arrange, decodePointAnchor, encodePointAnchor, findQuotes, thread } from '../public/comments.js';
+
+test('point anchors have a bounded, exact wire format and round normalized positions', () => {
+  const anchor = encodePointAnchor({ id: 'intro', path: [1, 0], x: .123456, y: 1 });
+  assert.equal(anchor, 'hap-point:{"id":"intro","path":[1,0],"x":0.1235,"y":1}');
+  assert.deepEqual(decodePointAnchor(anchor), { id: 'intro', path: [1, 0], x: .1235, y: 1 });
+  assert.equal(encodePointAnchor({ id: 'a'.repeat(161), path: [], x: 0, y: .5 }), 'hap-point:{"id":"","path":[],"x":0,"y":0.5}');
+  assert.equal(encodePointAnchor({ id: '\\'.repeat(160), path: Array(32).fill(65535), x: 0, y: 0 }), '');
+  for (const bad of [null, {}, { id: '', path: [], x: -1, y: 0 }, { id: '', path: [], x: Infinity, y: 0 }, { id: '', path: [1.5], x: 0, y: 0 }, { id: '', path: [-1], x: 0, y: 0 }, { id: '', path: [65536], x: 0, y: 0 }, { id: '', path: Array(33).fill(0), x: 0, y: 0 }, { id: '', path: Array(1), x: 0, y: 0 }, { id: 'a\u0000b', path: [], x: 0, y: 0 }]) {
+    assert.equal(encodePointAnchor(bad), '');
+  }
+});
+
+test('point anchor decoder rejects malformed or extended data and is self-contained', () => {
+  const good = { id: '', path: [], x: 0, y: 1 };
+  for (const value of [null, '', 'intro', 'hap-point:', 'hap-point:null', 'hap-point:[]', 'hap-point:' + JSON.stringify({ ...good, extra: true }), 'hap-point:' + JSON.stringify({ ...good, x: '0' }), 'hap-point:' + JSON.stringify({ ...good, id: 'x'.repeat(161) }), 'hap-point:' + JSON.stringify({ ...good, path: Array(33).fill(0) }), 'hap-point:' + JSON.stringify({ ...good, y: 1.1 }), 'hap-point:' + ' '.repeat(501)]) assert.equal(decodePointAnchor(value), null);
+  const encode = new Function('return (' + encodePointAnchor.toString() + ')')();
+  const decode = new Function('return (' + decodePointAnchor.toString() + ')')();
+  assert.deepEqual(decode(encode(good)), good);
+});
 
 const ticket = (status, changes, fields = {}) => ({
   uuid: 'a'.repeat(40), status, changed: '2026-10-26T00:00:00Z',

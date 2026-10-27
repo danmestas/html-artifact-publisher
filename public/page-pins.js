@@ -1,25 +1,15 @@
-// page-pins.js — comment pins, drawn inside the sandboxed page. viewer.js
-// injects pagePins as source, after the window.artifact bridge, with findQuotes
-// and anchorFor from comments.js as its arguments, so it uses nothing else.
-//
-// The viewer sends only what a pin needs: each anchored thread's label, its
-// anchor and whether it is resolved, and the viewer's colours. No ticket text
-// and no token enter the page. The page answers with the labels it placed,
-// asks the viewer to open a thread when a pin is clicked, and reports the
-// reader's selection as an anchor for a new comment.
-//
-// An anchor is an element id, found with getElementById, else a quote of the
-// page's text; it is never used as a selector or as markup.
+// page-pins.js — pins and explicit point placement inside the sandboxed page.
+// All four anchor helpers are injected as source. No ticket text or token
+// enters the page, and anchors are never used as selectors or markup.
 
-export function pagePins(findQuotes, anchorFor) {
+export function pagePins(findQuotes, anchorFor, encodePointAnchor, decodePointAnchor) {
   const PIN = 28;
-  const MAX_PINS = 500, MAX_ANCHOR = 500; // the ticket route's anchor limit
-  const SETTLE_MS = 250, EVERY_MS = 1000;  // re-find anchors after a change, at most once a second
-  let wanted = [];     // [{ key, anchor, resolved }] from the viewer
-  let colors = {};
-  let targets = [];    // [{ pin, node, box, el }]: box() is the anchor's viewport rectangle
-  let host = null, root = null, placed = '', selected = '', frame = 0, relocating = 0, relocated = 0;
-
+  const MAX_PINS = 500, MAX_ANCHOR = 500;
+  const SETTLE_MS = 250, EVERY_MS = 1000;
+  let wanted = [], colors = {}, targets = [];
+  let host = null, root = null, highlight = null, placementLayer = null;
+  let placed = '', selected = '', frame = 0, relocating = 0, relocated = 0;
+  let placing = false, tracked = '', trackedTarget = null;
   const send = message => parent.postMessage({ __artifactPins: 1, ...message }, '*');
 
   function textNodes() {
@@ -32,17 +22,38 @@ export function pagePins(findQuotes, anchorFor) {
     return nodes;
   }
 
-  /**
-   * Each wanted anchor's element and rectangle, or nothing when it is not on
-   * this page: ids first, then every quote against the page's text, collapsed once.
-   */
-  function locateAll() {
-    const found = new Map();
-    const quotes = [];
-    for (const pin of wanted) {
-      const el = document.getElementById(pin.anchor);
-      if (el) found.set(pin, { node: el, box: () => el.getBoundingClientRect() });
-      else quotes.push(pin);
+  function pageBox() {
+    const el = document.documentElement, body = document.body;
+    return { left: -scrollX, top: -scrollY,
+      width: Math.max(innerWidth, el.scrollWidth, body ? body.scrollWidth : 0),
+      height: Math.max(innerHeight, el.scrollHeight, body ? body.scrollHeight : 0) };
+  }
+
+  function elementTarget(el, point) {
+    return { node: el, box: () => {
+      if (!el.isConnected || !el.getClientRects().length) return null;
+      const style = getComputedStyle(el);
+      if (style.visibility === 'hidden' || style.visibility === 'collapse' || style.display === 'none') return null;
+      const r = point && el === document.documentElement ? pageBox() : el.getBoundingClientRect();
+      if (!r.width && !r.height) return null;
+      return point ? { left: r.left + r.width * point.x, top: r.top + r.height * point.y, width: r.width, height: r.height } : r;
+    } };
+  }
+
+  function locateAll(pins) {
+    const found = new Map(), quotes = [];
+    for (const pin of pins) {
+      let el = document.getElementById(pin.anchor);
+      if (el && el !== host) { found.set(pin, elementTarget(el)); continue; }
+      const point = decodePointAnchor(pin.anchor);
+      if (point) {
+        if (point.id) el = document.getElementById(point.id);
+        else {
+          el = document.documentElement;
+          for (const index of point.path) { el = el && el.children[index]; }
+        }
+        if (el && el !== host) found.set(pin, elementTarget(el, point));
+      } else quotes.push(pin);
     }
     if (quotes.length) {
       const nodes = textNodes();
@@ -51,7 +62,11 @@ export function pagePins(findQuotes, anchorFor) {
         const range = document.createRange();
         range.setStart(nodes[hit.start[0]], hit.start[1]);
         range.setEnd(nodes[hit.end[0]], hit.end[1]);
-        found.set(quotes[i], { node: nodes[hit.start[0]].parentElement, box: () => range.getClientRects()[0] || range.getBoundingClientRect() });
+        const node = nodes[hit.start[0]].parentElement;
+        found.set(quotes[i], { node, box: () => {
+          if (!node.isConnected || getComputedStyle(node).visibility === 'hidden') return null;
+          return range.getClientRects()[0] || range.getBoundingClientRect();
+        } });
       });
     }
     return found;
@@ -61,7 +76,7 @@ export function pagePins(findQuotes, anchorFor) {
     if (host && host.isConnected) return;
     host = document.createElement('div');
     host.setAttribute('data-artifact-pins', '');
-    Object.assign(host.style, { position: 'fixed', top: '0', left: '0', width: '0', height: '0', overflow: 'visible', zIndex: '2147483647' });
+    Object.assign(host.style, { position: 'fixed', top: '0', left: '0', width: '0', height: '0', overflow: 'visible', pointerEvents: 'none', zIndex: '2147483647' });
     root = host.attachShadow({ mode: 'open' });
     document.documentElement.append(host);
   }
@@ -73,29 +88,38 @@ export function pagePins(findQuotes, anchorFor) {
     b.dataset.resolved = String(pin.resolved);
     b.setAttribute('aria-label', `Comment ${pin.key}${pin.resolved ? ', resolved' : ''}`);
     Object.assign(b.style, {
-      position: 'absolute', width: `${PIN}px`, height: `${PIN}px`, margin: '0', padding: '0', cursor: 'pointer',
+      position: 'absolute', width: `${PIN}px`, height: `${PIN}px`, margin: '0', padding: '0', cursor: 'pointer', pointerEvents: 'auto',
       display: 'grid', placeItems: 'center', boxSizing: 'border-box', borderRadius: '50% 50% 50% 4px',
       border: `2px solid ${colors.surface || '#FFFFFF'}`, background: pin.resolved ? colors.muted || '#5F5E5A' : colors.accent || '#8F430B',
       color: colors.surface || '#FFFFFF', font: '600 12px/1 system-ui, sans-serif', boxShadow: '0 2px 6px rgba(0, 0, 0, 0.3)',
       opacity: pin.resolved ? '0.8' : '1',
     });
-    b.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); send({ type: 'open', key: pin.key }); });
+    b.addEventListener('click', e => {
+      e.preventDefault(); e.stopImmediatePropagation();
+      const r = b.getBoundingClientRect();
+      send({ type: 'open', key: pin.key, x: r.left, y: r.bottom });
+    });
     return b;
   }
 
-  // Find every anchor again (after new threads or a change to the page), then draw.
+  const resize = new ResizeObserver(() => schedule());
   function relocate() {
     relocated = Date.now();
-    const found = locateAll();
+    const track = { anchor: tracked };
+    const found = locateAll(tracked ? [...wanted, track] : wanted);
     targets = wanted.filter(pin => found.has(pin)).map(pin => ({ pin, ...found.get(pin), el: null }));
+    trackedTarget = tracked ? found.get(track) || null : null;
     ensureHost();
     root.replaceChildren(...targets.map(t => (t.el = button(t.pin))));
+    placementLayer = highlight = null;
+    if (placing) showPlacement();
+    resize.disconnect();
+    resize.observe(document.documentElement);
+    if (document.body) resize.observe(document.body);
+    for (const t of [...targets, trackedTarget].filter(Boolean)) resize.observe(t.node);
     draw();
   }
 
-  // A pin's tail (its square corner) sits on its anchor's top-left corner,
-  // the pin above the text, in viewport coordinates, so it follows the page
-  // and any inner scroller. An anchor with no box (a hidden element) is not placed.
   function draw() {
     frame = 0;
     const keys = [], seen = new Map();
@@ -114,33 +138,96 @@ export function pagePins(findQuotes, anchorFor) {
     }
     const now = keys.sort((a, b) => a - b).join(',');
     if (now !== placed) { placed = now; send({ type: 'placed', keys }); }
+    if (tracked) {
+      const r = trackedTarget && trackedTarget.box();
+      send(r && (r.width || r.height) ? { type: 'position', anchor: tracked, x: r.left, y: r.top } : { type: 'position', anchor: tracked, unavailable: true });
+    }
   }
   const schedule = () => { if (!frame) frame = requestAnimationFrame(draw); };
+
+  function showPlacement() {
+    ensureHost();
+    placementLayer = document.createElement('div');
+    Object.assign(placementLayer.style, { position: 'fixed', inset: '0', cursor: 'crosshair', pointerEvents: 'auto' });
+    highlight = document.createElement('div');
+    Object.assign(highlight.style, { position: 'fixed', pointerEvents: 'none', border: `1px dashed ${colors.accent || '#8F430B'}`, boxSizing: 'border-box', display: 'none' });
+    root.prepend(placementLayer);
+    root.append(highlight);
+  }
+
+  function setPlacement(active) {
+    placing = active;
+    placementLayer?.remove(); highlight?.remove();
+    placementLayer = highlight = null;
+    if (placing) showPlacement();
+  }
+
+  function atPoint(x, y) {
+    return document.elementsFromPoint(x, y).find(el => el !== host) || document.documentElement;
+  }
+
+  function place(x, y) {
+    let el = atPoint(x, y);
+    if (el === document.body) el = document.documentElement;
+    const path = [];
+    for (let node = el; node !== document.documentElement; node = node.parentElement) {
+      if (!node || !node.parentElement || path.length >= 32) return;
+      path.unshift(Array.prototype.indexOf.call(node.parentElement.children, node));
+    }
+    const r = el === document.documentElement ? pageBox() : el.getBoundingClientRect();
+    if (!r.width || !r.height) return;
+    const clamp = n => Math.max(0, Math.min(1, n));
+    const anchor = encodePointAnchor({ id: el === document.documentElement ? '' : el.id || '', path, x: clamp((x - r.left) / r.width), y: clamp((y - r.top) / r.height) });
+    if (anchor) { setPlacement(false); send({ type: 'point', anchor, x, y }); }
+  }
 
   addEventListener('message', e => {
     const d = e.data;
     if (e.source !== parent || !d || d.__artifactPins !== 1) return;
     if (d.type === 'pins' && Array.isArray(d.pins)) {
-      wanted = d.pins.filter(p => p && Number.isInteger(p.key) && typeof p.anchor === 'string' && p.anchor && p.anchor.length <= MAX_ANCHOR)
+      wanted = d.pins.filter(p => p && Number.isInteger(p.key) && typeof p.anchor === 'string' && p.anchor && p.anchor.length <= MAX_ANCHOR && !p.anchor.includes('\0'))
         .slice(0, MAX_PINS).map(p => ({ key: p.key, anchor: p.anchor, resolved: p.resolved === true }));
       colors = d.colors && typeof d.colors === 'object' ? d.colors : {};
       placed = null;
       relocate();
+    } else if (d.type === 'placement' && typeof d.active === 'boolean') setPlacement(d.active);
+    else if (d.type === 'track' && typeof d.anchor === 'string' && d.anchor.length <= MAX_ANCHOR && !d.anchor.includes('\0')) {
+      tracked = d.anchor; relocate();
     } else if (d.type === 'reveal') {
       const t = targets.find(x => x.pin.key === d.key);
-      if (t && t.node) t.node.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      if (t && t.node) t.node.scrollIntoView({ block: 'center', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
     }
   });
   addEventListener('scroll', schedule, true);
   addEventListener('resize', schedule);
-  // A page that builds itself with script: find the anchors again once it
-  // settles, and no more than once a second however often it changes.
-  new MutationObserver(() => {
+  new MutationObserver(records => {
+    const external = records.some(r => r.target !== host && !host?.contains(r.target) &&
+      (r.type !== 'childList' || [...r.addedNodes, ...r.removedNodes].some(n => n !== host)));
+    if (!external) return;
+    schedule();
     clearTimeout(relocating);
     const wait = Math.max(SETTLE_MS, relocated + EVERY_MS - Date.now());
-    relocating = setTimeout(() => { if (wanted.length) relocate(); }, wait);
-  }).observe(document.documentElement, { childList: true, subtree: true, characterData: true });
+    relocating = setTimeout(() => { if (wanted.length || tracked) relocate(); }, wait);
+  }).observe(document.documentElement, { childList: true, subtree: true, characterData: true, attributes: true });
 
+  document.addEventListener('pointermove', e => {
+    if (!placing || !highlight) return;
+    const r = atPoint(e.clientX, e.clientY).getBoundingClientRect();
+    Object.assign(highlight.style, { display: 'block', left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px` });
+  }, true);
+  document.addEventListener('click', e => {
+    if (e.composedPath().some(n => n instanceof Element && n.getRootNode() === root && n.tagName === 'BUTTON')) return;
+    if (placing) { e.preventDefault(); e.stopImmediatePropagation(); place(e.clientX, e.clientY); }
+    else send({ type: 'dismiss' });
+  }, true);
+  document.addEventListener('keydown', e => {
+    if (!placing) return;
+    if (e.key === 'Escape' || e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault(); e.stopImmediatePropagation();
+      if (e.key === 'Escape') { setPlacement(false); send({ type: 'cancel' }); }
+      else place(innerWidth / 2, innerHeight / 2);
+    }
+  }, true);
   document.addEventListener('selectionchange', () => {
     const sel = getSelection();
     let anchor = '';

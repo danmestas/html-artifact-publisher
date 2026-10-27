@@ -8,7 +8,7 @@ import { renderDiagrams, renderPikchr } from './diagrams.js';
 import { embedFonts } from './fonts.js';
 import { zip } from './zip.js';
 import { preparePublication } from './export.js';
-import { anchorFor, arrange, controls, findQuotes, responderNote, thread } from './comments.js';
+import { anchorFor, arrange, controls, decodePointAnchor, encodePointAnchor, findQuotes, responderNote, thread } from './comments.js';
 import { pagePins } from './page-pins.js';
 
 const $ = id => document.getElementById(id);
@@ -114,7 +114,7 @@ const RUNTIME = `(function(){
     t.scrollIntoView({ block: 'start' });
   }, true);
 })();
-(${pagePins})(${findQuotes}, ${anchorFor});`;
+(${pagePins})(${findQuotes}, ${anchorFor}, ${encodePointAnchor}, ${decodePointAnchor});`;
 
 // The page renders in a sandboxed iframe with an opaque origin, which cannot
 // load this page's blob: URLs. So the other files of the check-in are inlined:
@@ -186,6 +186,8 @@ async function render() {
   if (frameUrl) URL.revokeObjectURL(frameUrl);
   frameUrl = URL.createObjectURL(new Blob(['<!DOCTYPE html>\n' + doc.documentElement.outerHTML], { type: 'text/html' }));
   const frame = $('frame');
+  closePanel();
+  setPlacement(false);
   frameReady = false;
   frame.onload = () => {
     $('shell').style.display = 'none';
@@ -229,6 +231,10 @@ function renderChrome() {
 
   $('bar').hidden = false;
   $('title').textContent = info.title || 'Untitled';
+  $('artifactDetails').textContent = info.title || 'Untitled';
+  $('titleBtn').title = info.title || 'Untitled';
+  $('readCue').hidden = info.role !== 'read';
+  $('stage').classList.toggle('readonly', info.role === 'read');
   $('versionHash').textContent = shortId(shown.checkin);
   $('versionTag').textContent = latest ? 'Latest' : current ? ago(current.time) : '';
   $('versionTag').className = latest ? 'tag latest' : 'tag';
@@ -237,19 +243,18 @@ function renderChrome() {
   $('updated').textContent = head ? `Updated ${ago(head.time)} by ${head.user}` : '';
   $('role').textContent = writer ? 'Can edit' : can.commentBox ? 'Can comment' : 'View only';
   $('role').className = `pill ${writer ? 'write' : 'read'}`;
-  $('commentForm').hidden = !can.commentBox;
+  $('commentForm').hidden = !can.commentBox || $('threadPanel').dataset.mode !== 'draft';
   $('deleteBtn').hidden = !writer || (!link.token && !info.canManage);
   $('uploadFilesBtn').hidden = $('uploadFolderBtn').hidden = !writer;
-  $('openLatest').hidden = latest;
-  // The menu always has Download, so the ⋯ button always shows.
-  $('backLibrary').hidden = !!link.token;
+  $('backLibrary').hidden = false;
 
   $('oldStrip').hidden = latest;
   $('restoreBtn').hidden = latest || !writer;
   $('backLatest').href = fragment({ token: link.token });
   if (!latest && current) {
     const when = new Date(current.time).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
-    $('oldText').textContent = `You are viewing “${current.comment || 'an untitled check-in'}” by ${current.user}, ${when}. `
+    $('oldText').textContent = `Viewing an older version · ${index} newer`;
+    $('oldText').title = `“${current.comment || 'an untitled check-in'}” by ${current.user}, ${when}. `
       + `${index} newer version${index === 1 ? ' exists' : 's exist'}.`;
   }
 
@@ -270,11 +275,17 @@ let pins = [];           // what the page was last sent
 let placed = null;       // labels the page placed, or null before it answered
 let selection = '';      // the anchor of the reader's selection in the page
 let focused = '';        // uuid of the thread a pin opened
+let placing = false;     // explicit reader consent to pick a location
+let panelPoint = null;   // active anchor in the iframe's viewport coordinates
+let draftAnchor = '';    // a picked location survives closing the composer
+let commentBusy = false;
+let trackedAnchor = '';  // echoed by the page; stale position messages are ignored
 const expanded = new Map(); // uuid -> open, once the reader toggled it
 const drafts = new Map();   // uuid -> reply text not yet sent
 const views = new Map();    // uuid -> its element in the panel
 
 const quoted = s => `“${s}”`;
+const anchorName = anchor => decodePointAnchor(anchor) ? 'Page location' : quoted(anchor);
 
 function anchored(t) {
   if (!t.anchor) return 'none';
@@ -285,9 +296,9 @@ function anchored(t) {
 function anchorLine(t) {
   const state = anchored(t);
   if (state === 'none') return null;
-  if (state === 'no') return el('p', { className: 'anchor unanchored', textContent: `Not found in this version: ${quoted(t.anchor)}` });
-  if (state === 'pending') return el('p', { className: 'anchor', textContent: `On ${quoted(t.anchor)}` });
-  const show = el('button', { type: 'button', textContent: `On ${quoted(t.anchor)}` });
+  if (state === 'no') return el('p', { className: 'anchor unanchored', textContent: `Not found in this version: ${anchorName(t.anchor)}` });
+  if (state === 'pending') return el('p', { className: 'anchor', textContent: `On ${anchorName(t.anchor)}` });
+  const show = el('button', { type: 'button', textContent: `On ${anchorName(t.anchor)}` });
   show.addEventListener('click', () => post({ type: 'reveal', key: t.label }));
   return el('p', { className: 'anchor' }, show);
 }
@@ -308,7 +319,13 @@ function threadView(t, can) {
       can.commentBox ? replyForm(t) : null));
   view.dataset.label = String(t.label);
   view.dataset.anchored = anchored(t);
-  view.open = expanded.get(t.uuid) ?? !t.resolved;
+  view.open = expanded.get(t.uuid) ?? (!t.resolved && t.uuid === focused);
+  view.querySelector('summary').addEventListener('click', e => {
+    if ($('threadPanel').dataset.mode !== 'index') return;
+    e.preventDefault();
+    activateThread(t);
+    if (anchored(t) === 'yes') post({ type: 'reveal', key: t.label });
+  });
   // Remember only what the reader changed, so a thread resolved elsewhere still collapses.
   view.addEventListener('toggle', () => (view.open === !t.resolved ? expanded.delete(t.uuid) : expanded.set(t.uuid, view.open)));
   views.set(t.uuid, view);
@@ -325,7 +342,8 @@ function replyForm(t) {
   const send = el('button', { type: 'submit', className: 'primary', textContent: 'Reply' });
   const form = el('form', { className: 'reply' }, text, el('div', { className: 'comment-actions' }, status, resolve, send));
   const change = async (body, doing) => {
-    resolve.disabled = send.disabled = true;
+    if (commentBusy) return;
+    commentBusy = resolve.disabled = send.disabled = text.readOnly = true;
     status.textContent = doing;
     try {
       await art.comment({ ticketUuid: t.uuid, ...body });
@@ -336,7 +354,8 @@ function replyForm(t) {
       views.get(t.uuid)?.scrollIntoView({ block: 'nearest' });
     } catch (err) {
       status.textContent = `Could not save: ${err.message}`;
-      resolve.disabled = send.disabled = false;
+    } finally {
+      commentBusy = resolve.disabled = send.disabled = text.readOnly = false;
     }
   };
   form.addEventListener('submit', e => {
@@ -370,14 +389,23 @@ function renderThreads() {
 }
 
 function renderAnchor() {
-  $('commentAnchor').textContent = selection ? `On ${quoted(selection)}` : 'Select text in the page to comment on it.';
-  $('anchorClear').hidden = !selection;
+  const anchor = draftAnchor || selection;
+  $('commentAnchor').textContent = anchor ? `On ${anchorName(anchor)}` : 'Comment on the page, select text, or place a comment anywhere.';
+  $('anchorClear').hidden = !anchor;
+  $('placeComment').hidden = $('generalComment').hidden = !controls(info).commentBox;
+  $('placeComment').textContent = draftAnchor ? 'Continue draft' : 'Place a comment';
+  $('generalComment').textContent = selection ? 'Comment on selection' : 'General comment';
 }
 
 /** A message to the page's pins (page-pins.js). The page's origin is opaque, so '*'. */
 function post(message) {
   const page = $('frame').contentWindow;
   if (frameReady && page) page.postMessage({ __artifactPins: 1, ...message }, '*');
+}
+
+function trackAnchor(anchor) {
+  trackedAnchor = anchor;
+  post({ type: 'track', anchor });
 }
 
 function sendPins() {
@@ -391,11 +419,19 @@ function sendPins() {
 new MutationObserver(sendPins).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', sendPins);
 
+// The sandbox is untrusted. It can suggest a position, never post a comment,
+// confer permission, or take a draft away from the reader.
+const pagePoint = d => Number.isFinite(d.x) && Number.isFinite(d.y)
+  && Math.abs(d.x) <= 10_000_000 && Math.abs(d.y) <= 10_000_000 ? { x: d.x, y: d.y } : null;
+function isTyping() {
+  const active = document.activeElement;
+  return active?.matches('#threadPanel textarea') && active.value.trim();
+}
 addEventListener('message', e => {
   const d = e.data;
-  if (e.source !== $('frame').contentWindow || !d || d.__artifactPins !== 1) return;
+  if (!info || !frameReady || e.source !== $('frame').contentWindow || !d || d.__artifactPins !== 1) return;
   if (d.type === 'placed' && Array.isArray(d.keys)) {
-    placed = new Set(d.keys.filter(Number.isInteger));
+    placed = new Set(d.keys.filter(Number.isInteger).slice(0, 500));
     for (const view of document.querySelectorAll('#threadPanel .thread')) {
       const t = threads.find(x => String(x.label) === view.dataset.label);
       if (!t) continue;
@@ -403,24 +439,36 @@ addEventListener('message', e => {
       view.querySelector('.anchor')?.replaceWith(anchorLine(t) ?? '');
     }
   } else if (d.type === 'open' && Number.isInteger(d.key)) {
-    // A pin's click. The page can send these at will, so the panel is changed
-    // in place, never rebuilt, and focus never leaves a reply being written.
     const t = threads.find(x => x.label === d.key);
-    const view = t && views.get(t.uuid);
-    if (!view || (focused === t.uuid && view.open && !$('threadPanel').hidden)) return;
-    focused = t.uuid;
-    expanded.set(t.uuid, true);
-    openPanel();
-    for (const other of document.querySelectorAll('#threadPanel .thread.focus')) other.classList.remove('focus');
-    view.classList.add('focus');
-    view.open = true;
-    const typing = document.activeElement;
-    if (typing?.matches('#threadPanel textarea') && typing.value.trim()) return;
-    view.scrollIntoView({ block: 'nearest' });
-    view.querySelector('summary').focus();
+    if (!t || isTyping() || commentBusy) return;
+    activateThread(t, pagePoint(d));
   } else if (d.type === 'selection' && typeof d.anchor === 'string' && controls(info).commentBox) {
     selection = Array.from(d.anchor).slice(0, 500).join('');
     renderAnchor();
+  } else if (d.type === 'point' && placing && controls(info).commentBox && pagePoint(d)
+    && decodePointAnchor(d.anchor)) {
+    draftAnchor = d.anchor;
+    selection = '';
+    setPlacement(false);
+    openPanel('draft', pagePoint(d));
+    renderAnchor();
+    trackAnchor(draftAnchor);
+    $('commentText').focus();
+  } else if (d.type === 'position' && !$('threadPanel').hidden && trackedAnchor && d.anchor === trackedAnchor) {
+    if (d.unavailable === true) {
+      panelPoint = null;
+      $('threadPanel').style.left = $('threadPanel').style.top = $('threadPanel').style.right = '';
+      $('commentsNote').textContent = 'Location not found';
+    } else if (pagePoint(d)) {
+      panelPoint = pagePoint(d);
+      positionPanel();
+    }
+  } else if (d.type === 'cancel' && placing) {
+    setPlacement(false);
+    closePanel();
+    $('commentsBtn').focus();
+  } else if (d.type === 'dismiss' && !placing && !isTyping() && !commentBusy) {
+    closePopovers();
   }
 });
 
@@ -442,47 +490,138 @@ function renderResponder() {
   $('responderContact').textContent = n.contact ? `(${n.contact})` : '';
 }
 
-function openPanel() {
-  closePopovers();
-  $('threadPanel').hidden = false;
-  $('commentsBtn').setAttribute('aria-expanded', 'true');
+function positionPanel() {
+  const panel = $('threadPanel'), stage = $('stage').getBoundingClientRect();
+  if (panel.hidden || !panelPoint) return;
+  const frame = $('frame').getBoundingClientRect();
+  const x = frame.left - stage.left + panelPoint.x, y = frame.top - stage.top + panelPoint.y;
+  const width = panel.offsetWidth, height = panel.offsetHeight;
+  const clamp = (n, max) => Math.max(8, Math.min(n, max));
+  const left = x + 32 + width <= stage.width - 8 ? x + 32 : x - width - 12;
+  panel.style.left = `${clamp(left, stage.width - width - 8)}px`;
+  panel.style.top = `${clamp(y - 12, stage.height - height - 8)}px`;
+  panel.style.right = 'auto';
 }
+new ResizeObserver(positionPanel).observe($('stage'));
+new ResizeObserver(positionPanel).observe($('threadPanel'));
 
-$('commentsBtn').addEventListener('click', e => {
-  e.stopPropagation();
-  if ($('threadPanel').hidden) {
-    openPanel();
-    loadThreads();
-  } else {
-    $('threadClose').click();
-  }
-});
-$('threadClose').addEventListener('click', () => {
+function setPlacement(active) {
+  placing = active && !commentBusy && !!info && controls(info).commentBox;
+  $('placementHint').hidden = !placing;
+  $('cancelPlacement').hidden = !placing;
+  post({ type: 'placement', active: placing });
+}
+function closePanel(restore = false) {
+  const wasOpen = !$('threadPanel').hidden;
   $('threadPanel').hidden = true;
   $('commentsBtn').setAttribute('aria-expanded', 'false');
-  focused = '';
-  for (const view of document.querySelectorAll('#threadPanel .thread.focus')) view.classList.remove('focus');
+  panelPoint = null;
+  trackAnchor('');
+  if (restore && wasOpen) $('commentsBtn').focus();
+}
+function openPanel(mode = 'index', point = null) {
+  closePopovers('threadPanel');
+  setPlacement(false);
+  const panel = $('threadPanel');
+  panel.dataset.mode = mode;
+  panelPoint = point;
+  panel.style.left = panel.style.top = panel.style.right = '';
+  panel.hidden = false;
+  $('panelTitle').textContent = mode === 'draft' ? 'New comment' : mode === 'thread' ? 'Comment' : 'Comments';
+  $('allComments').hidden = mode === 'index';
+  $('commentForm').hidden = !controls(info).commentBox || mode !== 'draft';
+  $('commentsBtn').setAttribute('aria-expanded', 'true');
+  if (mode === 'index') {
+    focused = '';
+    for (const view of views.values()) view.classList.remove('focus');
+    trackAnchor('');
+  }
+  positionPanel();
+}
+function activateThread(t, point = null) {
+  const view = views.get(t.uuid);
+  if (!view) return;
+  focused = t.uuid;
+  expanded.set(t.uuid, true);
+  for (const other of views.values()) other.classList.toggle('focus', other === view);
+  view.open = true;
+  openPanel('thread', point || { x: $('frame').clientWidth / 2, y: 40 });
+  $('panelTitle').textContent = `Comment ${t.label}`;
+  trackAnchor(t.anchor);
+}
+$('commentsBtn').addEventListener('click', e => {
+  e.stopPropagation();
+  if ($('threadPanel').hidden || $('threadPanel').dataset.mode !== 'index') {
+    openPanel();
+    loadThreads();
+  } else closePanel(true);
 });
+$('threadClose').addEventListener('click', () => closePanel(true));
+$('allComments').addEventListener('click', () => openPanel());
 $('threadPanel').addEventListener('click', e => e.stopPropagation());
-$('anchorClear').addEventListener('click', () => { selection = ''; renderAnchor(); });
+$('anchorClear').addEventListener('click', () => {
+  if (commentBusy) return;
+  selection = draftAnchor = '';
+  panelPoint = null;
+  trackAnchor('');
+  renderAnchor();
+});
+$('generalComment').addEventListener('click', () => {
+  if (commentBusy || !controls(info).commentBox) return;
+  if (draftAnchor && $('commentText').value.trim()) {
+    $('placeComment').click();
+    return;
+  }
+  draftAnchor = '';
+  openPanel('draft');
+  $('commentText').focus();
+});
+$('placeComment').addEventListener('click', () => {
+  if (commentBusy || !controls(info).commentBox) return;
+  if (draftAnchor) {
+    openPanel('draft', { x: $('frame').clientWidth / 2, y: 40 });
+    trackAnchor(draftAnchor);
+    $('commentText').focus();
+    return;
+  }
+  closePopovers();
+  setPlacement(true);
+  $('frame').focus();
+});
+$('cancelPlacement').addEventListener('click', e => { e.stopPropagation(); setPlacement(false); openPanel(); });
+$('cancelComment').addEventListener('click', () => {
+  if (commentBusy) return;
+  $('commentText').value = '';
+  selection = draftAnchor = '';
+  $('commentStatus').textContent = '';
+  closePanel(true);
+  renderAnchor();
+});
+$('threadPanel').addEventListener('keydown', e => {
+  if (e.key === 'Escape') { e.stopPropagation(); closePanel(true); }
+});
 
 $('commentForm').addEventListener('submit', async e => {
   e.preventDefault();
   const text = $('commentText').value.trim();
-  if (!text) return;
+  if (!text || commentBusy || !controls(info).commentBox) return;
+  const anchor = draftAnchor || selection, point = panelPoint;
   const button = $('commentForm').querySelector('button[type=submit]');
-  button.disabled = true;
+  commentBusy = button.disabled = $('commentText').readOnly = true;
   $('commentStatus').textContent = 'Posting…';
   try {
-    await art.comment(selection ? { text, anchor: selection } : { text });
+    const result = await art.comment(anchor ? { text, anchor } : { text });
     $('commentText').value = '';
-    selection = '';
+    selection = draftAnchor = '';
     $('commentStatus').textContent = 'Posted.';
     await loadThreads();
+    const posted = threads.find(t => t.uuid === result.ticketUuid);
+    if (posted && point) activateThread(posted, point);
+    else openPanel();
   } catch (err) {
     $('commentStatus').textContent = `Could not post: ${err.message}`;
   } finally {
-    button.disabled = false;
+    commentBusy = button.disabled = $('commentText').readOnly = false;
   }
 });
 
@@ -648,8 +787,9 @@ function renderShare() {
 }
 
 // One popover open at a time; Escape or a click elsewhere closes it.
-const popovers = [['versionBtn', 'versionMenu'], ['shareBtn', 'shareMenu'], ['moreBtn', 'moreMenu']];
+const popovers = [['titleBtn', 'titleMenu'], ['versionBtn', 'versionMenu'], ['shareBtn', 'shareMenu'], ['moreBtn', 'moreMenu']];
 function closePopovers(except) {
+  if (except !== 'threadPanel') { closePanel(); setPlacement(false); }
   for (const [btn, menu] of popovers) {
     if (menu === except) continue;
     $(menu).hidden = true;
@@ -666,15 +806,48 @@ for (const [btn, menu] of popovers) {
     if (open && menu === 'shareMenu') loadPublications();
   });
   $(menu).addEventListener('click', e => e.stopPropagation());
+  const items = () => [...$(menu).querySelectorAll('button:not(:disabled), a[href], select')].filter(n => n.getClientRects().length);
+  $(btn).addEventListener('keydown', e => {
+    if (e.key !== 'ArrowDown') return;
+    e.preventDefault();
+    if ($(menu).hidden) $(btn).click();
+    items()[0]?.focus();
+  });
+  $(menu).addEventListener('keydown', e => {
+    if (!['ArrowDown', 'ArrowUp'].includes(e.key) || e.target.matches('select, input, textarea')) return;
+    e.preventDefault();
+    const choices = items(), index = choices.indexOf(document.activeElement);
+    choices[(index + (e.key === 'ArrowDown' ? 1 : -1) + choices.length) % choices.length]?.focus();
+  });
 }
 document.addEventListener('click', () => closePopovers());
-document.addEventListener('keydown', e => { if (e.key === 'Escape') closePopovers(); });
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    const open = popovers.find(([, menu]) => !$(menu).hidden);
+    if (open || !$('threadPanel').hidden || placing) e.preventDefault();
+    closePopovers();
+    if (open) $(open[0]).focus();
+  }
+});
 $('versionList').addEventListener('click', () => closePopovers());
 
-$('openLatest').addEventListener('click', () => {
-  closePopovers();
-  location.hash = fragment({ token: link.token });
-});
+function shareTab(which, focus = false) {
+  for (const name of ['share', 'export']) {
+    const active = name === which;
+    $(`${name}Tab`).setAttribute('aria-selected', String(active));
+    $(`${name}Tab`).tabIndex = active ? 0 : -1;
+    $(`${name}Pane`).hidden = !active;
+  }
+  if (focus) $(`${which}Tab`).focus();
+}
+for (const name of ['share', 'export']) {
+  $(`${name}Tab`).addEventListener('click', () => shareTab(name));
+  $(`${name}Tab`).addEventListener('keydown', e => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
+    e.preventDefault();
+    shareTab(e.key === 'Home' ? 'share' : e.key === 'End' ? 'export' : name === 'share' ? 'export' : 'share', true);
+  });
+}
 
 $('restoreBtn').addEventListener('click', async () => {
   const btn = $('restoreBtn');

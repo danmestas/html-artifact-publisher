@@ -2,10 +2,36 @@
 // thread reads. A thread is a Fossil ticket (src/index.ts, Tickets): its
 // opening text is the ticket's comment field, a reply is a change's remark,
 // and a resolution sets its status. Its anchor (the `subsystem` field) is an
-// element id or a quote of the page's text.
+// element id, a quote of the page's text, or a bounded element-relative point.
 //
-// findQuotes and anchorFor also run inside the sandboxed page (page-pins.js):
+// The anchor helpers also run inside the sandboxed page (page-pins.js):
 // they are injected as source, so they use nothing outside themselves.
+
+/** A bounded element-relative point, safe to store in the ticket anchor field. */
+export function encodePointAnchor(point) {
+  if (!point || typeof point !== 'object') return '';
+  const { id, path, x, y } = point;
+  if (typeof id !== 'string' || id.includes('\0') || !Array.isArray(path) || path.length > 32 ||
+      !Array.from(path).every(i => Number.isInteger(i) && i >= 0 && i <= 65535) ||
+      !Number.isFinite(x) || !Number.isFinite(y) || x < 0 || x > 1 || y < 0 || y > 1) return '';
+  const anchor = 'hap-point:' + JSON.stringify({ id: id.length <= 160 ? id : '', path, x: Math.round(x * 10000) / 10000, y: Math.round(y * 10000) / 10000 });
+  return anchor.length <= 500 ? anchor : '';
+}
+
+/** Decode independently: this function is injected into the sandbox as source. */
+export function decodePointAnchor(anchor) {
+  if (typeof anchor !== 'string' || anchor.length > 500 || anchor.includes('\0') || !anchor.startsWith('hap-point:')) return null;
+  try {
+    const point = JSON.parse(anchor.slice(10));
+    if (!point || typeof point !== 'object' || Array.isArray(point) ||
+        Object.keys(point).sort().join(',') !== 'id,path,x,y') return null;
+    const { id, path, x, y } = point;
+    if (typeof id !== 'string' || id.length > 160 || id.includes('\0') || !Array.isArray(path) || path.length > 32 ||
+        !Array.from(path).every(i => Number.isInteger(i) && i >= 0 && i <= 65535) ||
+        !Number.isFinite(x) || !Number.isFinite(y) || x < 0 || x > 1 || y < 0 || y > 1) return null;
+    return { id, path, x: Math.round(x * 10000) / 10000, y: Math.round(y * 10000) / 10000 };
+  } catch { return null; }
+}
 
 /** The viewer controls for `info`, the reply of GET /api/artifacts/:id. */
 export function controls(info) {
@@ -27,9 +53,9 @@ export function controls(info) {
 export function responderNote(info) {
   const a = info.attached;
   if (a && typeof a === 'object' && typeof a.responder === 'string' && a.responder) {
-    return { attached: true, headline: 'A responder is attached', name: a.responder, contact: typeof a.contact === 'string' ? a.contact : '' };
+    return { attached: true, headline: 'A responder is registered. Registration does not verify that it is online.', name: a.responder, contact: typeof a.contact === 'string' ? a.contact : '' };
   }
-  return { attached: false, headline: 'Comments are recorded; nothing is listening right now', name: '', contact: '' };
+  return { attached: false, headline: 'No responder is registered. Comments remain available for later review.', name: '', contact: '' };
 }
 
 // Fossil's stock ticket statuses that mean the thread was answered. The

@@ -275,6 +275,7 @@ let pins = [];           // what the page was last sent
 let placed = null;       // labels the page placed, or null before it answered
 let selection = '';      // the anchor of the reader's selection in the page
 let focused = '';        // uuid of the thread a pin opened
+let markersVisible = true; // local to this viewer; threads and anchors remain available
 let placing = false;     // explicit reader consent to pick a location
 let panelPoint = null;   // active anchor in the iframe's viewport coordinates
 let draftAnchor = '';    // a picked location survives closing the composer
@@ -412,8 +413,16 @@ function sendPins() {
   const style = getComputedStyle(document.documentElement);
   const colors = Object.fromEntries(['accent', 'surface', 'muted'].map(k => [k, style.getPropertyValue(`--${k}`).trim()]));
   placed = null;
-  post({ type: 'pins', pins, colors });
+  post({ type: 'pins', pins, colors, visible: markersVisible });
 }
+
+function setMarkerVisibility(visible) {
+  markersVisible = visible;
+  $('showCommentMarkers').setAttribute('aria-checked', String(visible));
+  $('markerStatus').textContent = visible ? 'Markers visible on the page' : 'Markers hidden · comments still available';
+  sendPins();
+}
+$('showCommentMarkers').addEventListener('click', () => setMarkerVisibility(!markersVisible));
 
 // The theme changed: redraw the pins in its colours.
 new MutationObserver(sendPins).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
@@ -578,6 +587,7 @@ $('generalComment').addEventListener('click', () => {
 });
 $('placeComment').addEventListener('click', () => {
   if (commentBusy || !controls(info).commentBox) return;
+  if (!markersVisible) setMarkerVisibility(true);
   if (draftAnchor) {
     openPanel('draft', { x: $('frame').clientWidth / 2, y: 40 });
     trackAnchor(draftAnchor);

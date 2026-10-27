@@ -69,6 +69,7 @@ export async function viewerQA({ base, a, api, output, attach }) {
   const labelOf = title => evaluate(`[...document.querySelectorAll('#threadPanel .thread')].find(t => t.querySelector('summary .title').textContent === ${JSON.stringify(title)})?.dataset.label ?? null`);
   // Pins as the page draws them: label, resolved, and the viewport box.
   const pins = () => inFrame(`[...(document.querySelector('[data-artifact-pins]')?.shadowRoot?.querySelectorAll('button') ?? [])]
+    .filter(b => getComputedStyle(b).display !== 'none')
     .map(b => { const r = b.getBoundingClientRect(); return { label: b.textContent, resolved: b.dataset.resolved === 'true', x: r.left + r.width / 2, y: r.top + r.height / 2, w: r.width, h: r.height }; })`);
   // Clicks a pin with real mouse events at its centre, through the iframe.
   const clickPin = async label => {
@@ -141,6 +142,29 @@ export async function viewerQA({ base, a, api, output, attach }) {
     assert.ok(Math.abs(pinOf(fox).x - near.q.x) < 40 && Math.abs(pinOf(fox).y - near.q.y) < 40, JSON.stringify({ pin: pinOf(fox), at: near.q }));
     assert.ok(drawn.every(p => p.w >= 24 && p.h >= 24), 'pins are big enough to hit');
 
+    // Marker visibility is local presentation, not thread access or anchor resolution.
+    const countBefore = evaluate(`document.getElementById('commentCount').textContent`);
+    press('#showCommentMarkers');
+    settle();
+    assert.equal(evaluate(`document.getElementById('showCommentMarkers').getAttribute('aria-checked')`), 'false');
+    assert.equal((await pins()).length, 0, 'hidden markers are not visible or focusable');
+    assert.equal(panel(heading).anchored, 'yes', 'hiding markers preserves anchor resolution');
+    press(`#threadList .thread[data-label="${heading}"] > summary`);
+    assert.equal(panel(heading).focus, true, 'threads still open while markers are hidden');
+    assert.equal((await pins()).length, 0, 'opening a thread does not restore markers');
+    run('click', '#commentsBtn');
+    assert.equal(evaluate(`getComputedStyle(document.getElementById('commentsBtn')).backgroundColor`), 'rgba(0, 0, 0, 0)', 'open Comments has no filled active highlight');
+    assert.equal(evaluate(`getComputedStyle(document.getElementById('commentCount')).position`), 'static', 'count is inline, not a badge');
+    assert.equal(evaluate(`document.getElementById('commentCount').textContent`), countBefore);
+    evaluate(`document.documentElement.dataset.theme = 'dark'`);
+    settle();
+    assert.equal((await pins()).length, 0, 'theme redraw retains hidden markers');
+    press('#placeComment');
+    assert.equal(evaluate(`document.getElementById('showCommentMarkers').getAttribute('aria-checked')`), 'true', 'placement restores markers');
+    settle();
+    assert.equal((await pins()).length, drawn.length);
+    press('#cancelPlacement');
+
     // What the page is told: anchors, numbers, resolved flags and colours; no ticket text, no token.
     await inFrame(`(window.__told = [], addEventListener('message', e => { if (e.data && e.data.__artifactPins === 1) window.__told.push(e.data); }), true)`);
     evaluate(`document.documentElement.dataset.theme = 'dark'`); // a theme change sends the pins again
@@ -153,7 +177,7 @@ export async function viewerQA({ base, a, api, output, attach }) {
       const raw = JSON.stringify(m);
       for (const secret of [a.read, a.write, a.comment, 'About the fox', 'first line', 'Shortened in']) assert.ok(!raw.includes(secret), 'the page is told no tokens or ticket text');
       if (m.type !== 'pins') continue;
-      assert.deepEqual(Object.keys(m).sort(), ['__artifactPins', 'colors', 'pins', 'type'], JSON.stringify(m));
+      assert.deepEqual(Object.keys(m).sort(), ['__artifactPins', 'colors', 'pins', 'type', 'visible'], JSON.stringify(m));
       assert.equal(m.type, 'pins');
       assert.deepEqual(Object.keys(m.colors).sort(), ['accent', 'muted', 'surface']);
       assert.ok(Object.values(m.colors).every(c => /^#[0-9A-Fa-f]{6}$/.test(c)), JSON.stringify(m.colors));
@@ -370,6 +394,13 @@ export async function viewerQA({ base, a, api, output, attach }) {
       note: document.getElementById('commentsNote').textContent })`);
     assert.deepEqual({ ...readOnly, threads: readOnly.threads > 0 }, { form: true, replies: 0, resolves: 0, threads: true, note: 'Read only' });
     assert.ok((await pins()).length >= 3, 'readers see the pins');
+    press('#showCommentMarkers');
+    settle();
+    assert.equal((await pins()).length, 0, 'read-only viewers can hide markers');
+    assert.equal(evaluate(`document.getElementById('commentForm').hidden`), true, 'visibility does not grant commenting');
+    press('#showCommentMarkers');
+    settle();
+    assert.ok((await pins()).length >= 3, 'read-only viewers can restore markers');
     const cue = evaluate(`(() => { const c = document.getElementById('readCue'), f = document.getElementById('frame'); return { visible: !c.hidden, clear: c.getBoundingClientRect().bottom <= f.getBoundingClientRect().top, placeHidden: document.getElementById('placeComment').hidden, sandbox: f.getAttribute('sandbox') }; })()`);
     assert.ok(cue.visible && cue.clear && cue.placeHidden && !cue.sandbox.includes('allow-same-origin'), JSON.stringify(cue));
     await inFrame(`(parent.postMessage({ __artifactPins: 1, type: 'point', anchor: ${JSON.stringify(blank.fields.subsystem)}, x: 20, y: 20 }, '*'), true)`);

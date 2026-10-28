@@ -224,6 +224,8 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
     assert.equal(evaluate('document.getElementById("deleteBtn").hidden'),false);
     assert.ok(evaluate('document.getElementById("frame").getAttribute("sandbox").includes("allow-scripts")'));
     click('#shareBtn');assert.ok(evaluate('document.getElementById("shareRows").textContent.includes("Only the owner")'));
+    assert.ok(evaluate('document.getElementById("shareRows").textContent.includes("Comment link")'),'a signed-in editor can copy a comment link');
+    assert.match(evaluate('document.getElementById("commentLink").value'),/\/v\/[^#]+#[0-9a-f]{64}$/);
     run('screenshot',join(output,'session-viewer-phone.png'));
     click('#versionBtn');run('click','#versionList .version:last-child');wait('#restoreBtn');
     assert.ok(evaluate('location.hash.startsWith("#@")'));

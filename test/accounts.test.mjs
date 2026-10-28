@@ -136,6 +136,30 @@ test('permission isolation, named grants, account metadata, archive, transfer an
   assert.equal((await api(path,{method:'DELETE',cookie:c.cookie})).status,204);
 });
 
+test('a signed-in editor gets a comment link that comments and cannot edit',async()=>{
+  const a=memberA, b=memberB;
+  const artifact=await create({cookie:a.cookie});
+  const path=`/api/artifacts/${artifact.id}`;
+  const commentToken=r=>r.json.commentToken;
+  const owned=await api(path,{cookie:a.cookie});
+  assert.equal(owned.json.role,'write');
+  assert.match(commentToken(owned),/^[0-9a-f]{64}$/,'an account editor is given the comment link');
+  assert.equal((await api(path,{cookie:b.cookie})).status,404);
+  assert.equal((await api(path+'/sharing',{method:'PUT',cookie:a.cookie,body:{userId:b.user.id,permission:'read'}})).status,200);
+  assert.equal(commentToken(await api(path,{cookie:b.cookie})),undefined,'a named reader never sees it');
+  assert.equal((await api(path+'/sharing',{method:'PUT',cookie:a.cookie,body:{userId:b.user.id,permission:'write'}})).status,200);
+  assert.equal(commentToken(await api(path,{cookie:b.cookie})),commentToken(owned),'a named editor does');
+
+  const link=commentToken(owned);
+  const viaLink=await api(path,{token:link});
+  assert.equal(viaLink.json.role,'comment');
+  assert.equal(viaLink.json.commentToken,undefined);
+  assert.equal((await api(path+'/tickets',{method:'POST',token:link,body:{text:'Looks good'}})).status,201,'the link can comment');
+  const update={parent:artifact.tip,files:{'index.html':Buffer.from('<h1>Nope</h1>').toString('base64')}};
+  assert.equal((await api(path,{method:'PUT',token:link,body:update})).status,403,'the link cannot edit');
+  assert.equal((await api(path,{method:'DELETE',token:link})).status,401,'or delete');
+});
+
 test('name sorting, deterministic ties, filtered totals and compatible cursors',async()=>{
   const auth={cookie:memberA.cookie};
   const titles=['Parity zebra','Parity alpha','Parity Alpha','Parity middle'];

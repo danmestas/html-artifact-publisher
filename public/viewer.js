@@ -834,9 +834,13 @@ function renderShare() {
   $('publishPublic').textContent = publicationBusy ? 'Working…' : `Publish version ${shortId(shown.checkin)}`;
   $('shareMenu').querySelector('.collaboration').open = !info.canManage;
   if (!link.token) {
-    $('shareRows').replaceChildren(shareRow('libraryLink', 'Library link',
-      'Only the owner, instance owner, and people with named access can open this link after signing in.',
-      location.origin + location.pathname));
+    const can = controls(info);
+    $('shareRows').replaceChildren(...[
+      shareRow('libraryLink', 'Library link',
+        'Only the owner, instance owner, and people with named access can open this link after signing in.',
+        location.origin + location.pathname),
+      can.commentLink ? shareRow('commentLink', 'Comment link', 'Can view every version and comment, not edit.', linkWith(info.commentToken), { secret: true }) : null,
+    ].filter(Boolean));
     $('shareFoot').textContent = 'Manage named access from your library. This link does not grant access.';
     return;
   }

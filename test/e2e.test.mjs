@@ -132,8 +132,12 @@ function cli(...args) {
 before(async () => {
   execFileSync('go', ['build', '-o', fsclient, './cmd/fsclient'], { cwd: join(root, 'fossil'), stdio: 'inherit' });
   await new Promise(r => hook.listen(0, '127.0.0.1', r));
+  await startServer();
+});
+
+// Its own process group, so stopping it ends wrangler and workerd together.
+async function startServer() {
   const wakeVars = ['--var', 'WAKE_SINK_KIND:webhook', '--var', `WAKE_SINK_URL:http://127.0.0.1:${hook.address().port}/wake`, '--var', `WAKE_SINK_SECRET:${wakeSecret}`];
-  // Its own process group, so after() can stop wrangler and workerd together.
   server = spawn(join(root, 'node_modules/.bin/wrangler'), ['dev', '--port', String(port), '--ip', '127.0.0.1', '--persist-to', join(work, 'state'),
     '--var', `BEARER_TOKEN:${owner}`, ...wakeVars, '--show-interactive-dev-session=false'], { cwd: root, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
   let log = '';
@@ -146,7 +150,17 @@ before(async () => {
     await new Promise(r => setTimeout(r, 1000));
   }
   throw new Error(`wrangler dev did not start:\n${log}`);
-});
+}
+
+/** Restart the Worker on the same state, so every Durable Object starts fresh. */
+async function restartServer() {
+  try { process.kill(-server.pid, 'SIGTERM'); } catch { /* already gone */ }
+  for (let i = 0; i < 60; i++) {
+    try { await fetch(`${base}/healthz`); } catch { break; }
+    await new Promise(r => setTimeout(r, 500));
+  }
+  await startServer();
+}
 
 after(() => {
   hook.close();
@@ -778,10 +792,11 @@ test('comment link: an artifact from before comment links gets one from its edit
   const a = await create({ 'index.html': b64('<p>old</p>') });
   const columns = () => repoSQL(a.id, "SELECT name FROM pragma_table_info('_artifact')").map(c => c.name);
   const stored = () => ({ ...repoSQL(a.id, 'SELECT comment_hash, comment_token FROM _artifact')[0] });
-  // The shape an artifact stored before comment links has.
+  // The shape an artifact stored before comment links has, in a fresh object.
   repoSQL(a.id, 'ALTER TABLE _artifact DROP COLUMN comment_hash');
   repoSQL(a.id, 'ALTER TABLE _artifact DROP COLUMN comment_token');
   assert.ok(!columns().includes('comment_hash'));
+  await restartServer();
   const info = token => api(`/api/artifacts/${a.id}`, { token });
 
   const read = await info(a.read);
@@ -804,6 +819,12 @@ test('comment link: an artifact from before comment links gets one from its edit
   assert.equal(up.code, 0, up.out);
   assert.equal(JSON.parse(up.out).commentUrl, `${a.editUrl.split('#')[0]}#${first}`, 'update returns the same one');
   assert.equal(stored().comment_token, first);
+
+  // The check runs once per object: a column dropped under a live one is not looked for again.
+  repoSQL(a.id, 'ALTER TABLE _artifact DROP COLUMN comment_hash');
+  repoSQL(a.id, 'ALTER TABLE _artifact DROP COLUMN comment_token');
+  assert.equal((await info(a.read)).status, 200);
+  assert.ok(!columns().includes('comment_hash'), 'no second PRAGMA table_info check');
 });
 
 test('viewer shell', async () => {

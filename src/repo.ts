@@ -62,6 +62,9 @@ const NEEDS: Record<string, Role> = {
 };
 
 export class Repo extends DurableObject<Env> {
+  /** Set once the table and its columns are known to be current; a Durable Object's schema only changes on deploy. */
+  private tableReady = false;
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     // Fossil runs with foreign keys off. The pragma lasts for the connection
@@ -85,6 +88,7 @@ export class Repo extends DurableObject<Env> {
   }
 
   private ensureTable(): void {
+    if (this.tableReady) return;
     const sql = this.ctx.storage.sql;
     sql.exec(`CREATE TABLE IF NOT EXISTS _artifact (
       id TEXT NOT NULL, title TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER,
@@ -96,6 +100,7 @@ export class Repo extends DurableObject<Env> {
       sql.exec(`ALTER TABLE _artifact ADD COLUMN comment_hash TEXT NOT NULL DEFAULT ''`);
       sql.exec(`ALTER TABLE _artifact ADD COLUMN comment_token TEXT NOT NULL DEFAULT ''`);
     }
+    this.tableReady = true;
   }
 
   /** Create the repository and its first check-in. */
@@ -213,11 +218,12 @@ export class Repo extends DurableObject<Env> {
   }
 
   /**
-   * The comment token, for a caller who may share it (an editor). An artifact
-   * made before comment links gets one on the first such request.
+   * The comment token, for a caller who may share it (an editor, by link or
+   * account). An artifact made before comment links gets one on the first such
+   * request.
    */
   async commentToken(caller: Caller): Promise<string | null> {
-    if (caller.permission || (await this.role(caller)) !== 'write') return null;
+    if ((await this.role(caller)) !== 'write') return null;
     const sql = this.ctx.storage.sql;
     const stored = () => sql.exec<{ comment_token: string }>(`SELECT comment_token FROM _artifact`).toArray()[0]?.comment_token ?? '';
     if (stored()) return stored();

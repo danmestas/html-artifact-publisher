@@ -68,11 +68,15 @@ function capped(threads: Record<string, StatusEntry>, max: number): Record<strin
   return Object.fromEntries(entries.slice(0, max));
 }
 
-/** The file after one status write at `now` (RFC 3339). `done` removes the thread's entry. */
+/**
+ * The file after one status write at `now` (RFC 3339). `done` removes the thread's entry only
+ * when it is for that change: a follow-up asked while the first was being answered keeps its
+ * own status.
+ */
 export function applyStatus(file: StatusFile, ticketUuid: string, change: string, state: StatusState, stepText: string | undefined, now: string): StatusFile {
   const threads = { ...file.threads };
   if (state === 'done') {
-    delete threads[ticketUuid];
+    if (threads[ticketUuid]?.change === change) delete threads[ticketUuid];
     return { threads };
   }
   const old = threads[ticketUuid];

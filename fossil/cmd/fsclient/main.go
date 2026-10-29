@@ -4,6 +4,8 @@
 //
 //	fsclient clone <url> <repo.fossil>
 //	fsclient push  <repo.fossil> <url> <file> <content|@path> <comment>
+//	fsclient attach <repo.fossil> <url> <ticket> <name> <content|@path>
+//	fsclient attach-external <repo.fossil> <url> <ticket> <name> <sha256> <size> <type>
 //
 // URLs carry their login as https://login:password@host/r/<id>.
 package main
@@ -13,6 +15,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -49,15 +52,43 @@ func main() {
 			Comment: os.Args[6], User: user, Time: time.Now().UTC(), ParentID: tip,
 		})
 		die(err)
-		code, _ := r.Config("project-code")
-		res, err := r.Sync(ctx, libfossil.NewHTTPTransport(u), libfossil.SyncOpts{Push: true, Pull: true, User: user, Password: pass, ProjectCode: code})
-		die(err)
-		if len(res.Errors) > 0 {
-			die(fmt.Errorf("sync errors: %v", res.Errors))
-		}
+		pushAll(ctx, r, u, user, pass)
 		fmt.Printf("pushed %s\n", uuid)
+	case "attach", "attach-external":
+		r, err := libfossil.Open(os.Args[2])
+		die(err)
+		defer r.Close()
+		u, user, pass := login(os.Args[3])
+		opts := libfossil.AttachmentOpts{User: user}
+		var artifact string
+		if os.Args[1] == "attach" {
+			content := []byte(os.Args[6])
+			if p, ok := strings.CutPrefix(os.Args[6], "@"); ok {
+				content, err = os.ReadFile(p)
+				die(err)
+			}
+			artifact, err = r.AttachmentAdd(os.Args[4], os.Args[5], content, opts)
+		} else {
+			size, perr := strconv.ParseInt(os.Args[7], 10, 64)
+			die(perr)
+			ref := libfossil.ExternalRef{SHA256: os.Args[6], Size: size, Type: os.Args[8], Name: os.Args[5]}
+			artifact, err = r.AttachmentAddExternal(os.Args[4], ref, opts)
+		}
+		die(err)
+		pushAll(ctx, r, u, user, pass)
+		fmt.Printf("attached %s\n", artifact)
 	default:
 		die(fmt.Errorf("unknown command %q", os.Args[1]))
+	}
+}
+
+// pushAll syncs r with the server at u, failing on any error the server sent.
+func pushAll(ctx context.Context, r *libfossil.Repo, u, user, pass string) {
+	code, _ := r.Config("project-code")
+	res, err := r.Sync(ctx, libfossil.NewHTTPTransport(u), libfossil.SyncOpts{Push: true, Pull: true, User: user, Password: pass, ProjectCode: code})
+	die(err)
+	if len(res.Errors) > 0 {
+		die(fmt.Errorf("sync errors: %v", res.Errors))
 	}
 }
 

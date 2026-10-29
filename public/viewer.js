@@ -10,7 +10,8 @@ import { zip } from './zip.js';
 import { setArtifactFavicon } from './icons.js';
 setArtifactFavicon('document');
 import { preparePublication } from './export.js';
-import { anchorFor, arrange, controls, decodePointAnchor, encodePointAnchor, findQuotes, responderNote, thread } from './comments.js';
+import { anchorFor, arrange, attachmentDisplay, controls, decodePointAnchor, encodePointAnchor, findQuotes, responderNote, thread } from './comments.js';
+import { typeOf } from './blobs.js';
 import { pagePins } from './page-pins.js';
 
 const $ = id => document.getElementById(id);
@@ -290,6 +291,61 @@ let trackedAnchor = '';  // echoed by the page; stale position messages are igno
 const expanded = new Map(); // uuid -> open, once the reader toggled it
 const drafts = new Map();   // uuid -> reply text not yet sent
 const views = new Map();    // uuid -> its element in the panel
+const attached = new Map(); // uuid -> its attachments, once loaded
+const images = new Map();   // attachment link -> object URL of its image
+
+async function loadAttachments(uuid) {
+  let list = [];
+  try { list = (await art.attachments(uuid)).attachments; } catch { /* offline or gone: show none */ }
+  attached.set(uuid, list);
+  const t = threads.find(item => item.uuid === uuid);
+  if (t) threadView(t, controls(info));
+}
+
+// Fetched rather than linked: the viewer's CSP loads images only from blob: and data:.
+async function showImage(img, url) {
+  let src = images.get(url);
+  if (!src) {
+    const res = await fetch(url).catch(() => null);
+    if (!res?.ok) return;
+    src = URL.createObjectURL(await res.blob());
+    images.set(url, src);
+  }
+  img.src = src;
+}
+
+function attachmentItem(t, a, can) {
+  const d = attachmentDisplay(a);
+  const item = el('li', {});
+  if (d.missing) item.append(el('span', { className: 'missing', textContent: `${d.label} · unavailable` }));
+  else {
+    item.append(el('a', { href: new URL(a.url, location.origin).href, download: a.name, rel: 'noopener', textContent: d.label }));
+    if (d.inline) {
+      const img = el('img', { alt: a.name });
+      item.append(img);
+      showImage(img, a.url);
+    }
+  }
+  if (can.commentBox) {
+    const remove = el('button', { type: 'button', className: 'detach', textContent: 'Remove' });
+    remove.setAttribute('aria-label', `Remove ${a.name}`);
+    remove.addEventListener('click', async () => {
+      if (commentBusy) return;
+      commentBusy = remove.disabled = true;
+      try { await art.detach(t.uuid, a.name); await loadAttachments(t.uuid); }
+      catch { remove.disabled = false; }
+      finally { commentBusy = false; }
+    });
+    item.append(remove);
+  }
+  return item;
+}
+
+function attachmentList(t, can) {
+  const list = attached.get(t.uuid);
+  if (!list?.length) return null;
+  return el('ul', { className: 'attachments' }, ...list.map(a => attachmentItem(t, a, can)));
+}
 
 const quoted = s => `“${s}”`;
 const anchorName = anchor => decodePointAnchor(anchor) ? 'Page location' : quoted(anchor);
@@ -324,6 +380,7 @@ function threadView(t, can) {
     });
     // Remember only what the reader changed, using the latest status after a refresh.
     view.addEventListener('toggle', () => {
+      if (view.open) loadAttachments(t.uuid);
       const current = threads.find(item => item.uuid === t.uuid);
       if (current) view.open === !current.resolved ? expanded.delete(t.uuid) : expanded.set(t.uuid, view.open);
     });
@@ -345,7 +402,8 @@ function threadView(t, can) {
       el('div', { className: 'who', textContent: `${m.user} · ${ago(m.time)}${m.status ? ` · marked ${m.status}` : ''}` }),
       m.text ? el('p', { className: 'message', textContent: m.text }) : null)),
     t.checkins.length ? el('p', { className: 'checkins' }, 'Answered in ',
-      ...t.checkins.flatMap((c, i) => [i ? ', ' : null, el('a', { href: fragment({ token: link.token, at: c }), textContent: shortId(c) })])) : null];
+      ...t.checkins.flatMap((c, i) => [i ? ', ' : null, el('a', { href: fragment({ token: link.token, at: c }), textContent: shortId(c) })])) : null,
+    attachmentList(t, can)];
   for (const child of content) if (child) body.insertBefore(child, reply);
   if (reply) {
     reply.querySelector('textarea').setAttribute('aria-label', `Reply to ${t.title}`);
@@ -354,6 +412,7 @@ function threadView(t, can) {
   view.dataset.label = String(t.label);
   view.dataset.anchored = anchored(t);
   view.open = expanded.get(t.uuid) ?? (!t.resolved && t.uuid === focused);
+  if (view.open && !attached.has(t.uuid)) loadAttachments(t.uuid);
   return view;
 }
 
@@ -365,7 +424,27 @@ function replyForm(t) {
   status.setAttribute('role', 'status');
   const resolve = el('button', { type: 'button', className: 'resolve', textContent: t.resolved ? 'Reopen' : 'Resolve' });
   const send = el('button', { type: 'submit', className: 'primary', textContent: 'Reply' });
-  const form = el('form', { className: 'reply' }, text, el('div', { className: 'comment-actions' }, status, resolve, send));
+  const files = el('input', { type: 'file', multiple: true, hidden: true });
+  const attach = el('button', { type: 'button', className: 'attach', textContent: 'Attach' });
+  attach.setAttribute('aria-label', `Attach files to ${t.title}`);
+  attach.addEventListener('click', () => files.click());
+  files.addEventListener('change', async () => {
+    const chosen = [...files.files];
+    files.value = '';
+    if (!chosen.length || commentBusy) return;
+    commentBusy = attach.disabled = true;
+    status.textContent = 'Attaching…';
+    try {
+      for (const f of chosen) await art.attach(t.uuid, f.name, new Uint8Array(await f.arrayBuffer()), f.type || typeOf(f.name));
+      status.textContent = '';
+      await loadAttachments(t.uuid);
+    } catch (err) {
+      status.textContent = `Could not attach: ${err.message}`;
+    } finally {
+      commentBusy = attach.disabled = false;
+    }
+  });
+  const form = el('form', { className: 'reply' }, text, files, el('div', { className: 'comment-actions' }, status, attach, resolve, send));
   const change = async (body, doing) => {
     if (commentBusy) return;
     commentBusy = resolve.disabled = send.disabled = text.readOnly = true;

@@ -33,7 +33,9 @@ export class Registry extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS rate_limits (key TEXT PRIMARY KEY, count INTEGER NOT NULL, expires INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS blob_refs (sha TEXT NOT NULL, artifact_id TEXT NOT NULL, PRIMARY KEY(sha,artifact_id));
       CREATE INDEX IF NOT EXISTS blob_refs_artifact ON blob_refs(artifact_id,sha);
-      CREATE TABLE IF NOT EXISTS blob_uploads (sha TEXT NOT NULL, principal TEXT NOT NULL, PRIMARY KEY(sha,principal));`);
+      CREATE TABLE IF NOT EXISTS blob_uploads (sha TEXT NOT NULL, principal TEXT NOT NULL, PRIMARY KEY(sha,principal));
+      CREATE TABLE IF NOT EXISTS attachment_refs (sha TEXT NOT NULL, artifact_id TEXT NOT NULL, PRIMARY KEY(sha,artifact_id));
+      CREATE INDEX IF NOT EXISTS attachment_refs_artifact ON attachment_refs(artifact_id,sha);`);
     const cols = sql.exec<{ name: string }>('PRAGMA table_info(artifacts)').toArray();
     if (!cols.some(c => c.name === 'owner_id')) sql.exec('ALTER TABLE artifacts ADD COLUMN owner_id TEXT');
     if (!cols.some(c => c.name === 'archived')) sql.exec('ALTER TABLE artifacts ADD COLUMN archived INTEGER NOT NULL DEFAULT 0');
@@ -141,18 +143,25 @@ export class Registry extends DurableObject<Env> {
   async touch(id: string, tip?: string, title?: string, icon?: string | null): Promise<void> {
     this.ctx.storage.sql.exec('UPDATE artifacts SET tip = COALESCE(?,tip), updated_at = ?, title = COALESCE(?,title), icon = COALESCE(?,icon) WHERE id = ?',tip ?? null,now(),title ?? null,icon === null ? 'document' : icon ?? null,id);
   }
-  /** Delete an artifact's listing, and the R2 blobs no other artifact points at. */
+  /**
+   * Delete an artifact's listing, and the R2 objects no other artifact points
+   * at: check-in blobs under b/ and attachments under attachments/.
+   */
   async remove(id: string): Promise<void> {
     const orphans = this.ctx.storage.transactionSync(() => {
       const sql = this.ctx.storage.sql;
       for (const table of ['grants','stars']) sql.exec(`DELETE FROM ${table} WHERE artifact_id = ?`,id);
       sql.exec('DELETE FROM artifacts WHERE id = ?',id);
-      const shas = sql.exec<{ sha: string }>('SELECT sha FROM blob_refs WHERE artifact_id = ?',id).toArray().map(r => r.sha);
-      sql.exec('DELETE FROM blob_refs WHERE artifact_id = ?',id);
-      sql.exec('DELETE FROM blob_uploads WHERE principal = ?',`artifact:${id}`);
-      return shas.filter(sha => !sql.exec('SELECT 1 FROM blob_refs WHERE sha = ? LIMIT 1',sha).toArray().length);
+      const keys: string[] = [];
+      for (const [table, prefix] of [['blob_refs','b'],['attachment_refs','attachments']] as const) {
+        const shas = sql.exec<{ sha: string }>(`SELECT sha FROM ${table} WHERE artifact_id = ?`,id).toArray().map(r => r.sha);
+        sql.exec(`DELETE FROM ${table} WHERE artifact_id = ?`,id);
+        for (const sha of shas) if (!sql.exec(`SELECT 1 FROM ${table} WHERE sha = ? LIMIT 1`,sha).toArray().length) keys.push(`${prefix}/${sha}`);
+      }
+      sql.exec('DELETE FROM blob_uploads WHERE principal IN (?,?)',`artifact:${id}`,`attachment:${id}`);
+      return keys;
     });
-    for (let i = 0; i < orphans.length; i += 1000) await this.env.BLOBS.delete(orphans.slice(i, i + 1000).map(sha => `b/${sha}`));
+    for (let i = 0; i < orphans.length; i += 1000) await this.env.BLOBS.delete(orphans.slice(i, i + 1000));
   }
   /** Record that artifact `id` points at these blobs (idempotent). */
   async refBlobs(id: string, shas: string[]): Promise<void> {
@@ -172,6 +181,23 @@ export class Registry extends DurableObject<Env> {
     return [...new Set(shas)].filter(sha =>
       sql.exec('SELECT 1 FROM blob_refs WHERE sha = ? AND artifact_id = ?',sha,id).toArray().length ||
       principals.some(p => sql.exec('SELECT 1 FROM blob_uploads WHERE sha = ? AND principal = ?',sha,p).toArray().length));
+  }
+  /** Record that artifact `id` has attachments with these bytes (idempotent). */
+  async refAttachments(id: string, shas: string[]): Promise<void> {
+    for (const sha of new Set(shas)) this.ctx.storage.sql.exec('INSERT OR IGNORE INTO attachment_refs VALUES (?,?)',sha,id);
+  }
+  /**
+   * The attachment bytes among `shas` that artifact `id` may name: ones it
+   * already names, or ones uploaded to it (principal attachment:<id>).
+   */
+  async allowedAttachments(id: string, shas: string[]): Promise<string[]> {
+    const sql = this.ctx.storage.sql;
+    return [...new Set(shas)].filter(sha =>
+      sql.exec('SELECT 1 FROM attachment_refs WHERE sha = ? AND artifact_id = ?',sha,id).toArray().length ||
+      sql.exec('SELECT 1 FROM blob_uploads WHERE sha = ? AND principal = ?',sha,`attachment:${id}`).toArray().length);
+  }
+  async hasAttachment(id: string, sha: string): Promise<boolean> {
+    return this.ctx.storage.sql.exec('SELECT 1 FROM attachment_refs WHERE sha = ? AND artifact_id = ?',sha,id).toArray().length > 0;
   }
   async hasBlob(id: string, sha: string): Promise<boolean> {
     return this.ctx.storage.sql.exec('SELECT 1 FROM blob_refs WHERE sha = ? AND artifact_id = ?',sha,id).toArray().length > 0;

@@ -49,17 +49,11 @@ type request struct {
 	Hash        string            `json:"hash"`       // timelineSince: entries that arrived after this artifact
 	Types       []string          `json:"types"`      // timelineSince: ci, t, w, f; none is all
 	Limit       int               `json:"limit"`      // ticketThreads: at most this many tickets
+	Target      string            `json:"target"`     // attachments: the ticket they are on
+	SHA256      string            `json:"sha256"`     // attachAddExternal: the bytes in R2
+	Size        int64             `json:"size"`       // attachAddExternal
+	Type        string            `json:"type"`       // attachAddExternal
 }
-
-// coded errors carry a machine-readable code to the Worker.
-type coded struct {
-	code string
-	msg  string
-}
-
-func (e coded) Error() string { return e.msg }
-
-func fail(code, format string, a ...any) error { return coded{code, fmt.Sprintf(format, a...)} }
 
 // Fossil logins for sync: the edit and read links' tokens are their passwords.
 const (
@@ -221,6 +215,17 @@ func handle(req request, body []byte) (any, error) {
 
 	case "verify":
 		return map[string]any{"ok": true}, r.Verify()
+	}
+	if strings.HasPrefix(req.Op, "attach") {
+		content, err := base64.StdEncoding.DecodeString(req.Data)
+		if err != nil {
+			return nil, fail("bad_request", "data is not base64")
+		}
+		a := attachReq{Target: req.Target, Name: req.Name, User: req.User, Comment: req.Comment,
+			Content: content, SHA256: req.SHA256, Size: req.Size, Type: req.Type}
+		if result, ok, err := attachOp(r, req.Op, a); ok {
+			return result, err
+		}
 	}
 	if result, ok, err := ticketOp(r, req); ok {
 		return result, err

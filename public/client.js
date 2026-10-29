@@ -7,7 +7,7 @@
 //   const { tip } = await art.info();
 //   await art.publish(tip, { 'index.html': bytes }, 'Fix the totals');  // throws ConflictError if tip moved
 
-import { isBlob, parsePointer, pointerFor } from './blobs.js';
+import { isBlob, parsePointer, pointerFor, sha256hex } from './blobs.js';
 import { validIcon } from './icons.js';
 
 const enc = new TextEncoder();
@@ -40,6 +40,11 @@ export function fromBase64(s) {
 /** { path: bytes | string } -> { path: base64 } */
 export function encodeFiles(files) {
   return Object.fromEntries(Object.entries(files).map(([k, v]) => [k, toBase64(v instanceof Uint8Array ? v : enc.encode(String(v)))]));
+}
+
+/** `bytes` as text, or null when they are not UTF-8. */
+function utf8(bytes) {
+  try { return new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch { return null; }
 }
 
 const asBytes = v => (v instanceof Uint8Array ? v : enc.encode(String(v)));
@@ -149,6 +154,28 @@ export class Artifact {
   tickets() { return call(`${this.base}/tickets`, { auth: this.auth }); }
   /** Open a thread ({ text, anchor? }) or change one ({ ticketUuid, text?, status? }). */
   comment(change) { return call(`${this.base}/tickets`, { method: 'POST', auth: this.auth, body: change }); }
+
+  /** A thread's attachments: { attachments: [{ name, size, type, external, sha256?, user, time, url?, missing? }] }. */
+  attachments(ticketUuid) { return call(`${this.base}/attachments?target=${encodeURIComponent(ticketUuid)}`, { auth: this.auth }); }
+
+  /**
+   * Attach `bytes` to a thread as `name`. Small text stays in Fossil; anything
+   * else goes to R2 first, and the thread holds a stub naming it.
+   */
+  async attach(ticketUuid, name, bytes, type) {
+    const text = isBlob(name, bytes) ? null : utf8(bytes);
+    if (text !== null) {
+      return call(`${this.base}/attachments`, { method: 'POST', auth: this.auth, body: { target: ticketUuid, name, content: text } });
+    }
+    const sha256 = await sha256hex(bytes);
+    const res = await fetch(`${this.base}/attachments/${sha256}`, {
+      method: 'PUT', headers: { ...(this.auth ? { Authorization: this.auth } : {}), 'Content-Type': type }, body: bytes,
+    });
+    if (!res.ok) throw new ApiError(res.status, await res.json().catch(() => ({})));
+    return call(`${this.base}/attachments`, { method: 'POST', auth: this.auth, body: { target: ticketUuid, name, type, sha256, size: bytes.length } });
+  }
+
+  detach(ticketUuid, name) { return call(`${this.base}/attachments`, { method: 'DELETE', auth: this.auth, body: { target: ticketUuid, name } }); }
 
   dataList() { return call(`${this.base}/data`, { auth: this.auth }); }
   /** The value stored under `name`, or null. */

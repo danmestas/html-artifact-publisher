@@ -384,6 +384,11 @@ It accepts only `POST`, answers `413` to a body over 16 KiB, `401` to a bad or m
 | `PUT /api/artifacts/:id/data/<name>` | write | Store a JSON value |
 | `GET /api/artifacts/:id/tickets?limit=` | read | The `limit` (1-200, default 100) most recently changed comment threads: `{tickets: [{uuid, status, changed, fields, changes: [{artifact, user, time, comment, fields}]}], limit, truncated}`, changes oldest first; `truncated` says there are more |
 | `POST /api/artifacts/:id/tickets` | comment | New thread `{text, anchor?}` → `201 {ticketUuid, artifact}`; reply, resolve or reopen `{ticketUuid, text?, status?: "Open" \| "Closed"}` → `{ticketUuid, artifact}`. The author is the account's name, `owner`, `edit-link` or `comment-link`, never the body. Stored in Fossil's stock ticket schema: `title` (the text's first line), `comment` (the text), `status`, `type` `Comment`, the anchor in `subsystem`; a reply is the change's remark (`icomment`) |
+| `GET /api/artifacts/:id/attachments?target=<ticketUuid>` | read | A thread's current attachments, newest first: `{attachments: [{name, size, type, external, sha256?, user, time, url?, missing?}]}`. `url` is a signed link; an external attachment whose bytes this artifact does not hold in R2 has `missing: true` and no `url` |
+| `PUT /api/artifacts/:id/attachments/:sha256` | comment | Upload an attachment's bytes (raw body, `Content-Length` required, at most `MAX_BLOB_BYTES`) to R2 at `attachments/<sha256>`; `HEAD` says whether this artifact already holds them |
+| `POST /api/artifacts/:id/attachments` | comment | Attach to a thread: `{target, name, content}` with up to 256 KB of text, kept in Fossil, or `{target, name, type, sha256, size}` for bytes uploaded with `PUT` first (else `400 missing_blob`) → `201 {artifact}`. `name` is a bare file name; the author comes from the credential, as for tickets |
+| `DELETE /api/artifacts/:id/attachments` | comment | `{target, name}`: remove the thread's attachment; `404` when it has none by that name. Bytes in R2 stay until the artifact is deleted |
+| `GET /a/:id?target=&name=&exp=&sig=` | signed link | The attachment's bytes, with `Range` support for external ones; PNG, JPEG, GIF and WebP inline, anything else as a download |
 | `GET /api/artifacts/:id/timeline?since=<hash>&type=t` | read | `{timeline: [{uuid, type, comment, user, time, parents}]}`: entries that arrived after artifact `<hash>` (full hash), newest first; `type` repeats, one of `ci e f g t w` |
 | `POST /r/:id` | Fossil login | Fossil sync protocol |
 | `GET /v/:id` | — | The viewer |
@@ -422,6 +427,28 @@ type image/jpeg
 - **Cleanup.** The Registry records which artifacts point at which blobs; a blob is deleted from R2 with the last artifact that points at it. Pointers pushed with `fossil` are recorded when the artifact is next viewed.
 - **`fossil clone`** gets the pointer files, not the bytes. `publish-html.mjs read <url> --out <dir>` writes the real files.
 
+## Attachments
+
+A comment thread is a Fossil ticket, and files attach to it as Fossil attaches files to tickets: a control artifact whose `A` card names the file and the blob holding it. A stock `fossil` clone sees every attachment. There are two kinds:
+
+- **Regular**: text up to 256 KB, stored in Fossil as the attachment's content, exactly as `fossil attachment add` stores it. Stock `fossil` pushes regular attachments.
+- **External**: anything else. The bytes go to R2 at `attachments/<sha256>`, and Fossil stores a small stub in the file's place, the format Quarry RFC 0016 defines, so copying the `attachments/` prefix to a Quarry bucket moves the files with them:
+
+```
+quarry-attachment 1
+sha256 4f9a…e01c
+size 18349022
+type video/mp4
+name screen-recording.mp4
+```
+
+The stub (an attachment) and the `artifact-blob 1` pointer (a file in a check-in) are separate formats with separate R2 prefixes: a check-in cannot point a file at attachment bytes, nor an attachment at a check-in blob. `src/blobs.ts` parses both with one function.
+
+- **Who.** A comment link (or better) attaches and removes; a read link lists and opens. The viewer adds an Attach button to each thread's reply box: text files up to 256 KB become regular attachments, everything else is uploaded and attached by hash.
+- **Showing.** PNG, JPEG, GIF and WebP from an edit link, an account or the owner show inline in the thread; anything a comment link attached is a link with its name and size, since anyone holding that link can attach. SVG and HTML are always downloads, served sandboxed with `nosniff`.
+- **Trust.** Like blobs, attaching bytes by hash needs them uploaded to this artifact: knowing a hash is not enough to reach another artifact's file. A stub pushed from a clone that names bytes this artifact does not hold lists as `missing`.
+- **Removing.** A removal is a new control artifact, as in Fossil; the earlier attachment stays in history and its bytes stay in R2. They are deleted with the artifact, unless another artifact also attaches them.
+
 
 ## Safety model
 
@@ -445,7 +472,7 @@ type image/jpeg
 │   ├── index.ts               Worker: routes, access, viewer
 │   ├── repo.ts                Repo Durable Object (one per artifact)
 │   ├── registry.ts            Registry Durable Object
-│   ├── blobs.ts               Blobs in R2: upload, signed links, pointer checks
+│   ├── blobs.ts               Blobs and attachments in R2: upload, signed links, pointer and stub parsing
 │   ├── fossil.ts              Loads the wasm; one transaction per call
 │   └── util.ts
 ├── fossil/                    go-libfossil server program (Go module)
@@ -453,6 +480,7 @@ type image/jpeg
 │   ├── dosql_js.go            database/sql driver over ctx.storage.sql
 │   ├── classify.go            What the driver emulates (unit-tested)
 │   ├── limits.go              The one-row size limit (unit-tested)
+│   ├── attachments.go         Attachment operations on threads (unit-tested)
 │   ├── cmd/fsclient/          Native Fossil client for the e2e tests
 │   └── build.sh               TinyGo (default) or Go build
 ├── public/                    Viewer shell, the shared API client, Pikchr (pikchr/,

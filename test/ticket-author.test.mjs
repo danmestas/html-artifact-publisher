@@ -15,3 +15,14 @@ test('ticket author: from the credential, never an email address', () => {
   assert.equal(ticketAuthor({ kind: 'account', name: '   ' }), 'account');
   assert.equal(ticketAuthor({ kind: 'account', name: 'x'.repeat(80) }), 'x'.repeat(64));
 });
+
+// An edit link may post as the attached responder. The name is
+// attached.json's, never the request's, and the suffix keeps it apart from
+// the owner and from accounts.
+test('ticket author: the attached responder, marked as one', () => {
+  assert.equal(ticketAuthor({ kind: 'responder', name: 'artifact-agent' }), 'artifact-agent (responder)');
+  assert.equal(ticketAuthor({ kind: 'responder', name: 'owner' }), 'owner (responder)');
+  assert.equal(ticketAuthor({ kind: 'responder', name: 'bot@example.com' }), 'account (responder)');
+  assert.equal(ticketAuthor({ kind: 'responder', name: 'x'.repeat(100) }), `${'x'.repeat(52)} (responder)`);
+  assert.ok(ticketAuthor({ kind: 'responder', name: 'x'.repeat(100) }).length <= 64);
+});

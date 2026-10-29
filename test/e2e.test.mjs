@@ -605,6 +605,19 @@ test('attached responder: attached.json set and cleared by a stock fossil, read 
   assert.equal((await get()).json.tip, tip, 'no check-in, no republish');
   assert.equal((await get()).json.timeline.length, 1);
 
+  // The edit link can post as the attached responder; no other link can.
+  const post = (token, body) => api(`/api/artifacts/${a.id}/tickets`, { method: 'POST', token, body });
+  const asResponder = await post(a.write, { text: 'Answered by the responder.', asResponder: true });
+  assert.equal(asResponder.status, 201);
+  const authorOf = async uuid => (await api(`/api/artifacts/${a.id}/tickets`, { token: a.read }))
+    .json.tickets.find(x => x.uuid === uuid).changes.at(-1).user;
+  assert.equal(await authorOf(asResponder.json.ticketUuid), 'local session (responder)');
+  const replied = await post(a.write, { ticketUuid: asResponder.json.ticketUuid, text: 'And again.', asResponder: true });
+  assert.equal(replied.status, 200);
+  assert.equal(await authorOf(asResponder.json.ticketUuid), 'local session (responder)');
+  assert.equal((await post(a.comment, { text: 'Pretending.', asResponder: true })).status, 403);
+  assert.equal((await post(a.write, { text: 'Plain.' })).status, 201, 'without the flag, as before');
+
   // Only a write-capable user can set it; a read link cannot push it.
   const readUrl = a.cloneUrl.replace(/editor:[0-9a-f]+@/, `viewer:${a.read}@`);
   const vclone = join(work, `${a.id}-attached-viewer.fossil`);
@@ -630,6 +643,8 @@ test('attached responder: attached.json set and cleared by a stock fossil, read 
   assert.ok(stock('uv', 'rm', 'attached.json', '--mtime', stamp(), '-R', clone).ok);
   assert.ok(stock('uv', 'sync', a.cloneUrl, '-R', clone).ok);
   for (const token of [a.read, a.comment, a.write]) assert.equal((await get(token)).json.attached, null, 'cleared');
+  const unattached = await post(a.write, { text: 'Nobody attached.', asResponder: true });
+  assert.equal(await authorOf(unattached.json.ticketUuid), 'edit-link', 'no responder: the edit link');
 
   // The viewer has a place for the banner above the thread list.
   const html = await (await fetch(`${base}/v/${a.id}`)).text();

@@ -857,7 +857,8 @@ $('commentForm').addEventListener('submit', async e => {
   commentBusy = button.disabled = $('commentText').readOnly = true;
   showPosting($('commentStatus'), 'Posting…', true);
   try {
-    const result = await art.comment(anchor ? { text, anchor } : { text });
+    // The version on screen, so a responder can read the page as the reader saw it.
+    const result = await art.comment({ text, ...(anchor ? { anchor } : {}), ...(shown?.checkin ? { version: shown.checkin } : {}) });
     $('commentText').value = '';
     selection = draftAnchor = '';
     $('commentStatus').textContent = 'Posted.';

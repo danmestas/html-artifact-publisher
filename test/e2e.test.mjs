@@ -484,7 +484,7 @@ test('comment link: tickets through the API, a stock fossil clone and a terminal
 
   const opened = await post(a.comment, { text: 'The heading reads oddly.\nCan it be shorter?', anchor: 'intro', author: 'mallory', user: 'mallory' });
   assert.equal(opened.status, 400, 'the body cannot name the author');
-  const first = await post(a.comment, { text: 'The heading reads oddly.\nCan it be shorter?', anchor: 'intro' });
+  const first = await post(a.comment, { text: 'The heading reads oddly.\nCan it be shorter?', anchor: 'intro', version: a.tip });
   assert.equal(first.status, 201, first.text);
   assert.match(first.json.ticketUuid, /^[0-9a-f]{40}$/);
   assert.match(first.json.artifact, /^[0-9a-f]{40,64}$/);
@@ -511,7 +511,7 @@ test('comment link: tickets through the API, a stock fossil clone and a terminal
   assert.equal(t.changes[2].fields.status, 'Closed');
   assert.equal((await tickets(a.comment)).status, 200, 'the comment link reads threads');
   assert.deepEqual(thread(t), {
-    uuid: t.uuid, title: 'The heading reads oddly.', status: 'Closed', resolved: true, anchor: 'intro', checkins: [],
+    uuid: t.uuid, title: 'The heading reads oddly.', status: 'Closed', resolved: true, anchor: 'intro', version: a.tip, checkins: [],
     messages: [
       { user: 'comment-link', time: t.changes[0].time, text: 'The heading reads oddly.\nCan it be shorter?', status: '', change: t.changes[0].artifact },
       { user: 'edit-link', time: t.changes[1].time, text: 'Shortened in the next version.', status: '', change: t.changes[1].artifact },
@@ -525,6 +525,7 @@ test('comment link: tickets through the API, a stock fossil clone and a terminal
     [{ text: 'x', anchor: 'a'.repeat(501) }, 'anchor too long'], [{ text: 'x', status: 'Closed' }, 'status on a new thread'],
     [{ ticketUuid: first.json.ticketUuid, status: 'Fixed' }, 'unknown status'], [{ ticketUuid: first.json.ticketUuid }, 'nothing to change'],
     [{ ticketUuid: 'abc', text: 'x' }, 'not a ticket id'], [{ text: 'x', fields: { title: 'y' } }, 'unknown key'], [{ text: 7 }, 'text not a string'],
+    [{ text: 'x', version: 'tip' }, 'version not a check-in hash'], [{ ticketUuid: first.json.ticketUuid, text: 'x', version: a.tip }, 'version on a reply'],
   ]) assert.equal((await post(a.comment, body)).status, 400, why);
   assert.equal((await post(a.comment, { ticketUuid: 'f'.repeat(40), text: 'x' })).status, 404, 'unknown ticket');
 
@@ -536,6 +537,7 @@ test('comment link: tickets through the API, a stock fossil clone and a terminal
   assert.ok(history.ok, history.out);
   assert.match(history.out, /Shortened in the next version\./);
   assert.match(stock('sql', '-R', clone, "SELECT status||' '||subsystem FROM ticket").out, /Closed intro/);
+  assert.match(stock('sql', '-R', clone, 'SELECT foundin FROM ticket').out, new RegExp(a.tip), 'stock fossil reads the version as foundin');
 
   // A ticket made in a terminal and pushed appears with no Worker step.
   const added = stock('ticket', 'add', 'title', 'From the terminal', 'status', 'Open', 'type', 'Comment', '-R', clone);

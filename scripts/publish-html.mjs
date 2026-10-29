@@ -23,7 +23,7 @@ Usage:
   node scripts/publish-html.mjs history <url>
   node scripts/publish-html.mjs list
   node scripts/publish-html.mjs delete <edit-url>
-  node scripts/publish-html.mjs new-comment-link <edit-url>   (the old comment link stops working)
+  node scripts/publish-html.mjs new-comment-link <edit-url>   (the old comment link, and any watch using it, stops working)
   node scripts/publish-html.mjs watch <edit-or-comment-url> [--since <hash>] [--interval 30s] [--once] [--cache <dir>]
 
 Publish options:

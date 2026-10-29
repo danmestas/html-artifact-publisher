@@ -147,8 +147,15 @@ test('a signed-in editor gets a comment link that comments and cannot edit',asyn
   assert.equal((await api(path,{cookie:b.cookie})).status,404);
   assert.equal((await api(path+'/sharing',{method:'PUT',cookie:a.cookie,body:{userId:b.user.id,permission:'read'}})).status,200);
   assert.equal(commentToken(await api(path,{cookie:b.cookie})),undefined,'a named reader never sees it');
+  assert.equal((await api(path+'/comment-link',{method:'POST',cookie:b.cookie})).status,403,'or replaces it');
   assert.equal((await api(path+'/sharing',{method:'PUT',cookie:a.cookie,body:{userId:b.user.id,permission:'write'}})).status,200);
   assert.equal(commentToken(await api(path,{cookie:b.cookie})),commentToken(owned),'a named editor does');
+  const renewed=await api(path+'/comment-link',{method:'POST',cookie:b.cookie});
+  assert.equal(renewed.status,200,'and may replace it');
+  assert.equal((await api(path,{token:commentToken(owned)})).status,404,'the old link stops working');
+  assert.equal(commentToken(await api(path,{cookie:a.cookie})),renewed.json.commentToken,'the owner sees the new one');
+  assert.equal((await api(path+'/comment-link',{method:'POST',cookie:b.cookie,origin:'https://evil.example'})).status,403,'a cross-site POST cannot');
+  owned.json.commentToken=renewed.json.commentToken;
 
   const link=commentToken(owned);
   const viaLink=await api(path,{token:link});

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { anchorFor, arrange, decodePointAnchor, encodePointAnchor, findQuotes, thread } from '../public/comments.js';
+import { anchorFor, arrange, attachmentDisplay, decodePointAnchor, encodePointAnchor, findQuotes, thread } from '../public/comments.js';
 
 test('point anchors have a bounded, exact wire format and round normalized positions', () => {
   const anchor = encodePointAnchor({ id: 'intro', path: [1, 0], x: .123456, y: 1 });
@@ -88,4 +88,17 @@ test('arrange: open then resolved, numbered for their pins', () => {
   assert.deepEqual(resolved.map(t => [t.uuid, t.label]), [['1', 3]]);
   assert.deepEqual(pins, [{ key: 2, anchor: 'some words', resolved: false }, { key: 3, anchor: 'intro', resolved: true }],
     'only anchored threads get a pin; the key is the label');
+});
+
+test('attachmentDisplay: only an editor’s raster image shows inline; everything else is a link', () => {
+  const a = (over = {}) => ({ name: 'shot.png', size: 2048, type: 'image/png', url: '/a/x?sig', user: 'edit-link', ...over });
+  assert.equal(attachmentDisplay(a()).inline, true);
+  assert.equal(attachmentDisplay(a({ user: 'owner' })).inline, true);
+  assert.equal(attachmentDisplay(a({ user: 'comment-link' })).inline, false, 'a comment link holder\'s image is a link');
+  assert.equal(attachmentDisplay(a({ type: 'image/svg+xml', name: 'x.svg' })).inline, false, 'SVG is never inline');
+  assert.equal(attachmentDisplay(a({ type: 'text/html', name: 'x.html' })).inline, false);
+  assert.equal(attachmentDisplay(a({ url: undefined, missing: true })).inline, false);
+  assert.deepEqual(attachmentDisplay(a({ user: 'comment-link' })), { inline: false, label: 'shot.png (2 KB)', missing: false });
+  assert.deepEqual(attachmentDisplay(a({ size: 300, url: undefined, missing: true })), { inline: false, label: 'shot.png (300 B)', missing: true });
+  assert.equal(attachmentDisplay(a({ size: 3_500_000 })).label, 'shot.png (3.3 MB)');
 });

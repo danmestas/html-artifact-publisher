@@ -57,6 +57,17 @@ node -e '
 # The blob bucket (wrangler.jsonc, BLOBS) must exist before a Worker that binds it.
 bucket=html-artifact-publisher-blobs
 npx wrangler r2 bucket info "$bucket" >/dev/null 2>&1 || npx wrangler r2 bucket create "$bucket"
+# Uploads stage under tmp/ and are copied to their name once verified; a stage
+# outlives its upload only if the Worker stopped mid-upload. Expire those.
+# A failure here only leaves stray stages to accumulate: warn, and deploy anyway.
+if rules=$(npx wrangler r2 bucket lifecycle list "$bucket" 2>/dev/null); then
+  if ! printf '%s\n' "$rules" | grep -q 'expire-tmp'; then
+    npx wrangler r2 bucket lifecycle add "$bucket" expire-tmp tmp/ --expire-days 1 --force ||
+      echo "deploy: warning: could not add the expire-tmp lifecycle rule to $bucket" >&2
+  fi
+else
+  echo "deploy: warning: could not list $bucket's lifecycle rules; not adding expire-tmp" >&2
+fi
 # Deploy static serving first; it has only R2, never app secrets or account bindings.
 if ! npx wrangler deploy --config wrangler.public.jsonc >"$public_log" 2>&1; then
   cat "$public_log" >&2
@@ -78,6 +89,7 @@ set --
 [ -z "${WAKE_SINK_URL:-}" ] || set -- "$@" --var "WAKE_SINK_URL:$WAKE_SINK_URL"
 [ -z "${NOTIFY_AGENT:-}" ] || set -- "$@" --var "NOTIFY_AGENT:$NOTIFY_AGENT"
 [ -z "${NOTIFY_SUBSCRIBER:-}" ] || set -- "$@" --var "NOTIFY_SUBSCRIBER:$NOTIFY_SUBSCRIBER"
-npx wrangler deploy --secrets-file "$secrets" --var "APP_ORIGIN:$APP_ORIGIN" --var "PUBLIC_ORIGIN:$PUBLIC_ORIGIN" --var "EMAIL_FROM:$EMAIL_FROM" --var 'TEST_MAIL_TRANSPORT:' "$@"
+npx wrangler deploy --secrets-file "$secrets" --var "APP_ORIGIN:$APP_ORIGIN" --var "PUBLIC_ORIGIN:$PUBLIC_ORIGIN" --var "EMAIL_FROM:$EMAIL_FROM" --var 'TEST_MAIL_TRANSPORT:' \
+  --var 'TEST_CLEANUP_PAUSE_MS:' --var 'TEST_CLEANUP_FAULT:' --var 'TEST_TOMBSTONE_STALE_MS:' "$@"
 # CI must not mistake the first (public) Worker URL for the signed-in app.
 printf 'APP_URL=%s\nPUBLIC_URL=%s\n' "$APP_ORIGIN" "$PUBLIC_ORIGIN"

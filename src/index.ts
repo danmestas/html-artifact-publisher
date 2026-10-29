@@ -28,6 +28,11 @@
  *   PUT    /api/artifacts/:id/data/<name>    Page data (write)
  *   GET    /api/artifacts/:id/tickets?limit= The newest-changed threads with their changes (read)
  *   POST   /api/artifacts/:id/tickets        Open, reply to, resolve or reopen a thread (comment)
+ *   GET    /api/artifacts/:id/attachments?target=<ticket>    A thread's attachments, with signed links (read)
+ *   PUT    /api/artifacts/:id/attachments/:sha256            Upload an attachment's bytes to R2 (comment)
+ *   POST   /api/artifacts/:id/attachments    Attach text, or bytes uploaded with PUT, to a thread (comment)
+ *   DELETE /api/artifacts/:id/attachments    Remove a thread's attachment; its bytes stay (comment)
+ *   GET    /a/:id?target=&name=&exp=&sig=    An attachment, through a signed link from the list
  *   GET    /api/artifacts/:id/timeline?since=<hash>&type=t   Entries that arrived after <hash> (read)
  *   POST   /r/:id                            Fossil sync: `fossil clone https://editor:<writeToken>@host/r/<id>`
  *   GET    /v/:id                            Viewer
@@ -37,12 +42,17 @@ import { Repo } from './repo';
 import { preview } from './preview';
 import { publicationRoutes } from './publications';
 import { accountRoutes, artifactCaller, csrf, identity, readBody } from './accounts';
-import { Registry } from './registry';
-import { blobLinks, getBlob, missingBlobs, pointersIn, putBlob } from './blobs';
+import { Registry, testHooks } from './registry';
+import {
+  attachmentLink, blobKey, blobLinks, externalRef, getBlob, isSha, missingBlobs, pointersIn, putBlob,
+  serveAttachmentBytes, serveExternalAttachment, verifyAttachmentLink,
+} from './blobs';
+import { BLOB_THRESHOLD, typeOf } from '../public/blobs.js';
 import type { FossilReply } from './fossil';
-import { b64decode, b64encode, clampTtl, genId, genToken, isoOrNull } from './util';
+import { b64decode, b64encode, clampTtl, genId, genToken, isoOrNull, sha256hex } from './util';
 import { ATTACHED_FILE, attachedFrom } from './attached';
 import { ticketAuthor } from './ticket-author';
+import type { Caller, Role } from './repo';
 import { TICKET_BODY, ticketChange } from './ticket-body';
 import { ticketKind, wake, wakeKind, type WakeKind } from './wake';
 
@@ -76,7 +86,7 @@ function json(data: unknown, status = 200): Response {
 }
 
 const STATUS: Record<string, number> = {
-  bad_request: 400, forbidden: 403, not_found: 404, conflict: 409, unchanged: 409, too_large: 413, aborted: 500, internal: 500,
+  bad_request: 400, forbidden: 403, not_found: 404, conflict: 409, unchanged: 409, too_large: 413, quota: 413, aborted: 500, internal: 500,
 };
 
 /** A Fossil reply as an HTTP response: the result, or the error with its status. */
@@ -140,6 +150,185 @@ function wakeOnHeader(env: Env, ctx: ExecutionContext, req: Request, id: string,
 // twice carries the same key, and the receiver drops the second.
 function wakeOnTicket(env: Env, ctx: ExecutionContext, id: string, ticket: string, change: string, author: string, kind: WakeKind): void {
   ctx.waitUntil(wake(env, { artifact: id, checkin: change, ticket, author, kind }));
+}
+
+/** The author a ticket or attachment change records: from the credential, never the body. */
+function changeAuthor(role: Role | null, actor: Actor): string {
+  return ticketAuthor(role === 'comment' ? { kind: 'comment' }
+    : actor.user ? { kind: 'account', name: actor.user.name }
+    : actor.legacy ? { kind: 'owner' } : { kind: 'edit' });
+}
+
+// ─── Attachments ─────────────────────────────────────────────────────────────
+
+/** An attachment as the engine lists it (fossil/attachments.go). */
+interface AttachmentRow {
+  name: string; size: number; external: boolean; sha256?: string; type?: string;
+  user: string; time: string; comment: string; data?: string;
+}
+
+const TICKET = /^[0-9a-f]{4,64}$/;
+/** Attachment uploads per artifact in 15 minutes; a client address may make four times as many. */
+const ATTACHMENT_PUTS = 60;
+/** How long an upload may wait to be attached before its bytes are swept. */
+const UNATTACHED_UPLOAD_TTL = 24 * 3600;
+const MEDIA_TYPE = /^[\w.+-]{1,64}\/[\w.+-]{1,128}$/;
+const ATTACHMENT_BODY = 'Body must be JSON with target (a thread\'s ticket id) and name, plus content (text up to 256 KB) or sha256, size and type of bytes uploaded with PUT …/attachments/<sha256>';
+
+/** A bare file name an A card can carry: no directory, no control characters. */
+const validName = (n: unknown): n is string =>
+  typeof n === 'string' && n.length > 0 && n.length <= 200 && n !== '.' && n !== '..' && !/[/\\\u0000-\u001f\u007f]/.test(n);
+
+async function handleAttachments(req: Request, env: Env, id: string, rest: string, who: Caller, actor: Actor): Promise<Response | null> {
+  const stub = repo(env, id), method = req.method;
+  const upload = /^\/attachments\/([^/]+)$/.exec(rest);
+  if (upload && (method === 'PUT' || method === 'HEAD')) {
+    const role = await stub.role(who);
+    if (role !== 'comment' && role !== 'write') return json({ error: 'the comment link is required to attach files' }, 403);
+    const sha = upload[1]!, reg = registry(env);
+    const uploader = {
+      known: async () => (await reg.allowedAttachments(id, [sha])).length > 0,
+      busy: () => reg.deletingObject(blobKey(sha, 'attachments')),
+      record: () => reg.recordUpload(sha, `attachment:${id}`, blobKey(sha, 'attachments')),
+    };
+    if (method === 'HEAD' || !isSha(sha)) return withCors(await putBlob(req, env, sha, uploader, 'attachments'));
+    const ip = req.headers.get('CF-Connecting-IP') ?? 'local';
+    const allowed = await reg.rate([`attachment-put:${id}`], ATTACHMENT_PUTS, 900) &&
+      await reg.rate([`attachment-put-ip:${await sha256hex(ip)}`], ATTACHMENT_PUTS * 4, 900);
+    if (!allowed) {
+      return json({ error: 'too many uploads: wait a few minutes', code: 'rate_limited' }, 429);
+    }
+    // Register what the current attachments name first, as the list does: a stub
+    // pushed from a clone may name an upload not yet attached through the API.
+    const current = await currentExternals(stub, who);
+    if (current) {
+      await reg.refAttachments(id, await reg.allowedAttachments(id, current));
+      await reg.sweepAttachmentUploads(id, UNATTACHED_UPLOAD_TTL, current);
+    }
+    const length = Number(req.headers.get('Content-Length') ?? NaN);
+    const quota = parseInt(env.MAX_ATTACHMENT_BYTES, 10);
+    let reserved = false;
+    if (Number.isSafeInteger(length) && length >= 0) {
+      const held = await reg.reserveAttachment(id, sha, length, quota);
+      if (held === 'over') return json({ error: `this artifact's attachments may hold at most ${quota} bytes`, code: 'quota' }, 413);
+      reserved = held === 'reserved';
+    }
+    const res = await putBlob(req, env, sha, uploader, 'attachments');
+    if (!res.ok && reserved) await reg.releaseAttachment(id, sha);
+    return withCors(res);
+  }
+  if (rest !== '/attachments') return null;
+
+  /** The thread `target` names, as a reply when it is not a thread of this artifact. */
+  const thread = async (target: string): Promise<Response | null> => {
+    const known = (await stub.op(who, { op: 'ticketChanges', ticketUuid: target })) as FossilReply<unknown>;
+    return known.ok ? null : reply(known);
+  };
+
+  if (method === 'GET') {
+    const target = new URL(req.url).searchParams.get('target') ?? '';
+    if (!TICKET.test(target)) return json({ error: 'target must be a thread\'s ticket id' }, 400);
+    // Only threads: attachments on wiki pages or tech notes pushed from a clone stay out of reach.
+    const notThread = await thread(target);
+    if (notThread) return notThread;
+    const r = (await stub.op(who, { op: 'attachList', target })) as FossilReply<{ attachments: AttachmentRow[] }>;
+    if (!r.ok || !r.result) return reply(r);
+    const reg = registry(env);
+    // Stubs pushed with fossil never came through POST: link only bytes this
+    // artifact already names or that were uploaded to it.
+    const shas = r.result.attachments.flatMap(a => (a.external && a.sha256 ? [a.sha256] : []));
+    const { refs: allowed } = await reg.refAttachments(id, await reg.allowedAttachments(id, shas));
+    const attachments = await Promise.all(r.result.attachments.map(async a => {
+      let missing = a.size < 0;
+      if (a.external) {
+        const head = a.sha256 && allowed.includes(a.sha256) ? await env.BLOBS.head(blobKey(a.sha256, 'attachments')) : null;
+        missing = !head || head.size !== a.size;
+      }
+      return {
+        name: a.name, size: a.size, type: a.external && a.type ? a.type : typeOf(a.name), external: a.external,
+        ...(a.external ? { sha256: a.sha256 } : {}), user: a.user, time: a.time,
+        ...(missing ? { missing: true } : { url: await attachmentLink(env, id, target, a.name) }),
+      };
+    }));
+    return json({ attachments });
+  }
+
+  if (method === 'POST' || method === 'DELETE') {
+    const b = await readBody(req, 2_000_000);
+    if (!b || typeof b.target !== 'string' || !TICKET.test(b.target) || !validName(b.name)) return json({ error: ATTACHMENT_BODY }, 400);
+    const notThread = await thread(b.target);
+    if (notThread) return notThread;
+    const role = await stub.role(who);
+    const user = changeAuthor(role, actor);
+    // Comment links share one identity: each may change only what comment links attached.
+    const guard = role === 'comment' ? user : '';
+    // After a change, stop counting and keep only the R2 bytes the current attachments name.
+    const done = async (r: FossilReply<unknown>, status: number) => {
+      if (!r.ok) return reply(r);
+      // The mark comes before the read: a ref made or confirmed after it may name bytes the read missed.
+      const mark = await registry(env).attachmentMark();
+      const current = await currentExternals(stub, who);
+      const pause = testHooks(env).pause;
+      if (pause > 0) await new Promise(res => setTimeout(res, pause));
+      if (current) await registry(env).reconcileAttachments(id, current, mark);
+      return json(r.result, status);
+    };
+    if (method === 'DELETE') return done((await stub.op(who, { op: 'attachDelete', target: b.target, name: b.name, user, guard })) as FossilReply<unknown>, 200);
+
+    const comment = typeof b.comment === 'string' ? b.comment.slice(0, 1000) : '';
+    const maxCount = parseInt(env.MAX_ATTACHMENTS, 10);
+    if (typeof b.content === 'string') {
+      const bytes = new TextEncoder().encode(b.content);
+      if (bytes.length > BLOB_THRESHOLD) return json({ error: `content is over ${BLOB_THRESHOLD} bytes: upload it with PUT …/attachments/<sha256> and attach it by sha256`, code: 'too_large' }, 413);
+      if (externalRef(bytes)) return json({ error: 'content is a pointer or an attachment stub; attach bytes by sha256 instead', code: 'bad_request' }, 400);
+      return done((await stub.op(who, { op: 'attachAdd', target: b.target, name: b.name, data: b64encode(bytes), user, comment, guard, maxCount })) as FossilReply<unknown>, 201);
+    }
+    const { sha256, size, type } = b;
+    const max = parseInt(env.MAX_BLOB_BYTES, 10);
+    if (typeof sha256 !== 'string' || !isSha(sha256) || typeof size !== 'number' || !Number.isSafeInteger(size) || size < 0 || size > max ||
+        typeof type !== 'string' || !MEDIA_TYPE.test(type)) return json({ error: ATTACHMENT_BODY }, 400);
+    const reg = registry(env);
+    // Record the reference, pending, before checking R2 and writing: no other artifact's deletion
+    // removes the bytes mid-attach, and no reconcile drops them before the write is visible.
+    // Bytes being deleted are not referenced, and so count as missing.
+    const { refs, added } = await reg.refAttachments(id, await reg.allowedAttachments(id, [sha256]), true);
+    const kept = refs.filter(sha => !added.includes(sha));
+    const head = refs.length ? await env.BLOBS.head(blobKey(sha256, 'attachments')) : null;
+    if (!head || head.size !== size) {
+      await reg.unrefAttachments(id, added);
+      await reg.confirmAttachments(id, kept);
+      return json({ error: `upload the bytes with PUT …/attachments/${sha256} before attaching them`, code: 'missing_blob' }, 400);
+    }
+    const r = (await stub.op(who, { op: 'attachAddExternal', target: b.target, name: b.name, sha256, size, type, user, comment, guard, maxCount })) as FossilReply<unknown>;
+    if (r.ok) await reg.confirmAttachments(id, refs);
+    else { await reg.unrefAttachments(id, added); await reg.confirmAttachments(id, kept); }
+    return done(r, 201);
+  }
+  return null;
+}
+
+/** The R2 bytes the repository's current attachments name, or null when it cannot say. */
+async function currentExternals(stub: ReturnType<typeof repo>, who: Caller): Promise<string[] | null> {
+  const r = (await stub.op(who, { op: 'attachExternals' })) as FossilReply<{ sha256: string[] }>;
+  return r.ok && r.result ? r.result.sha256 : null;
+}
+
+/** GET /a/:id — an attachment through a signed link. */
+async function handleAttachmentLink(req: Request, env: Env, key: string): Promise<Response> {
+  const denied = () => json({ error: 'this link has expired or is invalid' }, 403);
+  const id = await registry(env).resolve(key);
+  if (!id || id !== key) return denied();
+  const link = await verifyAttachmentLink(env, id, new URL(req.url));
+  if (!link) return denied();
+  // The signature proves a reader of this artifact minted the link.
+  const r = (await repo(env, id).op({ owner: true, token: '' }, { op: 'attachRead', target: link.target, name: link.name })) as FossilReply<AttachmentRow>;
+  if (!r.ok || !r.result) return json({ error: 'not found' }, 404);
+  const a = r.result;
+  if (a.external) {
+    if (!a.sha256 || !(await registry(env).hasAttachment(id, a.sha256))) return denied();
+    return serveExternalAttachment(req, env, a.sha256, a.name, a.type ?? 'application/octet-stream', link.maxAge);
+  }
+  return serveAttachmentBytes(b64decode(a.data ?? ''), a.name, typeOf(a.name), link.maxAge);
 }
 
 // ─── Handlers ────────────────────────────────────────────────────────────────
@@ -266,9 +455,9 @@ async function handleArtifact(req: Request, env: Env, ctx: ExecutionContext, id:
       if ((await stub.role(who)) !== 'write') return reply(await stub.op(who, { op: 'commit' }));
       if (!validIcon(b.icon)) return json({ error: `icon must be null or one of: ${ICON_NAMES.join(', ')}` }, 400);
       const pointers = pointersIn(b.files);
-      const allowed = await registry(env).allowedBlobs(id, uploaders(id, actor), Object.values(pointers).map(p => p.sha256));
       // Record the references before checking R2, so no other artifact's deletion removes these blobs mid-commit.
-      await registry(env).refBlobs(id, allowed);
+      // Blobs being deleted are not referenced, and so count as missing.
+      const allowed = await registry(env).refBlobs(id, await registry(env).allowedBlobs(id, uploaders(id, actor), Object.values(pointers).map(p => p.sha256)));
       const missing = await missingBlobs(env, pointers, allowed);
       if (missing.length) return missingReply(missing);
       const user = String(b.user ?? 'web').slice(0, 64);
@@ -302,8 +491,7 @@ async function handleArtifact(req: Request, env: Env, ctx: ExecutionContext, id:
     const pointers = pointersIn(r.result.files);
     // Pointers pushed with fossil never passed through a commit here: link only
     // blobs this artifact already uses or that were uploaded with its edit link.
-    const allowed = await registry(env).allowedBlobs(id, [`artifact:${id}`], Object.values(pointers).map(p => p.sha256));
-    await registry(env).refBlobs(id, allowed);
+    const allowed = await registry(env).refBlobs(id, await registry(env).allowedBlobs(id, [`artifact:${id}`], Object.values(pointers).map(p => p.sha256)));
     const linked = Object.fromEntries(Object.entries(pointers).filter(([, p]) => allowed.includes(p.sha256)));
     const missing = [...(r.result as { missing?: string[] }).missing ?? [], ...Object.keys(pointers).filter(path => !(path in linked))];
     return json({ ...r.result, missing, blobs: await blobLinks(env, id, linked) });
@@ -315,6 +503,7 @@ async function handleArtifact(req: Request, env: Env, ctx: ExecutionContext, id:
     const sha = blob[1]!, reg = registry(env);
     return withCors(await putBlob(req, env, sha, {
       known: async () => (await reg.allowedBlobs(id, uploaders(id, actor), [sha])).length > 0,
+      busy: () => reg.deletingObject(blobKey(sha)),
       record: () => reg.recordUpload(sha, `artifact:${id}`),
     }));
   }
@@ -339,11 +528,7 @@ async function handleArtifact(req: Request, env: Env, ctx: ExecutionContext, id:
     const b = await readBody(req, 65536);
     const change = b && ticketChange(b);
     if (!change) return json({ error: TICKET_BODY }, 400);
-    const role = await stub.role(who);
-    // The credential names the author, never the body.
-    const user = ticketAuthor(role === 'comment' ? { kind: 'comment' }
-      : actor.user ? { kind: 'account', name: actor.user.name }
-      : actor.legacy ? { kind: 'owner' } : { kind: 'edit' });
+    const user = changeAuthor(await stub.role(who), actor);
     if (!change.ticketUuid) {
       const r = (await stub.op(who, { op: 'ticketAdd', fields: change.fields, user, comment: '' })) as FossilReply<{ ticketUuid: string; artifact: string }>;
       if (!r.ok || !r.result) return reply(r);
@@ -357,6 +542,8 @@ async function handleArtifact(req: Request, env: Env, ctx: ExecutionContext, id:
     wakeOnTicket(env, ctx, id, change.ticketUuid, r.result.artifact, user, ticketKind(false, change.fields));
     return json({ ticketUuid: change.ticketUuid, ...r.result });
   }
+  const attachments = await handleAttachments(req, env, id, rest, who, actor);
+  if (attachments) return attachments;
   if (rest === '/timeline' && method === 'GET') {
     const since = url.searchParams.get('since') ?? '';
     const types = url.searchParams.getAll('type');
@@ -503,6 +690,7 @@ export default {
       const sha = newBlob[1]!, reg = registry(env), who = principal(actor);
       return withCors(await putBlob(req, env, sha, {
         known: async () => (await reg.allowedBlobs('', [who], [sha])).length > 0,
+        busy: () => reg.deletingObject(blobKey(sha)),
         record: () => reg.recordUpload(sha, who),
       }));
     }
@@ -512,6 +700,9 @@ export default {
       const reg = registry(env);
       return getBlob(req, env, blobLink[1]!, blobLink[2]!, async (id, sha) => (await reg.resolve(id)) === id && reg.hasBlob(id, sha));
     }
+
+    const attachmentGet = /^\/a\/([A-Za-z0-9_-]{1,64})$/.exec(path);
+    if (attachmentGet && (method === 'GET' || method === 'HEAD')) return handleAttachmentLink(req, env, attachmentGet[1]!);
 
     if (path === '/api/artifacts') {
       if (method === 'POST') return handleCreate(req, env);

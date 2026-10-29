@@ -384,6 +384,11 @@ It accepts only `POST`, answers `413` to a body over 16 KiB, `401` to a bad or m
 | `PUT /api/artifacts/:id/data/<name>` | write | Store a JSON value |
 | `GET /api/artifacts/:id/tickets?limit=` | read | The `limit` (1-200, default 100) most recently changed comment threads: `{tickets: [{uuid, status, changed, fields, changes: [{artifact, user, time, comment, fields}]}], limit, truncated}`, changes oldest first; `truncated` says there are more |
 | `POST /api/artifacts/:id/tickets` | comment | New thread `{text, anchor?}` → `201 {ticketUuid, artifact}`; reply, resolve or reopen `{ticketUuid, text?, status?: "Open" \| "Closed"}` → `{ticketUuid, artifact}`. The author is the account's name, `owner`, `edit-link` or `comment-link`, never the body. Stored in Fossil's stock ticket schema: `title` (the text's first line), `comment` (the text), `status`, `type` `Comment`, the anchor in `subsystem`; a reply is the change's remark (`icomment`) |
+| `GET /api/artifacts/:id/attachments?target=<ticketUuid>` | read | A thread's current attachments, newest first: `{attachments: [{name, size, type, external, sha256?, user, time, url?, missing?}]}`. `url` is a signed link; an external attachment whose bytes this artifact does not hold in R2 has `missing: true` and no `url` |
+| `PUT /api/artifacts/:id/attachments/:sha256` | comment | Upload an attachment's bytes (raw body, `Content-Length` required, at most `MAX_BLOB_BYTES`) to R2 at `attachments/<sha256>`; `HEAD` says whether this artifact already holds them. `413 quota` past `MAX_ATTACHMENT_BYTES`, `429` past 60 uploads per artifact in 15 minutes |
+| `POST /api/artifacts/:id/attachments` | comment | Attach to a thread: `{target, name, content}` with up to 256 KB of text, kept in Fossil, or `{target, name, type, sha256, size}` for bytes uploaded with `PUT` first (else `400 missing_blob`) → `201 {artifact}`; `413 quota` past `MAX_ATTACHMENTS`. `name` is a bare file name; the author comes from the credential, as for tickets. A comment link may replace only an attachment comment links made; an edit link may replace any |
+| `DELETE /api/artifacts/:id/attachments` | comment | `{target, name}`: remove the thread's attachment; `404` when it has none by that name, `403` when a comment link asks to remove one an editor made. Its bytes leave R2 unless another attachment names them |
+| `GET /a/:id?target=&name=&exp=&sig=` | signed link | The attachment's bytes, with `Range` support for external ones; PNG, JPEG, GIF and WebP inline, anything else as a download |
 | `GET /api/artifacts/:id/timeline?since=<hash>&type=t` | read | `{timeline: [{uuid, type, comment, user, time, parents}]}`: entries that arrived after artifact `<hash>` (full hash), newest first; `type` repeats, one of `ci e f g t w` |
 | `POST /r/:id` | Fossil login | Fossil sync protocol |
 | `GET /v/:id` | — | The viewer |
@@ -401,6 +406,8 @@ Public URLs use the separate `PUBLIC_ORIGIN`: `GET /:publicationId/` serves the 
 | One blob (images, media, binary files, any file over 256 KB) | 100 MB | `MAX_BLOB_BYTES`; Workers accept request bodies up to 100 MB. Stored in R2, not Fossil |
 | One text file in Fossil, compressed | about 1.99 MB | A Durable Object's SQLite holds at most 2 MB per value, and Fossil stores each file in one row. Larger files are refused with `413` (API) or a sync error (`fossil push`); the CLI sends any file over 256 KB to R2, so this only applies to files pushed with `fossil` or posted to the API directly |
 | Request body | 10 MB | `MAX_PAYLOAD_BYTES` |
+| Attachment uploads per artifact | 200 MB | `MAX_ATTACHMENT_BYTES`: the R2 bytes its current attachments name, plus uploads not yet attached |
+| Attachments per artifact | 100 | `MAX_ATTACHMENTS`: current attachments across all its threads; replacing one by name adds none |
 | Default / max TTL | 7 days / 30 days, or `--ttl never` | `DEFAULT_TTL_SECONDS`, `MAX_TTL_SECONDS`; expiry is a Durable Object alarm |
 | Repository | 10 GB | Per Durable Object |
 
@@ -417,10 +424,34 @@ size 4718231
 type image/jpeg
 ```
 
-- **Publishing.** `public/client.js` (the CLI, and pages that save themselves) uploads each such file first, to `PUT /api/blobs/<sha256>` (new artifact; owner or account) or `PUT /api/artifacts/<id>/blobs/<sha256>` (edit link), then commits the pointer. The Worker stages new bytes under `tmp/`, hashes them as they stream in, and copies them to `b/<sha256>` only when they match; an upload never replaces or removes a stored blob, and bytes already stored are hashed but not written. A commit naming a blob R2 doesn't have is refused with `missing_blob`. Identical bytes are stored once. A `tmp/` object outlives its upload only if the Worker stops mid-upload; an R2 lifecycle rule expiring `tmp/` after a day clears those.
+- **Publishing.** `public/client.js` (the CLI, and pages that save themselves) uploads each such file first, to `PUT /api/blobs/<sha256>` (new artifact; owner or account) or `PUT /api/artifacts/<id>/blobs/<sha256>` (edit link), then commits the pointer. The Worker stages new bytes under `tmp/`, hashes them as they stream in, and copies them to `b/<sha256>` only when they match; an upload never replaces or removes a stored blob, and bytes already stored are hashed but not written. A commit naming a blob R2 doesn't have is refused with `missing_blob`. Identical bytes are stored once. A `tmp/` object outlives its upload only if the Worker stops mid-upload; `deploy.sh` adds an R2 lifecycle rule, `expire-tmp`, that deletes `tmp/` objects after a day. While R2 bytes are being deleted (their last artifact or attachment went), they count as missing: a commit or attach naming them gets `missing_blob`, and an upload of them `409` until the deletion is done. If R2 refuses the delete, the bytes stay and are usable again at once; if the Worker stops midway, the first access more than five minutes later finishes the deletion.
 - **Viewing.** The bundle lists each blob with a signed link, `/b/<id>/<sha256>?exp=&sig=`, signed with a key derived from `BEARER_TOKEN`. A link stays the same for a day (so browsers cache what it serves) and is never valid for more than 48 hours. The viewer points images, media and fonts at these links (the page CSP allows `/b/` and nothing else), and fetches and inlines large scripts and stylesheets. Links support `Range`, so video can stream.
 - **Cleanup.** The Registry records which artifacts point at which blobs; a blob is deleted from R2 with the last artifact that points at it. Pointers pushed with `fossil` are recorded when the artifact is next viewed.
 - **`fossil clone`** gets the pointer files, not the bytes. `publish-html.mjs read <url> --out <dir>` writes the real files.
+
+## Attachments
+
+A comment thread is a Fossil ticket, and files attach to it as Fossil attaches files to tickets: a control artifact whose `A` card names the file and the blob holding it. A stock `fossil` clone sees every attachment. There are two kinds:
+
+- **Regular**: text up to 256 KB, stored in Fossil as the attachment's content, exactly as `fossil attachment add` stores it. Stock `fossil` pushes regular attachments.
+- **External**: anything else. The bytes go to R2 at `attachments/<sha256>`, and Fossil stores a small stub in the file's place, the format Quarry RFC 0016 defines, so copying the `attachments/` prefix to a Quarry bucket moves the files with them:
+
+```
+quarry-attachment 1
+sha256 4f9a…e01c
+size 18349022
+type video/mp4
+name screen-recording.mp4
+```
+
+The stub (an attachment) and the `artifact-blob 1` pointer (a file in a check-in) are separate formats with separate R2 prefixes: a check-in cannot point a file at attachment bytes, nor an attachment at a check-in blob. `src/blobs.ts` parses both with one function.
+
+- **Who.** A read link lists and opens. An edit link (or an account with edit access, or the owner) attaches, replaces and removes anything. A comment link attaches, and replaces or removes only what comment links attached: every comment link holder is the same author, `comment-link`, so they can replace or remove each other's attachments. Only threads are reachable: attachments a clone pushes to wiki pages or tech notes are not listed or changed through the API. The viewer adds an Attach button to each thread's reply box: text files up to 256 KB become regular attachments, everything else is uploaded and attached by hash.
+- **Showing.** The viewer shows PNG, JPEG, GIF and WebP from an edit link, an account or the owner inline in the thread; anything a comment link attached is a link with its name and size, since anyone holding that link can attach. That is the viewer's display policy, not access control: the server serves those four types inline to any reader of the link, under a sandboxing CSP and `nosniff`, and everything else (SVG and HTML included) as a download.
+- **Links.** A signed link names the thread and the attachment's name, not its bytes: after a replacement, an earlier link serves the new bytes until it expires (at most 48 hours).
+- **Limits.** Uploads are capped per artifact in bytes (`MAX_ATTACHMENT_BYTES`) and rate (60 per 15 minutes, 240 per client address), and attachments in number (`MAX_ATTACHMENTS`). An upload not attached within 24 hours is forgotten, and its bytes deleted unless another artifact holds them, the next time anything is uploaded to that artifact; deleting the artifact deletes all of them.
+- **Trust.** Like blobs, attaching bytes by hash needs them uploaded to this artifact: knowing a hash is not enough to reach another artifact's file. A stub pushed from a clone that names bytes this artifact does not hold lists as `missing`.
+- **Removing.** A removal is a new control artifact, as in Fossil; the earlier attachment stays in history. Its bytes in R2 are deleted unless another current attachment, here or in another artifact, names them, so they stop counting against the quota; attaching them again means uploading them again. Replacing an attachment by name does the same for the bytes it replaced. A removal pushed from a clone takes effect in this bookkeeping at the artifact's next attachment change.
 
 
 ## Safety model
@@ -445,7 +476,7 @@ type image/jpeg
 │   ├── index.ts               Worker: routes, access, viewer
 │   ├── repo.ts                Repo Durable Object (one per artifact)
 │   ├── registry.ts            Registry Durable Object
-│   ├── blobs.ts               Blobs in R2: upload, signed links, pointer checks
+│   ├── blobs.ts               Blobs and attachments in R2: upload, signed links, pointer and stub parsing
 │   ├── fossil.ts              Loads the wasm; one transaction per call
 │   └── util.ts
 ├── fossil/                    go-libfossil server program (Go module)
@@ -453,6 +484,7 @@ type image/jpeg
 │   ├── dosql_js.go            database/sql driver over ctx.storage.sql
 │   ├── classify.go            What the driver emulates (unit-tested)
 │   ├── limits.go              The one-row size limit (unit-tested)
+│   ├── attachments.go         Attachment operations on threads (unit-tested)
 │   ├── cmd/fsclient/          Native Fossil client for the e2e tests
 │   └── build.sh               TinyGo (default) or Go build
 ├── public/                    Viewer shell, the shared API client, Pikchr (pikchr/,

@@ -135,3 +135,23 @@ export function anchorFor({ text, id, idText }) {
   if (id && squash(idText) === quote) return id;
   return Array.from(quote).slice(0, 500).join('');
 }
+
+// Attachment types the thread panel may show as an image. Never SVG: it is
+// script on whatever origin shows it.
+const INLINE_IMAGES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+
+const sizeLabel = n => n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${Math.round(n / 1024)} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`;
+
+/**
+ * How the panel shows an attachment from GET …/attachments: a link with its
+ * name and size, or, for a raster image an editor attached, the image. Anyone
+ * with a comment link can attach, so their images stay links.
+ */
+export function attachmentDisplay(a) {
+  const missing = !!a.missing || !a.url;
+  return {
+    inline: !missing && INLINE_IMAGES.includes(a.type) && a.user !== 'comment-link',
+    label: `${a.name} (${sizeLabel(Math.max(0, a.size))})`,
+    missing,
+  };
+}

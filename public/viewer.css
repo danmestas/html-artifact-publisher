@@ -181,7 +181,14 @@ button:disabled { cursor: wait; opacity: .6; }
 .thread .who { font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
 .thread .checkins { margin: 0; font-size: 12.5px; }
 .thread .checkins a { color: var(--accent-ink); font-family: var(--mono); text-underline-offset: 3px; }
+.thread .attachments { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; }
+.thread .attachments li { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; overflow-wrap: anywhere; }
+.thread .attachments a { color: var(--accent-ink); text-underline-offset: 3px; }
+.thread .attachments img { flex-basis: 100%; max-width: 100%; max-height: 240px; object-fit: contain; border: 1px solid var(--line); border-radius: 6px; }
+.thread .attachments .missing { color: var(--muted); }
+.thread .attachments .detach { padding: 0; border: none; background: none; color: var(--muted); text-decoration: underline; text-underline-offset: 3px; min-height: 32px; }
 .reply { display: flex; flex-direction: column; gap: 8px; }
+.reply .attach,
 .reply .resolve { height: 36px; padding: 0 12px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface); font-weight: 500; }
 #threadList:empty::after { content: 'No comments yet.'; display: block; padding: 12px 16px; color: var(--muted); font-size: 12.5px; }
 #commentForm { display: flex; flex-direction: column; gap: 8px; padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--bar); }

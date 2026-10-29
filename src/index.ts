@@ -186,7 +186,11 @@ async function handleAttachments(req: Request, env: Env, id: string, rest: strin
     const role = await stub.role(who);
     if (role !== 'comment' && role !== 'write') return json({ error: 'the comment link is required to attach files' }, 403);
     const sha = upload[1]!, reg = registry(env);
-    const uploader = { known: async () => (await reg.allowedAttachments(id, [sha])).length > 0, record: () => reg.recordUpload(sha, `attachment:${id}`) };
+    const uploader = {
+      known: async () => (await reg.allowedAttachments(id, [sha])).length > 0,
+      busy: () => reg.deletingObject(blobKey(sha, 'attachments')),
+      record: () => reg.recordUpload(sha, `attachment:${id}`, blobKey(sha, 'attachments')),
+    };
     if (method === 'HEAD' || !isSha(sha)) return withCors(await putBlob(req, env, sha, uploader, 'attachments'));
     const ip = req.headers.get('CF-Connecting-IP') ?? 'local';
     const allowed = await reg.rate([`attachment-put:${id}`], ATTACHMENT_PUTS, 900) &&
@@ -227,8 +231,7 @@ async function handleAttachments(req: Request, env: Env, id: string, rest: strin
     // Stubs pushed with fossil never came through POST: link only bytes this
     // artifact already names or that were uploaded to it.
     const shas = r.result.attachments.flatMap(a => (a.external && a.sha256 ? [a.sha256] : []));
-    const allowed = await reg.allowedAttachments(id, shas);
-    await reg.refAttachments(id, allowed);
+    const { refs: allowed } = await reg.refAttachments(id, await reg.allowedAttachments(id, shas));
     const attachments = await Promise.all(r.result.attachments.map(async a => {
       let missing = a.size < 0;
       if (a.external) {
@@ -253,7 +256,14 @@ async function handleAttachments(req: Request, env: Env, id: string, rest: strin
     const user = changeAuthor(role, actor);
     // Comment links share one identity: each may change only what comment links attached.
     const guard = role === 'comment' ? user : '';
-    if (method === 'DELETE') return reply((await stub.op(who, { op: 'attachDelete', target: b.target, name: b.name, user, guard })) as FossilReply<unknown>);
+    // After a change, stop counting and keep only the R2 bytes the current attachments name.
+    const done = async (r: FossilReply<unknown>, status: number) => {
+      if (!r.ok) return reply(r);
+      const now = (await stub.op(who, { op: 'attachExternals' })) as FossilReply<{ sha256: string[] }>;
+      if (now.ok && now.result) await registry(env).reconcileAttachments(id, now.result.sha256);
+      return json(r.result, status);
+    };
+    if (method === 'DELETE') return done((await stub.op(who, { op: 'attachDelete', target: b.target, name: b.name, user, guard })) as FossilReply<unknown>, 200);
 
     const comment = typeof b.comment === 'string' ? b.comment.slice(0, 1000) : '';
     const maxCount = parseInt(env.MAX_ATTACHMENTS, 10);
@@ -261,23 +271,24 @@ async function handleAttachments(req: Request, env: Env, id: string, rest: strin
       const bytes = new TextEncoder().encode(b.content);
       if (bytes.length > BLOB_THRESHOLD) return json({ error: `content is over ${BLOB_THRESHOLD} bytes: upload it with PUT …/attachments/<sha256> and attach it by sha256`, code: 'too_large' }, 413);
       if (externalRef(bytes)) return json({ error: 'content is a pointer or an attachment stub; attach bytes by sha256 instead', code: 'bad_request' }, 400);
-      const r = (await stub.op(who, { op: 'attachAdd', target: b.target, name: b.name, data: b64encode(bytes), user, comment, guard, maxCount })) as FossilReply<unknown>;
-      return r.ok ? json(r.result, 201) : reply(r);
+      return done((await stub.op(who, { op: 'attachAdd', target: b.target, name: b.name, data: b64encode(bytes), user, comment, guard, maxCount })) as FossilReply<unknown>, 201);
     }
     const { sha256, size, type } = b;
     const max = parseInt(env.MAX_BLOB_BYTES, 10);
     if (typeof sha256 !== 'string' || !isSha(sha256) || typeof size !== 'number' || !Number.isSafeInteger(size) || size < 0 || size > max ||
         typeof type !== 'string' || !MEDIA_TYPE.test(type)) return json({ error: ATTACHMENT_BODY }, 400);
     const reg = registry(env);
-    const allowed = await reg.allowedAttachments(id, [sha256]);
-    // Record the reference before checking R2, so no other artifact's deletion removes the bytes mid-attach.
-    await reg.refAttachments(id, allowed);
-    const head = allowed.length ? await env.BLOBS.head(blobKey(sha256, 'attachments')) : null;
+    // Record the reference before checking R2, so no other artifact's deletion removes the bytes mid-attach;
+    // bytes being deleted are not referenced, and so count as missing. A refused attach drops what it added.
+    const { refs, added } = await reg.refAttachments(id, await reg.allowedAttachments(id, [sha256]));
+    const head = refs.length ? await env.BLOBS.head(blobKey(sha256, 'attachments')) : null;
     if (!head || head.size !== size) {
+      await reg.unrefAttachments(id, added);
       return json({ error: `upload the bytes with PUT …/attachments/${sha256} before attaching them`, code: 'missing_blob' }, 400);
     }
     const r = (await stub.op(who, { op: 'attachAddExternal', target: b.target, name: b.name, sha256, size, type, user, comment, guard, maxCount })) as FossilReply<unknown>;
-    return r.ok ? json(r.result, 201) : reply(r);
+    if (!r.ok) await reg.unrefAttachments(id, added);
+    return done(r, 201);
   }
   return null;
 }
@@ -424,9 +435,9 @@ async function handleArtifact(req: Request, env: Env, ctx: ExecutionContext, id:
       if ((await stub.role(who)) !== 'write') return reply(await stub.op(who, { op: 'commit' }));
       if (!validIcon(b.icon)) return json({ error: `icon must be null or one of: ${ICON_NAMES.join(', ')}` }, 400);
       const pointers = pointersIn(b.files);
-      const allowed = await registry(env).allowedBlobs(id, uploaders(id, actor), Object.values(pointers).map(p => p.sha256));
       // Record the references before checking R2, so no other artifact's deletion removes these blobs mid-commit.
-      await registry(env).refBlobs(id, allowed);
+      // Blobs being deleted are not referenced, and so count as missing.
+      const allowed = await registry(env).refBlobs(id, await registry(env).allowedBlobs(id, uploaders(id, actor), Object.values(pointers).map(p => p.sha256)));
       const missing = await missingBlobs(env, pointers, allowed);
       if (missing.length) return missingReply(missing);
       const user = String(b.user ?? 'web').slice(0, 64);
@@ -460,8 +471,7 @@ async function handleArtifact(req: Request, env: Env, ctx: ExecutionContext, id:
     const pointers = pointersIn(r.result.files);
     // Pointers pushed with fossil never passed through a commit here: link only
     // blobs this artifact already uses or that were uploaded with its edit link.
-    const allowed = await registry(env).allowedBlobs(id, [`artifact:${id}`], Object.values(pointers).map(p => p.sha256));
-    await registry(env).refBlobs(id, allowed);
+    const allowed = await registry(env).refBlobs(id, await registry(env).allowedBlobs(id, [`artifact:${id}`], Object.values(pointers).map(p => p.sha256)));
     const linked = Object.fromEntries(Object.entries(pointers).filter(([, p]) => allowed.includes(p.sha256)));
     const missing = [...(r.result as { missing?: string[] }).missing ?? [], ...Object.keys(pointers).filter(path => !(path in linked))];
     return json({ ...r.result, missing, blobs: await blobLinks(env, id, linked) });
@@ -473,6 +483,7 @@ async function handleArtifact(req: Request, env: Env, ctx: ExecutionContext, id:
     const sha = blob[1]!, reg = registry(env);
     return withCors(await putBlob(req, env, sha, {
       known: async () => (await reg.allowedBlobs(id, uploaders(id, actor), [sha])).length > 0,
+      busy: () => reg.deletingObject(blobKey(sha)),
       record: () => reg.recordUpload(sha, `artifact:${id}`),
     }));
   }
@@ -659,6 +670,7 @@ export default {
       const sha = newBlob[1]!, reg = registry(env), who = principal(actor);
       return withCors(await putBlob(req, env, sha, {
         known: async () => (await reg.allowedBlobs('', [who], [sha])).length > 0,
+        busy: () => reg.deletingObject(blobKey(sha)),
         record: () => reg.recordUpload(sha, who),
       }));
     }

@@ -188,3 +188,36 @@ func TestAttachOpsMaxCount(t *testing.T) {
 		t.Errorf("an external attachment over the count: %v, want quota", err)
 	}
 }
+
+func TestAttachOpsExternals(t *testing.T) {
+	r, ticket := ticketRepo(t)
+	other, _, err := r.TicketAdd(libfossil.TicketOpts{Fields: map[string]string{"title": "u", "status": "Open"}, User: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ext := func(target, name, sha string) {
+		t.Helper()
+		if _, _, err := attachOp(r, "attachAddExternal", attachReq{Target: target, Name: name, User: "u", SHA256: sha, Size: 1, Type: "image/png"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a, b, c := strings.Repeat("aa", 32), strings.Repeat("bb", 32), strings.Repeat("cc", 32)
+	ext(ticket, "a.png", a)
+	ext(other, "b.png", b)
+	ext(ticket, "replaced.png", c)
+	ext(ticket, "replaced.png", a) // c is no longer current
+	if _, _, err := attachOp(r, "attachAdd", attachReq{Target: ticket, Name: "t.txt", User: "u", Content: []byte("x")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := attachOp(r, "attachDelete", attachReq{Target: other, Name: "b.png", User: "u"}); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := attachOp(r, "attachExternals", attachReq{})
+	if !ok || err != nil {
+		t.Fatalf("attachExternals: ok=%v err=%v", ok, err)
+	}
+	shas := got.(map[string]any)["sha256"].([]string)
+	if strings.Join(shas, ",") != a {
+		t.Errorf("current external sha256s = %v, want only %s", shas, a)
+	}
+}

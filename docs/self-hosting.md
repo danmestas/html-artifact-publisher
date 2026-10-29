@@ -102,7 +102,7 @@ sh scripts/deploy.sh
 The first deploy:
 - refuses to run if a setting is missing or unsafe (for example an `http://` origin);
 - refuses an engine over the size budget;
-- creates the R2 bucket `html-artifact-publisher-blobs` if it doesn't exist;
+- creates the R2 bucket `html-artifact-publisher-blobs` if it doesn't exist, and gives it a lifecycle rule, `expire-tmp`, that deletes objects under `tmp/` after a day (uploads stage there until they are verified);
 - deploys `artifact-pages` from `wrangler.public.jsonc`, using the same R2 bucket as the app but no app bindings or secrets;
 - discovers its `workers.dev` origin unless you supplied `PUBLIC_ORIGIN`;
 - creates the Durable Object classes (`Repo`, `Registry`);

@@ -149,7 +149,7 @@ test('bytes go to R2 at attachments/<sha256> and the thread holds a stub naming 
   assert.equal(stolen.json?.code, 'missing_blob', stolen.text);
 });
 
-test('deleting an attachment hides it; its bytes stay', async () => {
+test('removing an attachment hides it and frees its bytes', async () => {
   const { a, ticket } = await withThread();
   const bytes = randomBytes(5000), sha = sha256(bytes);
   assert.equal((await api(`/api/artifacts/${a.id}/attachments/${sha}`, { method: 'PUT', token: a.comment, raw: bytes, type: 'application/pdf' })).status, 201);
@@ -162,8 +162,12 @@ test('deleting an attachment hides it; its bytes stay', async () => {
   assert.equal((await api(`/api/artifacts/${a.id}/attachments`, { method: 'DELETE', token: a.comment, body: { target: ticket, name: 'doc.pdf' } })).status, 404);
   assert.equal((await fetch(worker.base + before.url)).status, 404, 'a link names the current attachment, which is gone');
 
-  // Attached again, it serves the same bytes: they never left R2.
-  assert.equal((await api(`/api/artifacts/${a.id}/attachments`, { method: 'POST', token: a.comment, body: { target: ticket, name: 'doc.pdf', type: 'application/pdf', sha256: sha, size: bytes.length } })).status, 201);
+  // Nothing names the bytes any more, so they are gone: attaching them again needs them again.
+  const attachAgain = () => api(`/api/artifacts/${a.id}/attachments`, { method: 'POST', token: a.comment, body: { target: ticket, name: 'doc.pdf', type: 'application/pdf', sha256: sha, size: bytes.length } });
+  assert.equal((await attachAgain()).json?.code, 'missing_blob');
+  const reupload = await api(`/api/artifacts/${a.id}/attachments/${sha}`, { method: 'PUT', token: a.comment, raw: bytes, type: 'application/pdf' });
+  assert.equal(reupload.json.stored, true, 'the bytes were deleted from R2');
+  assert.equal((await attachAgain()).status, 201);
   const again = (await list(a, ticket))['doc.pdf'];
   assert.ok(Buffer.from(await (await fetch(worker.base + again.url)).arrayBuffer()).equals(bytes));
 });
@@ -310,4 +314,68 @@ test('deleting an artifact deletes what was uploaded to it but never used', asyn
   assert.equal((await api(`/api/artifacts/${a.id}`, { method: 'DELETE', token: a.write })).status, 204);
   assert.equal((await upload(other, attachment)).json.stored, true, 'the attachment upload went with its artifact');
   assert.equal((await putBlob(other)).json.stored, true, 'the blob upload went with its artifact');
+});
+
+test('removing or replacing attachments gives their bytes back to the quota', async () => {
+  // MAX_ATTACHMENT_BYTES is 400000 here.
+  const { a, ticket } = await withThread();
+  const attachBytes = async (name, bytes, token) => {
+    assert.equal((await upload(a, bytes, token)).status, 201);
+    const r = await api(`/api/artifacts/${a.id}/attachments`, { method: 'POST', token, body: { target: ticket, name, type: 'image/png', sha256: sha256(bytes), size: bytes.length } });
+    assert.equal(r.status, 201, r.text);
+  };
+  for (const name of ['1.png', '2.png', '3.png']) await attachBytes(name, randomBytes(120_000), a.comment);
+  for (const name of ['1.png', '2.png', '3.png']) assert.equal((await detach(a, ticket, name, a.comment)).status, 200);
+  await attachBytes('editor.png', randomBytes(120_000), a.write);
+
+  // Replacing one by name frees the bytes it replaced.
+  await attachBytes('r.png', randomBytes(130_000), a.write);
+  await attachBytes('r.png', randomBytes(130_000), a.write);
+  await attachBytes('s.png', randomBytes(130_000), a.write);
+
+  // A refused attach keeps no hold on the bytes: they stay an unattached upload.
+  const mine = randomBytes(10_000);
+  assert.equal((await upload(a, mine)).status, 201);
+  const refused = await api(`/api/artifacts/${a.id}/attachments`, { method: 'POST', token: a.comment, body: { target: ticket, name: 'editor.png', type: 'image/png', sha256: sha256(mine), size: mine.length } });
+  assert.equal(refused.status, 403, refused.text);
+});
+
+test('bytes being deleted cannot be reused until the deletion is done', async () => {
+  // A second Worker that pauses between deciding what to delete and deleting it.
+  const slowWork = mkdtempSync(join(tmpdir(), 'artifact-attachments-slow-'));
+  const slow = await startWorker(slowWork, { TEST_CLEANUP_PAUSE_MS: '4000' });
+  try {
+    const call = (path, { method = 'GET', token, body, raw } = {}) => fetch(slow.base + path, {
+      method, headers: { Authorization: `Token ${token}`, 'Content-Type': 'image/png' }, body: raw ?? (body === undefined ? undefined : JSON.stringify(body)),
+    });
+    const a = await createArtifact(slow.base, slow.owner, '<p>a</p>'), b = await createArtifact(slow.base, slow.owner, '<p>b</p>');
+    const bytes = randomBytes(5000), sha = sha256(bytes);
+    const pointer = Buffer.from(`artifact-blob 1\nsha256 ${sha}\nsize ${bytes.length}\ntype image/png\n`).toString('base64');
+    const commit = async x => {
+      const tip = (await (await call(`/api/artifacts/${x.id}`, { token: x.read })).json()).tip;
+      return call(`/api/artifacts/${x.id}`, { method: 'PUT', token: x.write, body: { parent: tip, files: { 'img.png': pointer } } });
+    };
+    assert.equal((await call(`/api/artifacts/${a.id}/blobs/${sha}`, { method: 'PUT', token: a.write, raw: bytes })).status, 201);
+    assert.equal((await commit(a)).status, 200);
+    assert.equal((await call(`/api/artifacts/${b.id}/blobs/${sha}`, { method: 'PUT', token: b.write, raw: bytes })).status, 200, 'b proves it has the bytes');
+
+    // Deleting a, the last artifact pointing at the blob, decides to delete it, then pauses.
+    const deleting = call(`/api/artifacts/${a.id}`, { method: 'DELETE', token: a.write });
+    await new Promise(r => setTimeout(r, 1500));
+    const during = await commit(b);
+    assert.equal(during.status, 400, await during.clone().text());
+    assert.equal((await during.json()).code, 'missing_blob');
+    assert.equal((await call(`/api/artifacts/${b.id}/blobs/${sha}`, { method: 'PUT', token: b.write, raw: bytes })).status, 409);
+    assert.equal((await deleting).status, 204);
+
+    // Done: b uploads the bytes again and keeps them.
+    const again = await call(`/api/artifacts/${b.id}/blobs/${sha}`, { method: 'PUT', token: b.write, raw: bytes });
+    assert.equal(again.status, 201);
+    assert.equal((await commit(b)).status, 200);
+    const bundle = await (await call(`/api/artifacts/${b.id}/bundle`, { token: b.read })).json();
+    assert.ok(Buffer.from(await (await fetch(slow.base + bundle.blobs['img.png'].url)).arrayBuffer()).equals(bytes));
+  } finally {
+    slow.stop();
+    rmSync(slowWork, { recursive: true, force: true });
+  }
 });

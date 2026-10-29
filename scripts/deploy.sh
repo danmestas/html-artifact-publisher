@@ -57,6 +57,11 @@ node -e '
 # The blob bucket (wrangler.jsonc, BLOBS) must exist before a Worker that binds it.
 bucket=html-artifact-publisher-blobs
 npx wrangler r2 bucket info "$bucket" >/dev/null 2>&1 || npx wrangler r2 bucket create "$bucket"
+# Uploads stage under tmp/ and are copied to their name once verified; a stage
+# outlives its upload only if the Worker stopped mid-upload. Expire those.
+if ! npx wrangler r2 bucket lifecycle list "$bucket" 2>/dev/null | grep -q 'expire-tmp'; then
+  npx wrangler r2 bucket lifecycle add "$bucket" expire-tmp tmp/ --expire-days 1 --force
+fi
 # Deploy static serving first; it has only R2, never app secrets or account bindings.
 if ! npx wrangler deploy --config wrangler.public.jsonc >"$public_log" 2>&1; then
   cat "$public_log" >&2

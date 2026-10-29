@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"errors"
+	"sort"
 	"time"
 
 	libfossil "github.com/danmestas/go-libfossil"
@@ -102,6 +103,43 @@ func attachOp(r *libfossil.Repo, op string, a attachReq) (result any, ok bool, e
 			return nil, true, fail("bad_request", "%v", err)
 		}
 		return map[string]any{"artifact": artifact}, true, nil
+
+	case "attachExternals":
+		// The R2 bytes the repository's current attachments name, across every
+		// thread, sorted and distinct: what the Worker must keep and count.
+		rows, err := r.DB().Query("SELECT DISTINCT target FROM attachment WHERE isLatest AND coalesce(src,'') != ''")
+		if err != nil {
+			return nil, true, err
+		}
+		var targets []string
+		for rows.Next() {
+			var t string
+			if err := rows.Scan(&t); err != nil {
+				rows.Close()
+				return nil, true, err
+			}
+			targets = append(targets, t)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, true, err
+		}
+		seen := map[string]bool{}
+		shas := []string{}
+		for _, t := range targets {
+			list, err := r.Attachments(t)
+			if err != nil {
+				return nil, true, err
+			}
+			for _, at := range list {
+				if at.External != nil && !seen[at.External.SHA256] {
+					seen[at.External.SHA256] = true
+					shas = append(shas, at.External.SHA256)
+				}
+			}
+		}
+		sort.Strings(shas)
+		return map[string]any{"sha256": shas}, true, nil
 
 	case "attachDelete":
 		opts.Comment = "" // fossil writes none on a deletion

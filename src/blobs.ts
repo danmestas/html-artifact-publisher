@@ -78,8 +78,10 @@ export async function missingBlobs(env: Env, pointers: Record<string, BlobRef>, 
 export interface Uploader {
   /** HEAD: has this caller already proven it holds these bytes? */
   known(): Promise<boolean>;
-  /** Called once the bytes are verified. */
-  record(): Promise<void>;
+  /** Whether the stored object is being deleted: an upload must wait until it is gone. */
+  busy(): Promise<boolean>;
+  /** Called once the bytes are verified; false when they are being deleted. */
+  record(): Promise<boolean>;
 }
 
 /**
@@ -101,6 +103,7 @@ export async function putBlob(req: Request, env: Env, sha: string, who: Uploader
   if (!Number.isSafeInteger(length) || length < 0) return text(411, 'Content-Length is required');
   if (length > max) return text(413, `file is too large: at most ${max} bytes`);
   if (!req.body) return text(400, 'empty body');
+  if (await who.busy()) return text(409, BUSY);
   const existing = await env.BLOBS.head(key);
   const digest = new crypto.DigestStream('SHA-256');
   if (existing) {
@@ -109,7 +112,7 @@ export async function putBlob(req: Request, env: Env, sha: string, who: Uploader
     try { await req.body.pipeTo(digest); } catch { return text(400, 'upload did not complete'); }
     const actual = hex(new Uint8Array(await digest.digest));
     if (actual !== sha) return text(400, `the bytes don't match their name: they hash to ${actual}`);
-    await who.record();
+    if (!(await who.record())) return text(409, BUSY);
     return Response.json({ sha256: sha, size: length, stored: false });
   }
 
@@ -140,7 +143,7 @@ export async function putBlob(req: Request, env: Env, sha: string, who: Uploader
   } finally {
     await env.BLOBS.delete(staged);
   }
-  await who.record();
+  if (!(await who.record())) return text(409, BUSY);
   return Response.json({ sha256: sha, size: length, stored: true }, { status: 201 });
 }
 
@@ -264,6 +267,8 @@ export function serveExternalAttachment(req: Request, env: Env, sha: string, nam
 export function serveAttachmentBytes(bytes: Uint8Array, name: string, type: string, maxAge: number): Response {
   return new Response(bytes, { headers: { ...attachmentHeaders(name, type), 'Cache-Control': `private, max-age=${maxAge}`, 'Content-Length': String(bytes.length) } });
 }
+
+const BUSY = 'these bytes are being deleted: upload them again in a moment';
 
 function text(status: number, error: string): Response {
   return Response.json({ error }, { status, headers: { 'Cache-Control': 'no-store' } });

@@ -861,6 +861,43 @@ test('comment link: an artifact from before comment links gets one from its edit
   assert.ok(!columns().includes('comment_hash'), 'no second PRAGMA table_info check');
 });
 
+test('a new comment link cuts off the old one and leaves the others', async () => {
+  const a = await create({ 'index.html': b64('<p>leaky</p>') });
+  const rotate = token => api(`/api/artifacts/${a.id}/comment-link`, { method: 'POST', token });
+  const post = token => api(`/api/artifacts/${a.id}/tickets`, { method: 'POST', token, body: { text: 'spam' } });
+  assert.equal((await post(a.comment)).status, 201);
+
+  // Only an editor may replace it.
+  assert.equal((await rotate(a.comment)).status, 403, 'a comment link cannot replace itself');
+  assert.equal((await rotate(a.read)).status, 403);
+  assert.equal((await api(`/api/artifacts/${a.id}`, { token: a.comment })).json.role, 'comment', 'refusals change nothing');
+
+  const r = await rotate(a.write);
+  assert.equal(r.status, 200, r.text);
+  const fresh = r.json.commentToken;
+  assert.match(fresh, /^[0-9a-f]{64}$/);
+  assert.notEqual(fresh, a.comment);
+  assert.equal(r.json.commentUrl, `${a.viewerUrl.split('#')[0]}#${fresh}`);
+
+  // The old link is unknown at once, for reads and writes alike.
+  assert.equal((await api(`/api/artifacts/${a.id}`, { token: a.comment })).status, 404);
+  assert.equal((await api(`/api/artifacts/${a.id}/tickets`, { token: a.comment })).status, 404);
+  assert.equal((await post(a.comment)).status, 404);
+  assert.equal((await post(fresh)).status, 201);
+  assert.equal((await api(`/api/artifacts/${a.id}`, { token: a.write })).json.commentToken, fresh, 'editors now share the new one');
+  assert.equal((await api(`/api/artifacts/${a.id}`, { token: a.read })).status, 200, 'the read link still works');
+  assert.equal((await api(`/api/artifacts/${a.id}`, { token: a.write })).json.role, 'write', 'and so does the edit link');
+
+  // The CLI does the same with the edit link, and refuses any other.
+  const out = cli('new-comment-link', '--json', a.editUrl);
+  assert.equal(out.code, 0, out.out);
+  const next = JSON.parse(out.out).commentUrl;
+  assert.notEqual(tokenOf(next), fresh);
+  assert.equal((await post(fresh)).status, 404);
+  assert.equal((await post(tokenOf(next))).status, 201);
+  assert.notEqual(cli('new-comment-link', next).code, 0, 'a comment link cannot replace itself');
+});
+
 test('viewer shell', async () => {
   const a = await create({ 'index.html': b64('<p>view</p>') });
   const r = await fetch(`${base}/v/${a.id}`);

@@ -491,6 +491,15 @@ export async function viewerQA({ base, a, api, output, attach }) {
     run('click', '#titleBtn');
     assert.ok(download('#downloadFilesBtn').includes(Buffer.from('version.txt')), 'artifact details downloads files added in the latest version');
     run('click', '#shareBtn');
+    // Replacing the comment link takes two clicks and cuts off the old one.
+    const leaked = evaluate(`document.getElementById('commentLink').value.split('#')[1]`);
+    press('#shareRows .renew');
+    assert.equal(evaluate(`document.getElementById('commentLink').value.split('#')[1]`), leaked, 'one click only asks');
+    press('#shareRows .renew');
+    run('wait', '--fn', `document.getElementById('commentLink')?.value.split('#')[1] !== ${JSON.stringify(leaked)}`);
+    const renewed = evaluate(`document.getElementById('commentLink').value.split('#')[1]`);
+    assert.equal((await api(`/api/artifacts/${a.id}`, { token: leaked })).status, 404, 'the old comment link stops working');
+    assert.equal((await api(`/api/artifacts/${a.id}`, { token: renewed })).json.role, 'comment');
     run('click', '#exportTab');
     assert.ok(download('#downloadBtn').includes(Buffer.from('version.txt')), 'Share export retains its download action');
     run('click', '#moreBtn');

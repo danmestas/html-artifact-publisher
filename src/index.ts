@@ -19,6 +19,7 @@
  *   GET    /api/artifacts/:id                Tip, title, timeline, attached responder (read)
  *   PUT    /api/artifacts/:id                New check-in; `parent` must be the tip (write)
  *   DELETE /api/artifacts/:id                Delete (write)
+ *   POST   /api/artifacts/:id/comment-link   Replace the comment link; the old one stops working (write)
  *   GET    /api/artifacts/:id/bundle?at=     Every file of a check-in (read)
  *   GET    /api/artifacts/:id/files/<path>   One file (read); a blob's pointer file, for blobs
  *   PUT    /api/artifacts/:id/blobs/:sha256  Upload a blob before committing its pointer (write)
@@ -484,6 +485,14 @@ async function handleArtifact(req: Request, env: Env, ctx: ExecutionContext, id:
       await registry(env).audit(actor.user?.id ?? 'instance-owner', 'delete', id, entry?.title);
       return new Response(null, { status: 204, headers: { ...corsHeaders(), ...secHeaders() } });
     }
+  }
+
+  if (rest === '/comment-link' && method === 'POST') {
+    if ((await stub.role(who)) === null) return json({ error: 'not found', code: 'not_found' }, 404);
+    const token = await stub.rotateCommentToken(who);
+    if (!token) return json({ error: 'the edit link is required to replace the comment link' }, 403);
+    await registry(env).audit(actor.user?.id ?? 'instance-owner', 'rotate-comment-link', id, entry?.title);
+    return json({ commentToken: token, commentUrl: `${url.origin}/v/${entry?.slug ?? id}#${token}` });
   }
 
   if (rest === '/bundle' && method === 'GET') {

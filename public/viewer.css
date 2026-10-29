@@ -228,6 +228,7 @@ button:disabled { cursor: wait; opacity: .6; }
   background: var(--bar); color: var(--ink-2); font: 12px var(--mono);
 }
 .share-row button { height: 34px; padding: 0 12px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--surface); font-weight: 500; }
+.share-row .renew { align-self: flex-start; color: var(--muted); }
 .private { font-size: 11.5px; font-weight: 500; color: var(--accent-ink); background: var(--accent-soft); border-radius: 999px; padding: 1px 7px; }
 
 .more button { text-align: left; padding: 9px 10px; border: none; border-radius: 7px; background: transparent; }

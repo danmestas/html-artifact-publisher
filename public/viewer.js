@@ -815,6 +815,37 @@ function shareRow(id, label, hint, value, { secret = false } = {}) {
     el('div', { className: 'copy' }, input, copy));
 }
 
+/**
+ * The comment link, with a way to replace it when it leaks. The first click
+ * asks; a second, within ten seconds, cuts off the old link. The state lives
+ * outside the row because the Share menu re-renders while it is open.
+ */
+let commentRenew = { state: 'idle', timer: 0, error: '' };
+function commentLinkRow() {
+  const row = shareRow('commentLink', 'Comment link', 'Can view every version and comment, not edit.', linkWith(info.commentToken), { secret: true });
+  const label = { idle: commentRenew.error || 'New link', asking: 'Old link stops working. Replace?', busy: 'Replacing…' }[commentRenew.state];
+  const renew = el('button', { type: 'button', className: 'renew', textContent: label, disabled: commentRenew.state === 'busy' });
+  renew.addEventListener('click', async () => {
+    clearTimeout(commentRenew.timer);
+    if (commentRenew.state === 'idle') {
+      commentRenew = { state: 'asking', error: '', timer: setTimeout(() => { commentRenew = { state: 'idle', timer: 0, error: '' }; renderShare(); }, 10000) };
+      renderShare();
+      return;
+    }
+    commentRenew = { state: 'busy', timer: 0, error: '' };
+    renderShare();
+    try {
+      info.commentToken = (await art.newCommentLink()).commentToken;
+      commentRenew = { state: 'idle', timer: 0, error: '' };
+    } catch (e) {
+      commentRenew = { state: 'idle', timer: 0, error: `Could not replace: ${e.message}` };
+    }
+    renderShare();
+  });
+  row.append(renew);
+  return row;
+}
+
 let publications = [];
 let publicationCursor = '';
 let publicationBusy = false;
@@ -919,7 +950,7 @@ function renderShare() {
       shareRow('libraryLink', 'Library link',
         'Only the owner, instance owner, and people with named access can open this link after signing in.',
         location.origin + location.pathname),
-      can.commentLink ? shareRow('commentLink', 'Comment link', 'Can view every version and comment, not edit.', linkWith(info.commentToken), { secret: true }) : null,
+      can.commentLink ? commentLinkRow() : null,
     ].filter(Boolean));
     $('shareFoot').textContent = 'Manage named access from your library. This link does not grant access.';
     return;
@@ -933,7 +964,7 @@ function renderShare() {
   const clone = `fossil clone ${location.origin.replace('://', `://${login}:${link.token}@`)}/r/${art.id}`;
   $('shareRows').replaceChildren(...[
     readToken ? shareRow('readLink', 'Read link', 'Anyone with it can view every version.', linkWith(readToken)) : null,
-    can.commentLink ? shareRow('commentLink', 'Comment link', 'Can view every version and comment, not edit.', linkWith(info.commentToken), { secret: true }) : null,
+    can.commentLink ? commentLinkRow() : null,
     writer ? shareRow('editLink', 'Edit link', 'Can publish new versions and delete. Share only with editors.', linkWith(link.token), { secret: true }) : null,
     writer || reader ? shareRow('cloneCmd', 'Clone with Fossil', writer ? 'The whole history, to edit locally and push back.' : 'The whole history, read-only.', clone, { secret: writer }) : null,
   ].filter(Boolean));

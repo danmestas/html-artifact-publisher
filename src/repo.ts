@@ -234,6 +234,18 @@ export class Repo extends DurableObject<Env> {
     return stored();
   }
 
+  /**
+   * Replace the comment token, for an editor cutting off a leaked comment
+   * link. The old token stops working at once; read and edit links are kept.
+   */
+  async rotateCommentToken(caller: Caller): Promise<string | null> {
+    if ((await this.role(caller)) !== 'write') return null;
+    const token = genToken();
+    const hash = await sha256hex(token);
+    this.ctx.storage.sql.exec(`UPDATE _artifact SET comment_hash = ?, comment_token = ?`, hash, token);
+    return token;
+  }
+
   async rename(title: string): Promise<void> {
     this.ctx.storage.sql.exec(`UPDATE _artifact SET title = ?`, title);
   }

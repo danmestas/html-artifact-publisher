@@ -150,6 +150,9 @@ export class Artifact {
 
   remove() { return call(this.base, { method: 'DELETE', auth: this.auth }); }
 
+  /** Replace the comment link; the old one stops working. Returns { commentToken, commentUrl }. */
+  newCommentLink() { return call(`${this.base}/comment-link`, { method: 'POST', auth: this.auth }); }
+
   /** The newest-changed comment threads: { tickets: [{ uuid, status, changed, fields, changes }], limit, truncated }. */
   tickets() { return call(`${this.base}/tickets`, { auth: this.auth }); }
   /** Open a thread ({ text, anchor? }) or change one ({ ticketUuid, text?, status? }). */

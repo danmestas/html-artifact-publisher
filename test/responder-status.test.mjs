@@ -63,6 +63,13 @@ test('applyStatus: since kept for the same change, reset for another; updated al
   assert.equal(Object.keys(f.threads).length, 1, 'the input is not mutated');
 });
 
+test('applyStatus: done for an older change keeps the entry of a newer one', () => {
+  const t = hex('1'), c1 = hex('a'), c2 = hex('b');
+  const waiting = applyStatus({ threads: {} }, t, c2, 'delivered', undefined, T1);
+  assert.deepEqual(applyStatus(waiting, t, c1, 'done', undefined, T2), waiting, 'the follow-up stays delivered');
+  assert.deepEqual(applyStatus(waiting, t, c2, 'done', undefined, T2), { threads: {} }, 'its own done still clears it');
+});
+
 test('applyStatus: at most 200 entries; the oldest updated goes first', () => {
   assert.equal(STATUS_ENTRIES_MAX, 200);
   let f = { threads: {} };

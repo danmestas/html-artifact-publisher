@@ -206,7 +206,14 @@ func handle(req request, body []byte) (any, error) {
 		if err := grantUnversioned(r); err != nil {
 			return nil, err
 		}
-		reply, err := r.HandleSyncWithOpts(context.Background(), body, libfossil.HandleOpts{LoginCookie: req.Cookie})
+		reply, err := r.HandleSyncWithOpts(context.Background(), body, libfossil.HandleOpts{LoginCookie: req.Cookie, MaxStoredBytes: maxStored})
+		var refused *libfossil.RefusedError
+		if errors.As(err, &refused) {
+			// The request rolled back and stores nothing. The client must see
+			// why, not the rollback itself; the abort reason becomes its error card.
+			aborted = refused.Message
+			return nil, err
+		}
 		if err != nil {
 			return nil, err
 		}

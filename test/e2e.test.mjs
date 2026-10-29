@@ -417,12 +417,46 @@ test('fossil clone and push', async () => {
   const fresh = join(work, `${a.id}-big.fossil`);
   assert.ok(fossil('clone', a.cloneUrl, fresh).ok);
   const tooBig = fossil('push', fresh, a.cloneUrl, 'big.bin', `@${big}`, 'too big');
-  assert.ok(!tooBig.ok && /too large to store/.test(tooBig.out), tooBig.out);
+  assert.ok(!tooBig.ok && /artifact [0-9a-f]{40,64} is \d+ bytes stored; this repository stores at most 1990000 bytes per artifact/.test(tooBig.out), tooBig.out);
   // A check-in can arrive before its file in a separate sync request.
   assert.equal((await api(`/api/artifacts/${a.id}/files/big.bin`, { token: a.read })).status, 404);
   const recovery = join(work, `${a.id}-recovery.fossil`);
   assert.ok(fossil('clone', a.cloneUrl, recovery).ok, 'repository still clones after rejected push');
   assert.equal((await api(`/api/artifacts/${a.id}/files/index.html`, { token: a.read })).text, '<h1>pushed</h1>', 'previously stored content remains readable');
+});
+
+test('a stock fossil push of a file too large to store is refused whole', { skip: !haveStockFossil && !process.env.CI && 'stock fossil is not installed' }, async () => {
+  const a = await create({ 'index.html': b64('<h1>keep</h1>') });
+  const clone = join(work, `${a.id}-stock-big.fossil`);
+  const dir = join(work, `${a.id}-stock-big`);
+  mkdirSync(dir);
+  assert.ok(stock('clone', a.cloneUrl, clone).ok);
+  const opened = stock('open', clone, '--workdir', dir, '--nosync');
+  assert.ok(opened.ok, opened.out);
+  const setting = stock('settings', 'autosync', 'off', '-R', clone);
+  assert.ok(setting.ok, setting.out);
+  const bytes = randomBytes(3_000_000);
+  writeFileSync(join(dir, 'big.bin'), bytes);
+  writeFileSync(join(dir, 'index.html'), '<h1>with big</h1>');
+  const added = stock('add', 'big.bin', '--chdir', dir);
+  assert.ok(added.ok, added.out);
+  const committed = stock('commit', '-m', 'too big', '--no-warnings', '--chdir', dir);
+  assert.ok(committed.ok, committed.out);
+
+  const pushed = stock('push', a.cloneUrl, '-R', clone);
+  const hash = createHash('sha3-256').update(bytes).digest('hex');
+  // Stock fossil reports the server's error but exits 0.
+  assert.match(pushed.out, new RegExp(`artifact ${hash} is \\d+ bytes stored; this repository stores at most 1990000 bytes per artifact`));
+
+  // Nothing from the refused round is stored: not the file, not the check-in
+  // or the edit to index.html that travelled with it.
+  const info = await api(`/api/artifacts/${a.id}`, { token: a.read });
+  assert.equal(info.json.timeline.length, 1);
+  assert.equal((await api(`/api/artifacts/${a.id}/files/index.html`, { token: a.read })).text, '<h1>keep</h1>');
+  const check = join(work, `${a.id}-stock-check.fossil`);
+  assert.ok(stock('clone', a.cloneUrl, check).ok, 'repository still clones after the refused push');
+  const held = stock('sql', '-R', check, `SELECT count(*) FROM blob WHERE uuid='${hash}'`);
+  assert.equal(held.out.trim(), '0', held.out);
 });
 
 test('comment link: tickets through the API, a stock fossil clone and a terminal push', { skip: !haveStockFossil && !process.env.CI && 'stock fossil is not installed' }, async () => {

@@ -380,7 +380,7 @@ async function handleCreate(req: Request, env: Env): Promise<Response> {
     return reply(r);
   }
   await registry(env).touch(id, r.result.tip);
-  await registry(env).refBlobs(id, shas);
+  await registry(env).consumeUploads(principal(actor), await registry(env).refBlobs(id, shas));
   await registry(env).audit(actor.user?.id ?? 'instance-owner', 'publish', id, title);
 
   const origin = new URL(req.url).origin;
@@ -473,6 +473,7 @@ async function handleArtifact(req: Request, env: Env, ctx: ExecutionContext, id:
       if (!r.ok || !r.result) return reply(r);
       if (title) await stub.rename(title);
       await registry(env).touch(id, r.result.tip, title, b.icon);
+      if (actor.legacy || actor.user) await registry(env).consumeUploads(principal(actor), allowed);
       wakeOnHeader(env, ctx, req, id, r.result.tip, user);
       return json(r.result);
     }
@@ -688,6 +689,7 @@ export default {
       const actor = await identity(req, env);
       if (!actor.legacy && !actor.user) return json({ error: 'Unauthorized' }, 401);
       const sha = newBlob[1]!, reg = registry(env), who = principal(actor);
+      if (method === 'PUT') await reg.sweepBlobUploads(who);
       return withCors(await putBlob(req, env, sha, {
         known: async () => (await reg.allowedBlobs('', [who], [sha])).length > 0,
         busy: () => reg.deletingObject(blobKey(sha)),

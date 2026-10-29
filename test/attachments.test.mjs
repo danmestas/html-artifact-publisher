@@ -357,7 +357,6 @@ test('bytes being deleted cannot be reused until the deletion is done', async ()
     };
     assert.equal((await call(`/api/artifacts/${a.id}/blobs/${sha}`, { method: 'PUT', token: a.write, raw: bytes })).status, 201);
     assert.equal((await commit(a)).status, 200);
-    assert.equal((await call(`/api/artifacts/${b.id}/blobs/${sha}`, { method: 'PUT', token: b.write, raw: bytes })).status, 200, 'b proves it has the bytes');
 
     // Deleting a, the last artifact pointing at the blob, decides to delete it, then pauses.
     const deleting = call(`/api/artifacts/${a.id}`, { method: 'DELETE', token: a.write });
@@ -413,7 +412,7 @@ test('an attach landing while a removal reconciles keeps its bytes', async () =>
   });
 });
 
-/** Artifact `a` points at blob `bytes`; `b` has uploaded them too. Returns helpers. */
+/** Artifact `a` points at blob `bytes`, and only `a` holds them. Returns helpers. */
 async function sharedBlob(w, call) {
   const a = await createArtifact(w.base, w.owner, '<p>a</p>'), b = await createArtifact(w.base, w.owner, '<p>b</p>');
   const bytes = randomBytes(5000), sha = sha256(bytes);
@@ -425,7 +424,6 @@ async function sharedBlob(w, call) {
   const put = x => call(`/api/artifacts/${x.id}/blobs/${sha}`, { method: 'PUT', token: x.write, raw: bytes });
   assert.equal((await put(a)).status, 201);
   assert.equal((await commit(a)).status, 200);
-  assert.equal((await put(b)).status, 200);
   return { a, b, bytes, commit, put };
 }
 

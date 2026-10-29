@@ -20,17 +20,26 @@ const PENDING_MAX = 5 * 60_000;
 
 /**
  * Test-only settings, unset in production: a pause between deciding to delete
- * and deleting, an injected R2 failure or abandoned deletion, and how old a
- * tombstone must be before the next access finishes its deletion (default 5 minutes).
+ * and deleting, an injected R2 failure or abandoned deletion, how old a
+ * tombstone must be before the next access finishes its deletion (default 5
+ * minutes), and how long an unused upload holds its bytes (default a day).
  */
-export function testHooks(env: Env): { pause: number; fault: string; staleMs: number } {
+export function testHooks(env: Env): { pause: number; fault: string; staleMs: number; holdSeconds: number } {
   const v = env as unknown as Record<string, string | undefined>;
   // Empty is unset: deploy.sh blanks them.
-  return { pause: Number(v.TEST_CLEANUP_PAUSE_MS || 0), fault: v.TEST_CLEANUP_FAULT || '', staleMs: Number(v.TEST_TOMBSTONE_STALE_MS || 300_000) };
+  return {
+    pause: Number(v.TEST_CLEANUP_PAUSE_MS || 0), fault: v.TEST_CLEANUP_FAULT || '', staleMs: Number(v.TEST_TOMBSTONE_STALE_MS || 300_000),
+    holdSeconds: v.TEST_UPLOAD_HOLD_MS ? Number(v.TEST_UPLOAD_HOLD_MS) / 1000 : UNUSED_UPLOAD_HOLD,
+  };
 }
 const LIVE = '(expires_at IS NULL OR expires_at > ?)';
 
+/** How long an owner's or account's upload holds its bytes before it is used (seconds). */
+const UNUSED_UPLOAD_HOLD = 24 * 3600;
+
 export class Registry extends DurableObject<Env> {
+  /** R2 keys this instance is deleting now (see deleteObjects). */
+  private inFlight = new Set<string>();
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     const sql = ctx.storage.sql;
@@ -57,6 +66,11 @@ export class Registry extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS deleting (key TEXT PRIMARY KEY, deleting_at INTEGER NOT NULL DEFAULT 0);
       CREATE INDEX IF NOT EXISTS deleting_at ON deleting(deleting_at);`);
     const cols = sql.exec<{ name: string }>('PRAGMA table_info(artifacts)').toArray();
+    if (!sql.exec<{ name: string }>('PRAGMA table_info(blob_uploads)').toArray().some(c => c.name === 'uploaded_at')) {
+      // Uploads recorded before these columns count as old: they no longer hold their bytes on their own.
+      sql.exec('ALTER TABLE blob_uploads ADD COLUMN uploaded_at INTEGER NOT NULL DEFAULT 0');
+      sql.exec('ALTER TABLE blob_uploads ADD COLUMN used INTEGER NOT NULL DEFAULT 0');
+    }
     if (!cols.some(c => c.name === 'owner_id')) sql.exec('ALTER TABLE artifacts ADD COLUMN owner_id TEXT');
     if (!cols.some(c => c.name === 'archived')) sql.exec('ALTER TABLE artifacts ADD COLUMN archived INTEGER NOT NULL DEFAULT 0');
     if (!cols.some(c => c.name === 'icon')) sql.exec("ALTER TABLE artifacts ADD COLUMN icon TEXT NOT NULL DEFAULT 'document'");
@@ -182,8 +196,12 @@ export class Registry extends DurableObject<Env> {
       sql.exec('DELETE FROM blob_uploads WHERE principal IN (?,?)',`artifact:${id}`,`attachment:${id}`);
       const used = (q: string, sha: string) => sql.exec(q,sha).toArray().length > 0;
       return this.tombstone([
-        // A blob lives as long as some artifact points at it.
-        ...[...blobs].filter(sha => !used('SELECT 1 FROM blob_refs WHERE sha = ? LIMIT 1',sha)).map(sha => `b/${sha}`),
+        // A blob lives as long as some artifact points at it, another artifact holds an upload of
+        // it (which its tree, pushed from a clone, may name before anyone views it), or someone
+        // uploaded it within a day and has not used it yet.
+        ...[...blobs].filter(sha => !used('SELECT 1 FROM blob_refs WHERE sha = ? LIMIT 1',sha) &&
+          !sql.exec(`SELECT 1 FROM blob_uploads WHERE sha = ? AND principal NOT LIKE 'attachment:%'
+            AND (principal LIKE 'artifact:%' OR (uploaded_at > ? AND NOT used)) LIMIT 1`,sha,now() - testHooks(this.env).holdSeconds).toArray().length).map(sha => `b/${sha}`),
         ...[...attachments].filter(sha => !this.attachmentHeld(sha)).map(sha => `attachments/${sha}`),
       ]);
     });
@@ -207,21 +225,30 @@ export class Registry extends DurableObject<Env> {
   private async deleteObjects(keys: string[]): Promise<void> {
     if (!keys.length) return;
     const test = testHooks(this.env);
-    if (test.pause > 0) await new Promise(r => setTimeout(r, test.pause));
-    if (test.fault === 'abandon') return;
+    if (test.fault === 'abandon') {
+      if (test.pause > 0) await new Promise(r => setTimeout(r, test.pause));
+      return;
+    }
+    // Running here: settleStale leaves these alone however long R2 takes. An
+    // eviction drops the set, and with it the claim, as it drops the deletion.
+    for (const key of keys) this.inFlight.add(key);
     try {
+      if (test.pause > 0) await new Promise(r => setTimeout(r, test.pause));
       if (test.fault === 'throw') throw new Error('injected R2 failure');
       for (let i = 0; i < keys.length; i += 1000) await this.env.BLOBS.delete(keys.slice(i, i + 1000));
     } catch (e) {
       console.error(`registry: could not delete ${keys.length} R2 objects; they stay: ${String(e)}`);
     } finally {
-      for (const key of keys) this.ctx.storage.sql.exec('DELETE FROM deleting WHERE key = ?',key);
+      for (const key of keys) {
+        this.ctx.storage.sql.exec('DELETE FROM deleting WHERE key = ?',key);
+        this.inFlight.delete(key);
+      }
     }
   }
   /** Finish deletions left tombstoned longer than a deletion can take: delete again (idempotent), then clear. */
   private async settleStale(): Promise<void> {
     const stale = this.ctx.storage.sql.exec<{ key: string }>('SELECT key FROM deleting WHERE deleting_at < ? LIMIT 1000',
-      Date.now() - testHooks(this.env).staleMs).toArray().map(r => r.key);
+      Date.now() - testHooks(this.env).staleMs).toArray().map(r => r.key).filter(key => !this.inFlight.has(key));
     if (!stale.length) return;
     await this.env.BLOBS.delete(stale);
     for (const key of stale) this.ctx.storage.sql.exec('DELETE FROM deleting WHERE key = ?',key);
@@ -253,8 +280,36 @@ export class Registry extends DurableObject<Env> {
   async recordUpload(sha: string, principal: string, key = `b/${sha}`): Promise<boolean> {
     await this.settleStale();
     if (this.isDeleting(key)) return false;
-    this.ctx.storage.sql.exec('INSERT OR IGNORE INTO blob_uploads VALUES (?,?)',sha,principal);
+    this.ctx.storage.sql.exec(`INSERT INTO blob_uploads (sha,principal,uploaded_at,used) VALUES (?,?,?,0)
+      ON CONFLICT(sha,principal) DO UPDATE SET uploaded_at = excluded.uploaded_at, used = 0`,sha,principal,now());
     return true;
+  }
+  /**
+   * An owner's or account's uploads of `shas` are used: an artifact points at
+   * them now. They still let the uploader reuse the bytes, but no longer hold
+   * them on their own; uploading them again does, for another day.
+   */
+  async consumeUploads(principal: string, shas: string[]): Promise<void> {
+    if (principal.startsWith('artifact:') || principal.startsWith('attachment:')) return;
+    for (const sha of shas) this.ctx.storage.sql.exec('UPDATE blob_uploads SET used = 1 WHERE sha = ? AND principal = ?',sha,principal);
+  }
+  /**
+   * Forget `principal`'s (an owner's or account's) uploads that nothing used
+   * within the hold, and delete the bytes nothing else holds: no artifact
+   * points at them, no other upload of them is recorded, no attachment names them.
+   */
+  async sweepBlobUploads(principal: string): Promise<void> {
+    if (principal.startsWith('artifact:') || principal.startsWith('attachment:')) return;
+    const orphans = this.ctx.storage.transactionSync(() => {
+      const sql = this.ctx.storage.sql;
+      const stale = sql.exec<{ sha: string }>('SELECT sha FROM blob_uploads WHERE principal = ? AND NOT used AND uploaded_at < ? LIMIT 1000',
+        principal,now() - testHooks(this.env).holdSeconds).toArray().map(r => r.sha);
+      for (const sha of stale) sql.exec('DELETE FROM blob_uploads WHERE sha = ? AND principal = ?',sha,principal);
+      const held = (q: string, sha: string) => sql.exec(q,sha).toArray().length > 0;
+      return this.tombstone(stale.filter(sha => !held('SELECT 1 FROM blob_refs WHERE sha = ? LIMIT 1',sha) &&
+        !held('SELECT 1 FROM blob_uploads WHERE sha = ? LIMIT 1',sha) && !this.attachmentHeld(sha)).map(sha => `b/${sha}`));
+    });
+    await this.deleteObjects(orphans);
   }
   /**
    * The blobs among `shas` that artifact `id` may point at: ones it already

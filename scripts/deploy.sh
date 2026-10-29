@@ -6,7 +6,8 @@
 #
 # Needs CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID and BEARER_TOKEN;
 # NOTIFY_API_KEY and the wake sink (WAKE_SINK_KIND, WAKE_SINK_URL,
-# WAKE_SINK_SECRET; README, Wake sinks) are optional. The API token also needs R2 edit permission (the
+# WAKE_SINK_SECRET, and NOTIFY_AGENT/NOTIFY_SUBSCRIBER for a notify sink; README, Wake sinks)
+# are optional. The API token also needs R2 edit permission (the
 # blob bucket is created on first deploy). Secrets ride the deploy (--secrets-file), so the
 # new version never runs without them. Expects src/fossil.wasm (npm run build:wasm).
 set -eu
@@ -75,6 +76,8 @@ fi
 set --
 [ -z "${WAKE_SINK_KIND:-}" ] || set -- "$@" --var "WAKE_SINK_KIND:$WAKE_SINK_KIND"
 [ -z "${WAKE_SINK_URL:-}" ] || set -- "$@" --var "WAKE_SINK_URL:$WAKE_SINK_URL"
+[ -z "${NOTIFY_AGENT:-}" ] || set -- "$@" --var "NOTIFY_AGENT:$NOTIFY_AGENT"
+[ -z "${NOTIFY_SUBSCRIBER:-}" ] || set -- "$@" --var "NOTIFY_SUBSCRIBER:$NOTIFY_SUBSCRIBER"
 npx wrangler deploy --secrets-file "$secrets" --var "APP_ORIGIN:$APP_ORIGIN" --var "PUBLIC_ORIGIN:$PUBLIC_ORIGIN" --var "EMAIL_FROM:$EMAIL_FROM" --var 'TEST_MAIL_TRANSPORT:' "$@"
 # CI must not mistake the first (public) Worker URL for the signed-in app.
 printf 'APP_URL=%s\nPUBLIC_URL=%s\n' "$APP_ORIGIN" "$PUBLIC_ORIGIN"

@@ -513,9 +513,9 @@ test('comment link: tickets through the API, a stock fossil clone and a terminal
   assert.deepEqual(thread(t), {
     uuid: t.uuid, title: 'The heading reads oddly.', status: 'Closed', resolved: true, anchor: 'intro', checkins: [],
     messages: [
-      { user: 'comment-link', time: t.changes[0].time, text: 'The heading reads oddly.\nCan it be shorter?', status: '' },
-      { user: 'edit-link', time: t.changes[1].time, text: 'Shortened in the next version.', status: '' },
-      { user: 'comment-link', time: t.changes[2].time, text: '', status: 'Closed' },
+      { user: 'comment-link', time: t.changes[0].time, text: 'The heading reads oddly.\nCan it be shorter?', status: '', change: t.changes[0].artifact },
+      { user: 'edit-link', time: t.changes[1].time, text: 'Shortened in the next version.', status: '', change: t.changes[1].artifact },
+      { user: 'comment-link', time: t.changes[2].time, text: '', status: 'Closed', change: t.changes[2].artifact },
     ],
   });
 
@@ -661,6 +661,119 @@ async function wakesFor(id, n) {
     return { key: w.headers['idempotency-key'], ...JSON.parse(w.body) };
   });
 }
+
+// Responder status: what the attached responder is doing about each thread,
+// an unversioned file written through its own route. Never a check-in, a
+// ticket change or a wake; every link that reads threads reads it.
+test('responder status: written by editors only, resolved by change prefix, read with the threads', async () => {
+  const a = await create({ 'index.html': b64('<h1>status</h1>') });
+  const status = (token, body, opts = {}) => api(`/api/artifacts/${a.id}/responder-status`, { method: 'PUT', token, body, ...opts });
+  const threadsAs = async (token = a.read) => {
+    const r = await api(`/api/artifacts/${a.id}/tickets`, { token });
+    assert.equal(r.status, 200, r.text);
+    return r.json;
+  };
+  assert.deepEqual((await threadsAs()).responder, { threads: {} }, 'nothing stored yet');
+
+  const first = await api(`/api/artifacts/${a.id}/tickets`, { method: 'POST', token: a.comment, body: { text: 'Draw a diagram?' } });
+  assert.equal(first.status, 201, first.text);
+  const second = await api(`/api/artifacts/${a.id}/tickets`, { method: 'POST', token: a.comment, body: { text: 'Shorter heading?' } });
+  assert.equal(second.status, 201, second.text);
+  const ticket = first.json.ticketUuid, change = first.json.artifact;
+  await wakesFor(a.id, 2);
+  const wakesBefore = wakes.length;
+  const tip = (await api(`/api/artifacts/${a.id}`, { token: a.read })).json.tip;
+
+  // Roles: only a write-capable caller; unknown artifacts are not found.
+  for (const token of [a.read, a.comment]) {
+    assert.equal((await status(token, { change: change.slice(0, 10), state: 'seen' })).status, 403, 'readers and commenters cannot');
+  }
+  assert.equal((await status('0'.repeat(32), { change: change.slice(0, 10), state: 'seen' })).status, 404, 'a token for nothing');
+  assert.equal((await api(`/api/artifacts/nosuchartifact/responder-status`, { method: 'PUT', token: a.write, body: { change: change.slice(0, 10), state: 'seen' } })).status, 404);
+  for (const bad of [{}, { change: change.slice(0, 9), state: 'seen' }, { change: change.slice(0, 10), state: 'busy' },
+    { change: change.slice(0, 10), state: 'seen', step: '' }, { change: change.slice(0, 10), state: 'seen', extra: 1 },
+    { change: change.slice(0, 10), state: 'seen', step: 'x'.repeat(81) }, { change: change.slice(0, 10).toUpperCase(), state: 'seen' }]) {
+    const r = await status(a.write, bad);
+    assert.equal(r.status, 400, JSON.stringify(bad));
+  }
+  assert.deepEqual((await threadsAs()).responder, { threads: {} }, 'refused writes store nothing');
+
+  // A prefix resolves to the thread holding that change.
+  const missing = await status(a.write, { change: '0'.repeat(10), state: 'delivered' });
+  assert.equal(missing.status, 404);
+  assert.deepEqual(missing.json, { error: 'no such change' });
+  const delivered = await status(a.write, { change: change.slice(0, 10), state: 'delivered' });
+  assert.equal(delivered.status, 200, delivered.text);
+  assert.deepEqual(delivered.json, { ticketUuid: ticket });
+  let entry = (await threadsAs()).responder.threads[ticket];
+  assert.deepEqual(Object.keys(entry).sort(), ['change', 'since', 'state', 'updated'], 'no step when none was given');
+  assert.equal(entry.change, change, 'stored with the full hash');
+  assert.equal(entry.state, 'delivered');
+  assert.equal(entry.since, entry.updated);
+
+  // The same change keeps its since; updated moves on every write.
+  await new Promise(res => setTimeout(res, 20));
+  const seen = await status(a.write, { change, state: 'working', step: 'reading the page' });
+  assert.equal(seen.status, 200, seen.text);
+  const working = (await threadsAs(a.comment)).responder.threads[ticket];
+  assert.deepEqual({ ...working, updated: 'x' }, { change, state: 'working', step: 'reading the page', since: entry.since, updated: 'x' });
+  assert.ok(Date.parse(working.updated) > Date.parse(entry.since), 'updated moved');
+  entry = working;
+
+  // Another change in the thread starts its since over.
+  const reply = await api(`/api/artifacts/${a.id}/tickets`, { method: 'POST', token: a.comment, body: { ticketUuid: ticket, text: 'And label it.' } });
+  assert.equal(reply.status, 200, reply.text);
+  await new Promise(res => setTimeout(res, 20));
+  assert.equal((await status(a.write, { change: reply.json.artifact.slice(0, 12), state: 'seen', step: 'reading the thread' })).status, 200);
+  const next = (await threadsAs(a.write)).responder.threads[ticket];
+  assert.equal(next.change, reply.json.artifact);
+  assert.ok(Date.parse(next.since) > Date.parse(entry.since), 'since reset for a new change');
+  assert.equal(next.since, next.updated);
+
+  // The owner's bearer token is write-capable too; done deletes only its thread's entry.
+  const other = await api(`/api/artifacts/${a.id}/responder-status`, { method: 'PUT', bearer: owner, body: { change: second.json.artifact.slice(0, 10), state: 'failed' } });
+  assert.equal(other.status, 200, other.text);
+  assert.equal((await status(a.write, { change: reply.json.artifact.slice(0, 10), state: 'done' })).status, 200);
+  assert.deepEqual(Object.keys((await threadsAs()).responder.threads), [second.json.ticketUuid]);
+  assert.equal((await threadsAs()).responder.threads[second.json.ticketUuid].state, 'failed');
+
+  // None of it is a check-in, a ticket change or a wake.
+  assert.equal((await api(`/api/artifacts/${a.id}`, { token: a.read })).json.tip, tip, 'no check-in');
+  const all = (await threadsAs()).tickets;
+  assert.deepEqual(all.map(t => t.changes.length).sort(), [1, 2], 'no ticket changes beyond the reader’s');
+  await new Promise(res => setTimeout(res, 400));
+  assert.equal(wakes.length, wakesBefore + 1, 'only the reader’s reply woke the sink');
+});
+
+test('responder status: at most 200 entries, the oldest updated dropped; a pushed file is read validated', { skip: !haveStockFossil && !process.env.CI && 'stock fossil is not installed' }, async () => {
+  const a = await create({ 'index.html': b64('<h1>busy</h1>') });
+  const posted = await api(`/api/artifacts/${a.id}/tickets`, { method: 'POST', token: a.comment, body: { text: 'One more' } });
+  assert.equal(posted.status, 201, posted.text);
+  const clone = join(work, `${a.id}-status.fossil`);
+  assert.ok(stock('clone', a.cloneUrl, clone).ok);
+  const id = i => i.toString(16).padStart(40, '0');
+  const at = i => new Date(Date.parse('2026-10-01T00:00:00Z') + i * 1000).toISOString();
+  const threads = Object.fromEntries(Array.from({ length: 200 }, (_, i) => [id(i), { change: 'a'.repeat(40), state: 'delivered', since: at(i), updated: at(i) }]));
+  threads['not-a-ticket'] = { change: 'a'.repeat(40), state: 'seen', since: at(0), updated: at(0) };
+  const src = join(work, `${a.id}-responder-status.json`);
+  writeFileSync(src, JSON.stringify({ threads }));
+  // An old modification time, so the route's own write (now) wins the unversioned file.
+  assert.ok(stock('uv', 'add', src, '--as', 'responder-status.json', '--mtime', '2026-01-01 00:00:00', '-R', clone).ok);
+  const synced = stock('uv', 'sync', a.cloneUrl, '-R', clone);
+  assert.ok(synced.ok, synced.out);
+  const read = async () => (await api(`/api/artifacts/${a.id}/tickets`, { token: a.read })).json.responder.threads;
+  const pushed = await read();
+  assert.equal(Object.keys(pushed).length, 200, 'the invalid entry is dropped');
+  assert.equal('not-a-ticket' in pushed, false);
+
+  const r = await api(`/api/artifacts/${a.id}/responder-status`, { method: 'PUT', token: a.write, body: { change: posted.json.artifact.slice(0, 10), state: 'seen' } });
+  assert.equal(r.status, 200, r.text);
+  const after = await read();
+  assert.equal(Object.keys(after).length, 200, 'still 200');
+  assert.equal(id(0) in after, false, 'the oldest updated is dropped');
+  assert.equal(id(1) in after, true, 'the next oldest stays');
+  assert.equal(after[posted.json.ticketUuid].state, 'seen');
+});
 
 test('wake: API comments, replies, resolves and reopens wake the sink once each', async () => {
   const a = await create({ 'index.html': b64('<h1 id="intro">wake me</h1>') });

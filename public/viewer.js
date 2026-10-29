@@ -10,7 +10,7 @@ import { zip } from './zip.js';
 import { setArtifactFavicon } from './icons.js';
 setArtifactFavicon('document');
 import { preparePublication } from './export.js';
-import { anchorFor, arrange, attachmentDisplay, controls, decodePointAnchor, encodePointAnchor, findQuotes, responderNote, thread } from './comments.js';
+import { anchorFor, arrange, attachmentDisplay, controls, decodePointAnchor, encodePointAnchor, findQuotes, responderNote, responderProgress, thread } from './comments.js';
 import { typeOf } from './blobs.js';
 import { pagePins } from './page-pins.js';
 
@@ -275,6 +275,7 @@ function renderChrome() {
 
 let threads = [];
 let threadsTruncated = false;
+let responderStatus = { threads: {} }; // GET …/tickets `responder`, as last loaded
 let threadSnapshot = '';
 let threadRequest = 0;
 let threadsLoading = 0;
@@ -399,9 +400,13 @@ function threadView(t, can) {
   // Keep the form itself: drafts, selection, focus, and pending/error state belong to it.
   for (const child of [...body.children]) if (child !== reply) child.remove();
   const content = [anchorLine(t),
-    ...t.messages.filter((m, i) => i === 0 || m.text || m.status).map(m => el('div', {},
-      el('div', { className: 'who', textContent: `${m.user} · ${ago(m.time)}${m.status ? ` · marked ${m.status}` : ''}` }),
-      m.text ? el('p', { className: 'message', textContent: m.text }) : null)),
+    ...t.messages.filter((m, i) => i === 0 || m.text || m.status).map(m => {
+      const item = el('div', {},
+        el('div', { className: 'who', textContent: `${m.user} · ${ago(m.time)}${m.status ? ` · marked ${m.status}` : ''}` }),
+        m.text ? el('p', { className: 'message', textContent: m.text }) : null);
+      item.dataset.change = m.change;
+      return item;
+    }),
     t.checkins.length ? el('p', { className: 'checkins' }, 'Answered in ',
       ...t.checkins.flatMap((c, i) => [i ? ', ' : null, el('a', { href: fragment({ token: link.token, at: c }), textContent: shortId(c) })])) : null,
     attachmentList(t, can)];
@@ -449,7 +454,7 @@ function replyForm(t) {
   const change = async (body, doing) => {
     if (commentBusy) return;
     commentBusy = resolve.disabled = send.disabled = text.readOnly = true;
-    status.textContent = doing;
+    showPosting(status, doing, !!body.text);
     try {
       await art.comment({ ticketUuid: t.uuid, ...body });
       if (body.text) { drafts.delete(t.uuid); text.value = ''; }
@@ -510,6 +515,7 @@ function renderThreads() {
     active.scrollTop = inputScroll;
   }
   $('threadPanel').scrollTop = scroll;
+  paintProgress();
   renderAnchor();
   if (JSON.stringify(next) !== JSON.stringify(pins)) {
     pins = next;
@@ -621,6 +627,7 @@ async function loadThreads(background = false) {
     if (snapshot === threadSnapshot) return;
     threads = result.tickets.map(thread);
     threadsTruncated = result.truncated;
+    responderStatus = result.responder ?? { threads: {} };
     threadSnapshot = snapshot;
     renderThreads();
   } catch { /* offline or gone: keep what is shown */ }
@@ -632,6 +639,94 @@ function refreshThreads() {
 }
 setInterval(refreshThreads, COMMENT_WATCH_MS);
 document.addEventListener('visibilitychange', refreshThreads);
+
+/** A comment on its way: "Sending…" with dots when a responder will get it, else `doing`. */
+function showPosting(status, doing, comment) {
+  if (comment && info?.attached?.responder) status.replaceChildren(dots(), ' Sending…');
+  else status.textContent = doing;
+}
+
+/** Dots that say "in progress"; still under prefers-reduced-motion (viewer.css). */
+const dots = () => {
+  const d = el('span', { className: 'dots' }, el('i'), el('i'), el('i'));
+  d.setAttribute('aria-hidden', 'true');
+  return d;
+};
+
+/**
+ * One node that shows `p`. While its `key` is unchanged the node stays, so its
+ * dots keep their rhythm, and only its text and elapsed time are refreshed.
+ */
+function progressNode(old, cls, key, p, build) {
+  if (old?.dataset.key === key) {
+    const fresh = build();
+    for (const part of ['.text', '.elapsed']) {
+      const was = old.querySelector(part), now = fresh.querySelector(part);
+      if (was && now && was.textContent !== now.textContent) was.replaceWith(now);
+    }
+    return old;
+  }
+  const node = build();
+  node.classList.add(cls);
+  node.dataset.key = key;
+  old?.replaceWith(node);
+  return node;
+}
+
+function receiptNode(r) {
+  return el('p', {}, el('span', { className: `ticks${r.on ? ' on' : ''}`, textContent: r.ticks }), el('span', { className: 'text', textContent: r.text }));
+}
+
+function activityNode(a) {
+  const text = el('span', { className: 'text' }, a.who ? el('strong', { textContent: a.who }) : null, a.who ? ` ${a.text}` : a.text);
+  // Announce what changes, not the clock ticking every second.
+  const elapsed = a.elapsed ? el('span', { className: 'elapsed', textContent: a.elapsed }) : null;
+  elapsed?.setAttribute('aria-hidden', 'true');
+  const node = el('div', { className: `tone-${a.tone}` }, a.dots ? dots() : null, text, elapsed);
+  node.setAttribute('role', 'status');
+  return node;
+}
+
+function rowNode(r) {
+  return el('span', {}, r.dots ? dots() : null, r.ticks ? el('span', { className: 'ticks', textContent: r.ticks }) : null, el('span', { className: 'text', textContent: r.text }));
+}
+
+/**
+ * The attached responder's progress on each thread: receipts under the
+ * reader's latest comment, an activity line above the reply box and a word
+ * in the list row. Derived again on every poll and every second; only the
+ * nodes whose content changed are replaced, never the reply form.
+ */
+function paintProgress() {
+  const name = info?.attached?.responder;
+  const progress = responderProgress({ threads, status: responderStatus, responder: typeof name === 'string' ? name : '', now: Date.now() });
+  for (const [uuid, view] of views) {
+    const p = progress.get(uuid);
+    const body = view.querySelector('.thread-body');
+    const receiptAt = p?.receipt && [...body.children].find(c => c.dataset.change === p.receipt.change);
+    const oldReceipt = body.querySelector('.receipts');
+    if (receiptAt) {
+      const node = progressNode(oldReceipt, 'receipts', JSON.stringify(p.receipt), p.receipt, () => receiptNode(p.receipt));
+      if (node.parentNode !== receiptAt) receiptAt.append(node);
+    } else oldReceipt?.remove();
+    const oldActivity = body.querySelector('.activity');
+    if (p?.activity) {
+      const a = p.activity;
+      const node = progressNode(oldActivity, 'activity', JSON.stringify([a.tone, a.dots, a.who, !!a.elapsed]), a, () => activityNode(a));
+      const reply = body.querySelector('.reply');
+      if (node.nextSibling !== reply || node.parentNode !== body) body.insertBefore(node, reply);
+    } else oldActivity?.remove();
+    const summary = view.querySelector('summary'), oldRow = summary.querySelector('.progress');
+    if (p?.row) {
+      const node = progressNode(oldRow, 'progress', JSON.stringify(p.row), p.row, () => rowNode(p.row));
+      if (node.parentNode !== summary) summary.insertBefore(node, summary.querySelector('.tag'));
+    } else oldRow?.remove();
+  }
+}
+// The elapsed time ticks locally; the 5-second poll above is the only request.
+setInterval(() => {
+  if (document.visibilityState === 'visible' && info?.attached && !$('threadPanel').hidden) paintProgress();
+}, 1000);
 
 function renderResponder() {
   const n = responderNote(info);
@@ -760,7 +855,7 @@ $('commentForm').addEventListener('submit', async e => {
   const anchor = draftAnchor || selection, point = panelPoint;
   const button = $('commentForm').querySelector('button[type=submit]');
   commentBusy = button.disabled = $('commentText').readOnly = true;
-  $('commentStatus').textContent = 'Posting…';
+  showPosting($('commentStatus'), 'Posting…', true);
   try {
     const result = await art.comment(anchor ? { text, anchor } : { text });
     $('commentText').value = '';

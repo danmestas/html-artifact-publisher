@@ -29,6 +29,7 @@
  *   PUT    /api/artifacts/:id/data/<name>    Page data (write)
  *   GET    /api/artifacts/:id/tickets?limit= The newest-changed threads with their changes (read)
  *   POST   /api/artifacts/:id/tickets        Open, reply to, resolve or reopen a thread (comment)
+ *   PUT    /api/artifacts/:id/responder-status  What the responder is doing about a thread (write)
  *   GET    /api/artifacts/:id/attachments?target=<ticket>    A thread's attachments, with signed links (read)
  *   PUT    /api/artifacts/:id/attachments/:sha256            Upload an attachment's bytes to R2 (comment)
  *   POST   /api/artifacts/:id/attachments    Attach text, or bytes uploaded with PUT, to a thread (comment)
@@ -52,6 +53,7 @@ import { BLOB_THRESHOLD, typeOf } from '../public/blobs.js';
 import type { FossilReply } from './fossil';
 import { b64decode, b64encode, clampTtl, genId, genToken, isoOrNull, sha256hex } from './util';
 import { ATTACHED_FILE, attachedFrom } from './attached';
+import { RESPONDER_STATUS_FILE, statusFrom, statusRequest } from './responder-status';
 import { ticketAuthor } from './ticket-author';
 import type { Caller, Role } from './repo';
 import { TICKET_BODY, ticketChange } from './ticket-body';
@@ -532,7 +534,19 @@ async function handleArtifact(req: Request, env: Env, ctx: ExecutionContext, id:
     // tickets, and none can be deleted.
     const limit = url.searchParams.get('limit') ?? '100';
     if (!/^[1-9][0-9]{0,2}$/.test(limit) || Number(limit) > 200) return json({ error: 'limit must be 1 to 200' }, 400);
-    return reply(await stub.op(who, { op: 'ticketThreads', limit: Number(limit) }));
+    const [r, status] = await Promise.all([
+      stub.op(who, { op: 'ticketThreads', limit: Number(limit) }) as Promise<FossilReply<Record<string, unknown>>>,
+      stub.op(who, { op: 'uvGet', name: RESPONDER_STATUS_FILE }) as Promise<FossilReply<{ data: string | null }>>,
+    ]);
+    if (!r.ok || !r.result) return reply(r);
+    return json({ ...r.result, responder: statusFrom(status.ok ? status.result?.data : null) });
+  }
+  if (rest === '/responder-status' && method === 'PUT') {
+    const change = statusRequest(await readBody(req, 1024));
+    if (!change) return json({ error: 'body must be {"change": "<10 to 64 lowercase hex>", "state": "delivered|seen|working|done|failed", "step"?: "<1 to 80 characters>"}' }, 400);
+    const r = await stub.responderStatus(who, change);
+    if (r.code === 'not_found' && r.error === 'no such change') return json({ error: 'no such change' }, 404);
+    return reply(r);
   }
   if (rest === '/tickets' && method === 'POST') {
     const b = await readBody(req, 65536);

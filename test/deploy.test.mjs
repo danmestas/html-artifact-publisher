@@ -40,7 +40,7 @@ fs.writeFileSync(process.env.DEPLOY_TEST_MARKER,JSON.stringify({args,path,mode:f
     assert.ok(call.args.includes('EMAIL_FROM:artifacts@example.com'));
     assert.ok(call.args.includes('PUBLIC_ORIGIN:https://artifact-pages.test.workers.dev'));
     assert.ok(call.args.includes('TEST_MAIL_TRANSPORT:'));
-    for (const hook of ['TEST_CLEANUP_PAUSE_MS:', 'TEST_CLEANUP_FAULT:', 'TEST_TOMBSTONE_STALE_MS:']) assert.ok(call.args.includes(hook), `deploy blanks ${hook}`);
+    for (const hook of ['TEST_CLEANUP_PAUSE_MS:', 'TEST_CLEANUP_FAULT:', 'TEST_TOMBSTONE_STALE_MS:', 'TEST_UPLOAD_HOLD_MS:']) assert.ok(call.args.includes(hook), `deploy blanks ${hook}`);
     assert.equal(existsSync(call.path),false,'secret scratch file must be removed');
     assert.match(readFileSync(marker+'.r2','utf8'),/r2 bucket info html-artifact-publisher-blobs/,'the blob bucket is checked before deploying');
     // No wake sink set: none rides the deploy, so wrangler.jsonc's empty values (NOTIFY_* fallback) stand.

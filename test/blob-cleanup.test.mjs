@@ -104,3 +104,25 @@ test('a deletion still running is not taken for an abandoned one', async () => {
     await served(w, call, b, 'img.png', bytes);
   });
 });
+
+test('an upload nobody uses is swept after the hold; bytes something else holds stay', async () => {
+  await withWorker({ TEST_UPLOAD_HOLD_MS: '2000' }, async (w, call) => {
+    const ownerPut = bytes => call(`/api/blobs/${sha256(bytes)}`, { method: 'PUT', bearer: w.owner, raw: bytes });
+    const artifactPut = (x, bytes) => call(`/api/artifacts/${x.id}/blobs/${sha256(bytes)}`, { method: 'PUT', token: x.write, raw: bytes });
+    const unused = randomBytes(3000), alsoUploaded = randomBytes(3000), referenced = randomBytes(3000);
+    const b = await createArtifact(w.base, w.owner, '<p>b</p>'), c = await createArtifact(w.base, w.owner, '<p>c</p>');
+    for (const bytes of [unused, alsoUploaded, referenced]) assert.equal((await ownerPut(bytes)).status, 201);
+    assert.equal((await artifactPut(b, alsoUploaded)).status, 200, 'b holds an upload of these');
+    assert.equal((await artifactPut(c, referenced)).status, 200);
+    assert.equal((await commitPointer(call, c, referenced)).status, 200, 'c points at these');
+
+    await new Promise(r => setTimeout(r, 3500));
+    // The next upload by the same owner sweeps its stale, unused uploads.
+    assert.equal((await ownerPut(randomBytes(100))).status, 201);
+
+    const probe = await createArtifact(w.base, w.owner, '<p>probe</p>');
+    assert.equal((await (await artifactPut(probe, unused)).json()).stored, true, 'the unused upload was deleted');
+    assert.equal((await (await artifactPut(probe, alsoUploaded)).json()).stored, false, 'another artifact\'s upload kept it');
+    assert.equal((await (await artifactPut(probe, referenced)).json()).stored, false, 'a pointer kept it');
+  });
+});

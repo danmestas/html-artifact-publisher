@@ -689,6 +689,7 @@ export default {
       const actor = await identity(req, env);
       if (!actor.legacy && !actor.user) return json({ error: 'Unauthorized' }, 401);
       const sha = newBlob[1]!, reg = registry(env), who = principal(actor);
+      if (method === 'PUT') await reg.sweepBlobUploads(who);
       return withCors(await putBlob(req, env, sha, {
         known: async () => (await reg.allowedBlobs('', [who], [sha])).length > 0,
         busy: () => reg.deletingObject(blobKey(sha)),

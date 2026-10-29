@@ -6,13 +6,15 @@
 //   resolve     status Closed; reopen: status Open
 
 export const TICKET_BODY = 'Body must be JSON: text (1-8000 characters), and optionally anchor (up to 500), '
-  + 'ticketUuid (a full ticket id, to reply) and status (Open or Closed, with ticketUuid)';
-const TICKET_KEYS = ['text', 'anchor', 'ticketUuid', 'status'];
+  + 'ticketUuid (a full ticket id, to reply), status (Open or Closed, with ticketUuid) '
+  + 'and asResponder (true, with the edit link)';
+const TICKET_KEYS = ['text', 'anchor', 'ticketUuid', 'status', 'asResponder'];
 
 /** The ticket change a POST body asks for, or null when the body is not valid. */
-export function ticketChange(b: Record<string, unknown>): { ticketUuid: string; fields: Record<string, string>; comment: string } | null {
+export function ticketChange(b: Record<string, unknown>): { ticketUuid: string; fields: Record<string, string>; comment: string; asResponder: boolean } | null {
   if (Object.keys(b).some(k => !TICKET_KEYS.includes(k))) return null;
-  const { text = '', anchor = '', ticketUuid = '', status = '' } = b;
+  const { text = '', anchor = '', ticketUuid = '', status = '', asResponder = false } = b;
+  if (typeof asResponder !== 'boolean') return null;
   if (typeof text !== 'string' || typeof anchor !== 'string' || typeof ticketUuid !== 'string' || typeof status !== 'string') return null;
   const body = text.trim();
   if (body.length > 8000 || anchor.length > 500 || /\0/.test(text + anchor)) return null;
@@ -22,10 +24,11 @@ export function ticketChange(b: Record<string, unknown>): { ticketUuid: string; 
       ticketUuid: '',
       fields: { title: ticketTitle(body), comment: body, status: 'Open', type: 'Comment', subsystem: anchor },
       comment: '',
+      asResponder,
     };
   }
   if (!/^[0-9a-f]{40}$/.test(ticketUuid) || anchor || (status && status !== 'Open' && status !== 'Closed') || (!body && !status)) return null;
-  return { ticketUuid, fields: status ? { status } : {}, comment: body };
+  return { ticketUuid, fields: status ? { status } : {}, comment: body, asResponder };
 }
 
 /** A thread's title: its text's first line, at most 100 code points, so a cut never splits a surrogate pair. */

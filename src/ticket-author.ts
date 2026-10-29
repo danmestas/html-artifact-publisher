@@ -3,7 +3,8 @@ export type TicketWriter =
   | { kind: 'comment' }
   | { kind: 'account'; name: string }
   | { kind: 'owner' }
-  | { kind: 'edit' };
+  | { kind: 'edit' }
+  | { kind: 'responder'; name: string };
 
 /**
  * A name fit to leave the Worker as an author: an empty name or one that looks
@@ -30,5 +31,9 @@ export function ticketAuthor(writer: TicketWriter): string {
       return 'owner';
     case 'edit':
       return 'edit-link';
+    case 'responder':
+      // The name is attached.json's, which an edit link can already set;
+      // the suffix keeps it from passing for the owner or an account.
+      return `${authorName(writer.name).slice(0, 52)} (responder)`;
   }
 }

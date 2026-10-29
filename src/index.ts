@@ -538,7 +538,15 @@ async function handleArtifact(req: Request, env: Env, ctx: ExecutionContext, id:
     const b = await readBody(req, 65536);
     const change = b && ticketChange(b);
     if (!change) return json({ error: TICKET_BODY }, 400);
-    const user = changeAuthor(await stub.role(who), actor);
+    const role = await stub.role(who);
+    let user = changeAuthor(role, actor);
+    if (change.asResponder) {
+      // Only the edit link itself: attached.json is what it can already set.
+      if (role !== 'write' || actor.user || actor.legacy) return json({ error: 'asResponder needs the edit link' }, 403);
+      const flag = (await stub.op(who, { op: 'uvGet', name: ATTACHED_FILE })) as FossilReply<{ data: string | null }>;
+      const attached = attachedFrom(flag.ok ? flag.result?.data : null);
+      if (attached) user = ticketAuthor({ kind: 'responder', name: attached.responder });
+    }
     if (!change.ticketUuid) {
       const r = (await stub.op(who, { op: 'ticketAdd', fields: change.fields, user, comment: '' })) as FossilReply<{ ticketUuid: string; artifact: string }>;
       if (!r.ok || !r.result) return reply(r);

@@ -50,6 +50,16 @@ export function changeText(opens, fields) {
   return (opens ? fields.comment : fields.icomment || fields['+icomment']) ?? '';
 }
 
+/**
+ * Where an opening change points, for a responder to find "this": the anchor
+ * (an element id, a quote or a hap-point) and the check-in the reader was
+ * looking at, each only when the change opens a thread and carries it.
+ */
+export function changeAnchor(opens, fields) {
+  if (!opens) return {};
+  return { ...(fields.subsystem ? { anchor: fields.subsystem } : {}), ...(fields.foundin ? { version: fields.foundin } : {}) };
+}
+
 const ESCAPES = { s: ' ', n: '\n', t: '\t', r: '\r', v: '\v', f: '\f', 0: '\0', '\\': '\\' };
 const defossilize = s => s.replace(/\\(.)/gs, (_, c) => ESCAPES[c] ?? c);
 
@@ -227,7 +237,7 @@ function viaFossil(bin, link, repo, since, max) {
     const t = parseTicketArtifact(it.content);
     if (!t) return { change: it.hash, missing: true };
     const opens = !!it.opens;
-    return { change: it.hash, ticket: t.ticket, kind: ticketKind(opens, t.fields), author: t.author, text: changeText(opens, t.fields), time: t.time };
+    return { change: it.hash, ticket: t.ticket, kind: ticketKind(opens, t.fields), author: t.author, text: changeText(opens, t.fields), time: t.time, ...changeAnchor(opens, t.fields) };
   });
 }
 
@@ -245,7 +255,7 @@ async function viaHttp(link, since, max) {
     const { t, c, i } = hit, fields = c.fields ?? {};
     return {
       change: c.artifact, ticket: t.uuid, kind: ticketKind(i === 0, fields), author: c.user,
-      text: changeText(i === 0, fields), time: new Date(c.time).toISOString(),
+      text: changeText(i === 0, fields), time: new Date(c.time).toISOString(), ...changeAnchor(i === 0, fields),
     };
   });
 }
@@ -291,7 +301,10 @@ export async function runWatch({ rawUrl, since, interval = '30s', once = false, 
           for (const it of items) {
             if (it.missing) log(`skipped ${it.change.slice(0, 12)}: not a ticket change this link can read`);
             else if (replay || !seen.has(it.change)) {
-              await print({ artifact: link.id, ticket: it.ticket, change: it.change, kind: it.kind, author: it.author, text: it.text, time: it.time });
+              await print({
+                artifact: link.id, ticket: it.ticket, change: it.change, kind: it.kind, author: it.author, text: it.text, time: it.time,
+                ...(it.anchor ? { anchor: it.anchor } : {}), ...(it.version ? { version: it.version } : {}),
+              });
               seen.delete(it.change);
               seen.add(it.change);
               if (seen.size > SEEN_MAX) seen.delete(seen.values().next().value);

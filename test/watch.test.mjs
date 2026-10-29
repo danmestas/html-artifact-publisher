@@ -118,14 +118,16 @@ test('none sink: comment, watch prints it, the responder replies once and never 
   const start = await watch(a.commentUrl, cache);
   assert.equal(start.code, 0, start.stderr);
   assert.equal(start.stdout, '', 'the first run starts now');
-  const first = await comment(a, a.comment, { text: 'Please shorten the heading.\n$(touch pwned) `id`', anchor: 'intro' });
+  const first = await comment(a, a.comment, { text: 'Please shorten the heading.\n$(touch pwned) `id`', anchor: 'intro', version: a.tip });
 
   const w1 = await watch(a.commentUrl, cache);
   assert.equal(w1.code, 0, w1.stderr);
   quiet(w1, a);
   assert.equal(w1.lines.length, 1, w1.stdout);
   const [line] = w1.lines;
-  assert.deepEqual(Object.keys(line), ['artifact', 'ticket', 'change', 'kind', 'author', 'text', 'time']);
+  assert.deepEqual(Object.keys(line), ['artifact', 'ticket', 'change', 'kind', 'author', 'text', 'time', 'anchor', 'version']);
+  assert.equal(line.anchor, 'intro', 'what the comment is on');
+  assert.equal(line.version, a.tip, 'and the version it was made on');
   assert.equal(line.artifact, a.id);
   assert.equal(line.ticket, first.ticketUuid);
   assert.equal(line.change, first.artifact);
@@ -184,7 +186,7 @@ test('watch: HTTP without a fossil binary, a clone with one, the same lines; res
   await comment(a, a.write, { ticketUuid: one.ticketUuid, text: 'Answered' });
   await comment(a, a.comment, { ticketUuid: one.ticketUuid, status: 'Closed' });
   await comment(a, a.comment, { ticketUuid: one.ticketUuid, status: 'Open' });
-  const two = await comment(a, a.comment, { text: 'Second thread' });
+  const two = await comment(a, a.comment, { text: 'Second thread', anchor: 'a quoted passage', version: a.tip });
 
   const httpCache = join(work, 'cache-http');
   // The first run starts now: the comments already there are history, kept for --since.
@@ -200,6 +202,8 @@ test('watch: HTTP without a fossil binary, a clone with one, the same lines; res
     ['reply', 'comment-link', ''], ['comment', 'comment-link', 'Second thread'],
   ]);
   assert.equal(http.lines.at(-1).ticket, two.ticketUuid);
+  assert.deepEqual([http.lines.at(-1).anchor, http.lines.at(-1).version], ['a quoted passage', a.tip]);
+  assert.equal('anchor' in http.lines[0] || 'version' in http.lines[1], false, 'only an anchored opening says where');
   assert.equal(existsSync(join(httpCache, a.id, 'repo.fossil')), false, 'no fossil on PATH: no clone');
 
   // Restarted: nothing new, nothing printed; then only what is new.

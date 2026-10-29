@@ -26,3 +26,16 @@ test('ticket body: asResponder is an optional boolean', () => {
     assert.equal(ticketChange({ text: 'hi', asResponder: bad }), null, String(bad));
   }
 });
+
+// A new thread may name the check-in the reader was looking at; it is kept in
+// Fossil's stock foundin field, so a responder can read the page as it was.
+test('ticket body: a new thread records its version in foundin', () => {
+  const sha1 = 'a'.repeat(40), sha3 = 'b'.repeat(64);
+  assert.equal(ticketChange({ text: 'hi', anchor: 'intro', version: sha1 }).fields.foundin, sha1);
+  assert.equal(ticketChange({ text: 'hi', version: sha3 }).fields.foundin, sha3);
+  assert.equal('foundin' in ticketChange({ text: 'hi' }).fields, false, 'absent when not given');
+  for (const bad of ['', 'abc', 'A'.repeat(40), 'a'.repeat(41), 'a'.repeat(39), 7, null]) {
+    assert.equal(ticketChange({ text: 'hi', version: bad }), null, String(bad));
+  }
+  assert.equal(ticketChange({ text: 'done', ticketUuid: 'c'.repeat(40), version: sha1 }), null, 'a reply names no version');
+});

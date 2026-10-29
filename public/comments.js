@@ -76,7 +76,7 @@ export function thread(ticket) {
   const status = ticket.status || 'Open';
   return {
     uuid: ticket.uuid, title: ticket.fields.title || '(untitled)', status, resolved: RESOLVED.includes(status),
-    anchor: ticket.fields.subsystem ?? '', checkins, messages,
+    anchor: ticket.fields.subsystem ?? '', version: ticket.fields.foundin ?? '', checkins, messages,
   };
 }
 

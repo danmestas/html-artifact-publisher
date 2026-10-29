@@ -190,6 +190,25 @@ button:disabled { cursor: wait; opacity: .6; }
 .reply { display: flex; flex-direction: column; gap: 8px; }
 .reply .attach,
 .reply .resolve { height: 36px; padding: 0 12px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface); font-weight: 500; }
+/* Responder progress: receipts under the latest comment, an activity line above the reply box. */
+.thread .receipts { display: flex; align-items: center; gap: 6px; margin: 4px 0 0; font-size: 12px; color: var(--muted); }
+.thread .ticks { font-family: var(--mono); letter-spacing: -0.12em; }
+.thread .receipts .ticks.on { color: var(--ok-ink); }
+.thread .activity { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-radius: 10px; font-size: 13px; overflow-wrap: anywhere; }
+.thread .activity .text { flex: 1; min-width: 0; }
+.thread .activity strong { font-weight: 600; }
+.thread .activity .elapsed { flex: none; color: var(--muted); font-family: var(--mono); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.thread .activity.tone-working, .thread .activity.tone-waiting { background: color-mix(in srgb, var(--muted) 13%, transparent); }
+.thread .activity.tone-warn { background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--ink); }
+.thread .activity.tone-bad { background: color-mix(in srgb, var(--danger) 15%, transparent); color: var(--ink); }
+.thread > summary .progress { flex: none; display: inline-flex; align-items: center; gap: 5px; align-self: center; font-size: 11.5px; color: var(--muted); }
+#threadPanel[data-mode="thread"] .thread > summary .progress { display: none; }
+.dots { display: inline-flex; gap: 3px; flex: none; }
+.dots i { display: block; width: 6px; height: 6px; border-radius: 50%; background: var(--muted); animation: dots-blink 1.2s infinite ease-in-out; }
+.dots i:nth-child(2) { animation-delay: 0.2s; }
+.dots i:nth-child(3) { animation-delay: 0.4s; }
+@keyframes dots-blink { 0%, 80%, 100% { opacity: 0.25; } 40% { opacity: 1; } }
+.hint .dots { margin-right: 6px; vertical-align: middle; }
 #threadList:empty::after { content: 'No comments yet.'; display: block; padding: 12px 16px; color: var(--muted); font-size: 12.5px; }
 #commentForm { display: flex; flex-direction: column; gap: 8px; padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--bar); }
 #commentForm[hidden] { display: none; }
@@ -284,4 +303,4 @@ button:disabled { cursor: wait; opacity: .6; }
   .comment-actions { flex-wrap: wrap; }
   .comment-actions .hint:not(:empty) { flex-basis: 100%; }
 }
-@media (prefers-reduced-motion: reduce) { #ring { animation: none; } * { scroll-behavior: auto !important; } }
+@media (prefers-reduced-motion: reduce) { #ring, .dots i { animation: none; } .dots i { opacity: 0.7; } * { scroll-behavior: auto !important; } }

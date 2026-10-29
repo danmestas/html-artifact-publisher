@@ -6,8 +6,9 @@
 
 import { DurableObject } from 'cloudflare:workers';
 import { run, type FossilReply, type FossilRequest } from './fossil';
-import { genToken, sha256hex, timingSafeEqual } from './util';
+import { b64encode, genToken, sha256hex, timingSafeEqual } from './util';
 import { WAKE_FANOUT, ticketKind, type WakeKind } from './wake';
+import { RESPONDER_STATUS_FILE, applyStatus, resolveChange, statusFrom, type StatusRequest } from './responder-status';
 
 /** A ticket change a push stored: its ticket, its artifact hash, who made it and what it was. */
 export interface PushedTicket {
@@ -203,6 +204,28 @@ export class Repo extends DurableObject<Env> {
       out.push({ ticket, change, author: changes[i]!.user, kind: ticketKind(i === 0, changes[i]!.fields ?? {}) });
     }
     return out;
+  }
+
+  /**
+   * Record the responder's status for the thread holding change `req.change`
+   * (a hash prefix), for a write-capable caller. No await once the role is
+   * known, so no other request reads or writes the file in between.
+   */
+  async responderStatus(caller: Caller, req: StatusRequest): Promise<FossilReply<{ ticketUuid: string }>> {
+    const role = await this.role(caller);
+    if (!role) return { error: 'not found', code: 'not_found' };
+    if (role !== 'write') return { error: 'the edit link is required to set the responder status', code: 'forbidden' };
+    const listed = run<{ tickets: { uuid: string; changes: { artifact: string }[] }[] }>(this.ctx.storage, { op: 'ticketThreads', limit: 200 });
+    if (!listed.ok || !listed.result) return { error: listed.error, code: listed.code };
+    const found = resolveChange(listed.result.tickets, req.change);
+    if (found === 'none') return { error: 'no such change', code: 'not_found' };
+    if (found === 'many') return { error: 'the change prefix matches more than one thread', code: 'conflict' };
+    const stored = run<{ data: string | null }>(this.ctx.storage, { op: 'uvGet', name: RESPONDER_STATUS_FILE });
+    const file = applyStatus(statusFrom(stored.ok ? stored.result?.data : null), found.ticketUuid, found.change, req.state, req.step, new Date().toISOString());
+    const data = b64encode(new TextEncoder().encode(JSON.stringify(file)));
+    const written = run<unknown>(this.ctx.storage, { op: 'uvSet', name: RESPONDER_STATUS_FILE, data });
+    if (!written.ok) return { error: written.error, code: written.code };
+    return { ok: true, result: { ticketUuid: found.ticketUuid } };
   }
 
   async info(): Promise<Meta | null> {

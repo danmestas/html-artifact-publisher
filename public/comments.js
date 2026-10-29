@@ -70,7 +70,7 @@ export function thread(ticket) {
   const messages = ticket.changes.map((c, i) => {
     const text = c.comment || (i === 0 ? c.fields.comment ?? '' : '');
     const status = i === 0 ? '' : c.fields.status ?? '';
-    return { user: c.user, time: c.time, text, status };
+    return { user: c.user, time: c.time, text, status, change: c.artifact };
   });
   const checkins = [...new Set(messages.slice(1).flatMap(m => [...m.text.matchAll(CHECKIN)].map(x => x[1])))];
   const status = ticket.status || 'Open';
@@ -78,6 +78,103 @@ export function thread(ticket) {
     uuid: ticket.uuid, title: ticket.fields.title || '(untitled)', status, resolved: RESOLVED.includes(status),
     anchor: ticket.fields.subsystem ?? '', checkins, messages,
   };
+}
+
+/**
+ * The author the ticket route records for a reply posted as the attached
+ * responder `name` (src/ticket-author.ts), so a reply can be told apart from
+ * a reader's change.
+ */
+export function responderAuthor(name) {
+  const n = String(name ?? '').trim();
+  const safe = n && !n.includes('@') ? n.slice(0, 64) : 'account';
+  return `${safe.slice(0, 52)} (responder)`;
+}
+
+/** A duration as m:ss; a negative one (a clock behind the server's) as 0:00. */
+export function clock(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+const OFFLINE_AFTER_MS = 30_000; // no status this long after a comment: nothing picked it up
+const QUIET_AFTER_MS = 180_000; // no status update this long: the work is slow
+const BUSY = ['seen', 'working'];
+
+/** The status entry that speaks for the unanswered comments `pending` (indexes into t.messages), or null. */
+function entryFor(t, entry, pending) {
+  if (!entry || typeof entry !== 'object' || typeof entry.change !== 'string') return null;
+  const i = pending.findIndex(p => t.messages[p].change === entry.change);
+  if (i < 0) return null;
+  // Delivered or failed speaks only for the comment it names; busy is busy with the thread.
+  return i === pending.length - 1 || BUSY.includes(entry.state) ? entry : null;
+}
+
+function activity(t, entry, ctx) {
+  const since = ms => clock(ctx.now - Date.parse(ms));
+  const box = (tone, text, extra = {}) => ({ tone, dots: false, who: '', text, elapsed: '', ...extra });
+  if (!entry) {
+    const latest = t.messages[ctx.latest];
+    return ctx.now - Date.parse(latest.time) >= OFFLINE_AFTER_MS
+      ? box('warn', `${ctx.name} hasn't picked this up. It may be offline; your comment is saved and will be answered when it's back.`)
+      : null;
+  }
+  if (BUSY.includes(entry.state)) {
+    const step = entry.step || 'working on it';
+    if (ctx.now - Date.parse(entry.updated) > QUIET_AFTER_MS) {
+      return box('warn', `Still working, taking longer than usual. Last step: ${step}, ${since(entry.updated)} ago.`);
+    }
+    return { tone: 'working', dots: true, who: ctx.name, text: `is ${step}`, elapsed: since(entry.since) };
+  }
+  if (entry.state === 'failed') return box('bad', `${ctx.name} couldn't finish this. Reply in the thread to ask again.`);
+  if (entry.state === 'delivered' && ctx.busy && ctx.busy.uuid !== t.uuid) {
+    return box('waiting', `Waiting behind comment ${ctx.busy.label ?? ''}`.trim(), { elapsed: since(entry.since) });
+  }
+  return null;
+}
+
+function receipt(change, entry, name) {
+  const state = entry?.state;
+  if (state === 'delivered') return { change, ticks: '✓✓', on: true, text: 'Delivered' };
+  if (BUSY.includes(state)) return { change, ticks: '✓✓', on: true, text: `Delivered · Seen by ${name}` };
+  if (state === 'failed') return { change, ticks: '✓✓', on: true, text: `Seen by ${name}` };
+  return { change, ticks: '✓', on: false, text: 'Sent' };
+}
+
+/**
+ * What the thread panel shows of the attached responder's progress, by
+ * thread uuid: { receipt, activity, row }. `threads` are arranged threads,
+ * `status` the `responder` of GET …/tickets, `responder` the attached name
+ * ('' for none, which shows nothing), `now` epoch milliseconds. Resolved
+ * threads show nothing. Pure, so the viewer can re-derive it every second.
+ */
+export function responderProgress({ threads, status, responder, now }) {
+  const out = new Map();
+  if (!responder) return out;
+  const name = responder, author = responderAuthor(name);
+  const entries = status && typeof status.threads === 'object' && status.threads !== null ? status.threads : {};
+  const states = threads.filter(t => !t.resolved).map(t => {
+    const answered = t.messages.findLastIndex(m => m.user === author);
+    const pending = t.messages.map((m, i) => i).filter(i => i > answered && t.messages[i].text && t.messages[i].user !== author);
+    return { t, answered, pending, entry: entryFor(t, entries[t.uuid], pending) };
+  });
+  // Only a status that still speaks for an unanswered thread holds the others up.
+  const busy = states.find(s => BUSY.includes(s.entry?.state))?.t ?? null;
+  for (const { t, answered, pending, entry } of states) {
+    if (!pending.length) {
+      out.set(t.uuid, { receipt: null, activity: null, row: answered >= 0 ? { dots: false, ticks: '', text: 'Replied' } : null });
+      continue;
+    }
+    const latest = pending[pending.length - 1];
+    const row = BUSY.includes(entry?.state) ? { dots: true, ticks: '', text: 'Working' }
+      : entry?.state === 'delivered' ? { dots: false, ticks: '✓✓', text: 'Delivered' } : null;
+    out.set(t.uuid, {
+      receipt: receipt(t.messages[latest].change, entry, name),
+      activity: activity(t, entry, { now, name, latest, busy }),
+      row,
+    });
+  }
+  return out;
 }
 
 /**

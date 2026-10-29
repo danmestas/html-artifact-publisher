@@ -108,7 +108,7 @@ The full walkthrough is [docs/self-hosting.md](docs/self-hosting.md). In short:
 
 ```bash
 npm ci
-npm run build:wasm                 # fossil/ → src/fossil.wasm, about 1.08 MB gzipped
+npm run build:wasm                 # fossil/ → src/fossil.wasm, about 1.0 MB gzipped
 npm test
 npm run deploy:prod                # secrets from Doppler; or export them and run sh scripts/deploy.sh
 
@@ -160,13 +160,13 @@ The end-to-end tests start their own `wrangler dev` with fresh state, and build 
 
 ## Building the Fossil engine
 
-`npm run build:wasm` compiles `fossil/` with TinyGo into `src/fossil.wasm` (and copies TinyGo's `wasm_exec.js`). Built correctly, it is **about 3.1 MB raw and 1.08 MB gzipped**, the same on Linux and macOS:
+`npm run build:wasm` compiles `fossil/` with TinyGo into `src/fossil.wasm` (and copies TinyGo's `wasm_exec.js`). Built correctly, it is **about 2.9 MB raw and 1.0 MB gzipped**, the same on Linux and macOS:
 
 1. **`npm ci` first.** It installs Binaryen 132 (`wasm-opt`) from npm, pinned in `package.json`. The build points TinyGo at it (`WASMOPT`) and runs one more `wasm-opt -Oz` pass with it. Don't install Binaryen yourself: TinyGo's macOS release doesn't bundle `wasm-opt`, and a Homebrew one made the build about 25% larger.
 2. **TinyGo exactly 0.43.0**, the version CI uses. The build checks it and stops otherwise. On macOS: download the `darwin` release from the link in Prerequisites (Homebrew may give another version); on Linux: the `linux-amd64` tarball, with its `bin/` on `PATH`.
 3. **Go from `fossil/go.mod`** (1.26). TinyGo uses it for the standard library. If a newer Go is installed globally, select Go 1.26 for this build with both `GOROOT` and `PATH`; native development can still use the newer version. Go 1.27.3 compiles with TinyGo 0.43.0, but its engine exceeds the current gzip deployment budget.
 
-The build fails if the result is over the size budget, 1,100,000 bytes gzipped (`FOSSIL_WASM_MAX_GZIP` in `fossil/build.sh`), and `deploy.sh` checks the same budget before deploying. If you hit it, look for the causes above before raising the number; raise it only on purpose, in the same commit as the change that needs it. `GO_COMPILER=go sh fossil/build.sh` builds with standard Go instead (about 2.4 MB gzipped, no budget): for debugging, never for deploying.
+The build fails if the result is over the size budget, 1,100,000 bytes gzipped (`FOSSIL_WASM_MAX_GZIP` in `fossil/build.sh`), and `deploy.sh` checks the same budget before deploying. If you hit it, look for the causes above before raising the number; raise it only on purpose, in the same commit as the change that needs it. The build passes `-tags libfossil_nohttp`, which leaves go-libfossil's HTTP client and server (and with them `net/http`, TLS and X.509) out of the engine; the engine serves sync with `HandleSyncWithOpts` and never dials out. `GO_COMPILER=go sh fossil/build.sh` builds with standard Go instead (about 2.4 MB gzipped, no budget): for debugging, never for deploying.
 
 ## CLI usage
 
@@ -404,7 +404,7 @@ Public URLs use the separate `PUBLIC_ORIGIN`: `GET /:publicationId/` serves the 
 | Default / max TTL | 7 days / 30 days, or `--ttl never` | `DEFAULT_TTL_SECONDS`, `MAX_TTL_SECONDS`; expiry is a Durable Object alarm |
 | Repository | 10 GB | Per Durable Object |
 
-A `fossil push` that includes an oversized file is refused, but if Fossil sent the check-in in an earlier round than the file, that check-in arrives without the file. The viewer then shows the other files, and the bundle lists the gap under `missing`. Files published through the API don't hit this, because large files go to R2 (below); for `fossil push`, removing the per-file restriction depends on upstream bounded-value blob storage in [go-libfossil #459](https://github.com/danmestas/go-libfossil/issues/459).
+A `fossil push` that includes an oversized file refuses that push round whole, and the error names the file: its hash, its stored size and, when a check-in this repository already holds lists it, its path. Nothing from that round is stored. If Fossil sent the check-in in an earlier round than the file, that check-in is already stored, so the viewer shows the other files and the bundle lists the file under `missing` until a commit replaces it with an `artifact-blob` pointer (for example the CLI's `update`, which sends large files to R2).
 
 ## Images and large files (blobs)
 

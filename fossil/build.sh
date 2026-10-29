@@ -2,7 +2,7 @@
 # Build the Durable Object's Fossil engine: src/fossil.wasm and the matching
 # runtime glue src/wasm_exec.js, from this directory's Go program.
 #
-#   npm ci && npm run build:wasm             # TinyGo (default): ~2.44 MB raw, ~0.85 MB gzip
+#   npm ci && npm run build:wasm             # TinyGo (default): ~2.9 MB raw, ~1.0 MB gzip
 #   GO_COMPILER=go sh fossil/build.sh        # standard Go:  ~9 MB raw, ~2.4 MB gzip (debugging only)
 #
 # The TinyGo build is reproducible across Linux and macOS because every
@@ -17,6 +17,9 @@ wasmopt="$root/node_modules/.bin/wasm-opt"
 # gzip -9 bytes. Raise it only on purpose, in the same commit as the change
 # that needs it.
 budget="${FOSSIL_WASM_MAX_GZIP:-1100000}"
+# The engine serves sync with HandleSyncWithOpts and never dials out, so
+# go-libfossil's HTTP client and server (net/http, TLS, X.509) stay out.
+tags=libfossil_nohttp
 
 cd "$here"
 case "${GO_COMPILER:-tinygo}" in
@@ -26,13 +29,13 @@ case "${GO_COMPILER:-tinygo}" in
     have=$(tinygo version | sed -n 's/^tinygo version \([0-9.]*\).*/\1/p')
     [ "$have" = "$want" ] || { echo "TinyGo $want is required (found ${have:-none}); see README, Building the Fossil engine" >&2; exit 1; }
     # The default goroutine stack overflows in go-libfossil's deeper paths.
-    WASMOPT="$wasmopt" tinygo build -target wasm -no-debug -opt=z -stack-size=1MB -o "$out/fossil.wasm" .
+    WASMOPT="$wasmopt" tinygo build -target wasm -tags "$tags" -no-debug -opt=z -stack-size=1MB -o "$out/fossil.wasm" .
     # One more size pass over the whole module: about 5% smaller raw, 3% gzipped.
     "$wasmopt" -Oz --detect-features --strip-debug --strip-producers "$out/fossil.wasm" -o "$out/fossil.wasm"
     cp "$(tinygo env TINYGOROOT)/targets/wasm_exec.js" "$out/wasm_exec.js"
     ;;
   go)
-    GOOS=js GOARCH=wasm go build -trimpath -ldflags="-s -w" -o "$out/fossil.wasm" .
+    GOOS=js GOARCH=wasm go build -tags "$tags" -trimpath -ldflags="-s -w" -o "$out/fossil.wasm" .
     cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" "$out/wasm_exec.js"
     budget=0
     ;;

@@ -15,6 +15,18 @@ export interface Entry {
 export type Account = { id: string; email: string; name: string; role: 'owner' | 'member'; status: 'active' | 'invited' | 'disabled' };
 type Row = { id: string; slug: string | null; title: string; created_at: number; updated_at: number; expires_at: number | null; tip: string; owner_id: string | null; archived: number; icon: string };
 const now = () => Math.floor(Date.now() / 1000);
+/** How long an attach may hold its ref pending before reconciling treats it as abandoned (ms). */
+const PENDING_MAX = 5 * 60_000;
+
+/**
+ * Test-only settings, unset in production: a pause between deciding to delete
+ * and deleting, an injected R2 failure or abandoned deletion, and how old a
+ * tombstone must be before the next access finishes its deletion (default 5 minutes).
+ */
+export function testHooks(env: Env): { pause: number; fault: string; staleMs: number } {
+  const v = env as unknown as Record<string, string | undefined>;
+  return { pause: Number(v.TEST_CLEANUP_PAUSE_MS ?? 0), fault: v.TEST_CLEANUP_FAULT ?? '', staleMs: Number(v.TEST_TOMBSTONE_STALE_MS ?? 300_000) };
+}
 const LIVE = '(expires_at IS NULL OR expires_at > ?)';
 
 export class Registry extends DurableObject<Env> {
@@ -34,11 +46,15 @@ export class Registry extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS blob_refs (sha TEXT NOT NULL, artifact_id TEXT NOT NULL, PRIMARY KEY(sha,artifact_id));
       CREATE INDEX IF NOT EXISTS blob_refs_artifact ON blob_refs(artifact_id,sha);
       CREATE TABLE IF NOT EXISTS blob_uploads (sha TEXT NOT NULL, principal TEXT NOT NULL, PRIMARY KEY(sha,principal));
-      CREATE TABLE IF NOT EXISTS attachment_refs (sha TEXT NOT NULL, artifact_id TEXT NOT NULL, PRIMARY KEY(sha,artifact_id));
+      CREATE TABLE IF NOT EXISTS attachment_refs (sha TEXT NOT NULL, artifact_id TEXT NOT NULL,
+        seq INTEGER NOT NULL DEFAULT 0, pending_since INTEGER, PRIMARY KEY(sha,artifact_id));
+      CREATE TABLE IF NOT EXISTS attachment_seq (id INTEGER PRIMARY KEY CHECK(id=1), n INTEGER NOT NULL);
+      INSERT OR IGNORE INTO attachment_seq VALUES (1,0);
       CREATE INDEX IF NOT EXISTS attachment_refs_artifact ON attachment_refs(artifact_id,sha);
       CREATE TABLE IF NOT EXISTS attachment_objects (artifact_id TEXT NOT NULL, sha TEXT NOT NULL, size INTEGER NOT NULL, uploaded_at INTEGER NOT NULL, PRIMARY KEY(artifact_id,sha));
       CREATE INDEX IF NOT EXISTS attachment_objects_sha ON attachment_objects(sha);
-      CREATE TABLE IF NOT EXISTS deleting (key TEXT PRIMARY KEY);`);
+      CREATE TABLE IF NOT EXISTS deleting (key TEXT PRIMARY KEY, deleting_at INTEGER NOT NULL DEFAULT 0);
+      CREATE INDEX IF NOT EXISTS deleting_at ON deleting(deleting_at);`);
     const cols = sql.exec<{ name: string }>('PRAGMA table_info(artifacts)').toArray();
     if (!cols.some(c => c.name === 'owner_id')) sql.exec('ALTER TABLE artifacts ADD COLUMN owner_id TEXT');
     if (!cols.some(c => c.name === 'archived')) sql.exec('ALTER TABLE artifacts ADD COLUMN archived INTEGER NOT NULL DEFAULT 0');
@@ -178,22 +194,43 @@ export class Registry extends DurableObject<Env> {
    * refs skip them, uploads are refused, and checks treat them as missing.
    */
   private tombstone(keys: string[]): string[] {
-    for (const key of keys) this.ctx.storage.sql.exec('INSERT OR IGNORE INTO deleting VALUES (?)',key);
+    for (const key of keys) this.ctx.storage.sql.exec('INSERT OR IGNORE INTO deleting VALUES (?,?)',key,Date.now());
     return keys;
   }
+  /**
+   * Delete R2 keys tombstoned by the transaction that decided to, then clear
+   * their tombstones. If R2 refuses, the tombstones are cleared anyway: the
+   * bytes are still there, and usable again. If the object is evicted midway,
+   * settleStale finishes the job.
+   */
   private async deleteObjects(keys: string[]): Promise<void> {
     if (!keys.length) return;
-    // Tests widen the gap between deciding and deleting to show nothing slips through it.
-    const pause = Number((this.env as unknown as Record<string, string | undefined>).TEST_CLEANUP_PAUSE_MS ?? 0);
-    if (pause > 0) await new Promise(r => setTimeout(r, pause));
-    for (let i = 0; i < keys.length; i += 1000) await this.env.BLOBS.delete(keys.slice(i, i + 1000));
-    for (const key of keys) this.ctx.storage.sql.exec('DELETE FROM deleting WHERE key = ?',key);
+    const test = testHooks(this.env);
+    if (test.pause > 0) await new Promise(r => setTimeout(r, test.pause));
+    if (test.fault === 'abandon') return;
+    try {
+      if (test.fault === 'throw') throw new Error('injected R2 failure');
+      for (let i = 0; i < keys.length; i += 1000) await this.env.BLOBS.delete(keys.slice(i, i + 1000));
+    } catch (e) {
+      console.error(`registry: could not delete ${keys.length} R2 objects; they stay: ${String(e)}`);
+    } finally {
+      for (const key of keys) this.ctx.storage.sql.exec('DELETE FROM deleting WHERE key = ?',key);
+    }
+  }
+  /** Finish deletions left tombstoned longer than a deletion can take: delete again (idempotent), then clear. */
+  private async settleStale(): Promise<void> {
+    const stale = this.ctx.storage.sql.exec<{ key: string }>('SELECT key FROM deleting WHERE deleting_at < ? LIMIT 1000',
+      Date.now() - testHooks(this.env).staleMs).toArray().map(r => r.key);
+    if (!stale.length) return;
+    await this.env.BLOBS.delete(stale);
+    for (const key of stale) this.ctx.storage.sql.exec('DELETE FROM deleting WHERE key = ?',key);
   }
   private isDeleting(key: string): boolean {
     return this.ctx.storage.sql.exec('SELECT 1 FROM deleting WHERE key = ?',key).toArray().length > 0;
   }
   /** Whether R2 key `space/sha` is being deleted: uploads to it must wait. */
   async deletingObject(key: string): Promise<boolean> {
+    await this.settleStale();
     return this.isDeleting(key);
   }
   /**
@@ -201,6 +238,7 @@ export class Registry extends DurableObject<Env> {
    * the ones it now points at: never a blob being deleted.
    */
   async refBlobs(id: string, shas: string[]): Promise<string[]> {
+    await this.settleStale();
     return [...new Set(shas)].filter(sha => {
       if (this.isDeleting(`b/${sha}`)) return false;
       this.ctx.storage.sql.exec('INSERT OR IGNORE INTO blob_refs VALUES (?,?)',sha,id);
@@ -212,6 +250,7 @@ export class Registry extends DurableObject<Env> {
    * exact bytes, stored at `key`. False when they are being deleted.
    */
   async recordUpload(sha: string, principal: string, key = `b/${sha}`): Promise<boolean> {
+    await this.settleStale();
     if (this.isDeleting(key)) return false;
     this.ctx.storage.sql.exec('INSERT OR IGNORE INTO blob_uploads VALUES (?,?)',sha,principal);
     return true;
@@ -222,39 +261,64 @@ export class Registry extends DurableObject<Env> {
    * enough to reach someone else's bytes.
    */
   async allowedBlobs(id: string, principals: string[], shas: string[]): Promise<string[]> {
+    await this.settleStale();
     const sql = this.ctx.storage.sql;
     return [...new Set(shas)].filter(sha => !this.isDeleting(`b/${sha}`) && (
       sql.exec('SELECT 1 FROM blob_refs WHERE sha = ? AND artifact_id = ?',sha,id).toArray().length ||
       principals.some(p => sql.exec('SELECT 1 FROM blob_uploads WHERE sha = ? AND principal = ?',sha,p).toArray().length)));
   }
+  /** The next number in the order refs are made and confirmed; never reused. */
+  private nextSeq(): number {
+    return this.ctx.storage.sql.exec<{ n: number }>('UPDATE attachment_seq SET n = n + 1 WHERE id = 1 RETURNING n').toArray()[0]!.n;
+  }
   /**
    * Record that artifact `id` attaches these bytes, skipping any being deleted.
-   * Returns the ones it now refers to, and which of those are new.
+   * `pending` marks an attach whose write has not happened yet: reconciling
+   * never drops a pending ref (confirmAttachments ends it). Returns the ones it
+   * now refers to, and which of those are new.
    */
-  async refAttachments(id: string, shas: string[]): Promise<{ refs: string[]; added: string[] }> {
-    const sql = this.ctx.storage.sql, refs: string[] = [], added: string[] = [];
-    for (const sha of new Set(shas)) {
-      if (this.isDeleting(`attachments/${sha}`)) continue;
-      refs.push(sha);
-      if (sql.exec('INSERT OR IGNORE INTO attachment_refs VALUES (?,?)',sha,id).rowsWritten) added.push(sha);
-    }
-    return { refs, added };
+  async refAttachments(id: string, shas: string[], pending = false): Promise<{ refs: string[]; added: string[] }> {
+    await this.settleStale();
+    return this.ctx.storage.transactionSync(() => {
+      const sql = this.ctx.storage.sql, refs: string[] = [], added: string[] = [];
+      for (const sha of new Set(shas)) {
+        if (this.isDeleting(`attachments/${sha}`)) continue;
+        refs.push(sha);
+        if (!sql.exec('SELECT 1 FROM attachment_refs WHERE sha = ? AND artifact_id = ?',sha,id).toArray().length) added.push(sha);
+        sql.exec(`INSERT INTO attachment_refs VALUES (?,?,?,?) ON CONFLICT(sha,artifact_id) DO UPDATE SET seq = excluded.seq,
+          pending_since = coalesce(excluded.pending_since, pending_since)`,sha,id,this.nextSeq(),pending ? Date.now() : null);
+      }
+      return { refs, added };
+    });
+  }
+  /** The attach these refs were pending for has written (or given up): renumber them as of now. */
+  async confirmAttachments(id: string, shas: string[]): Promise<void> {
+    this.ctx.storage.transactionSync(() => {
+      for (const sha of shas) this.ctx.storage.sql.exec('UPDATE attachment_refs SET pending_since = NULL, seq = ? WHERE sha = ? AND artifact_id = ?',this.nextSeq(),sha,id);
+    });
   }
   /** Drop refs an attach that failed added: the bytes are an unattached upload again. */
   async unrefAttachments(id: string, shas: string[]): Promise<void> {
     for (const sha of shas) this.ctx.storage.sql.exec('DELETE FROM attachment_refs WHERE sha = ? AND artifact_id = ?',sha,id);
   }
+  /** Taken before reading an artifact's current attachments: reconcileAttachments drops no ref made or confirmed after it. */
+  async attachmentMark(): Promise<number> {
+    return this.ctx.storage.sql.exec<{ n: number }>('SELECT n FROM attachment_seq WHERE id = 1').toArray()[0]!.n;
+  }
   /**
    * Bring artifact `id`'s attachment bookkeeping in line with `current`, the
-   * R2 bytes its attachments name now: bytes it attached before but names no
-   * longer stop counting against its quota, and are deleted unless another
-   * artifact holds them.
+   * R2 bytes its attachments named when read after `mark`: bytes it attached
+   * before but names no longer stop counting against its quota, and are
+   * deleted unless another artifact holds them. A ref made or confirmed after
+   * `mark`, or pending (for at most PENDING_MAX), may name bytes the read
+   * did not see yet, and stays.
    */
-  async reconcileAttachments(id: string, current: string[]): Promise<void> {
+  async reconcileAttachments(id: string, current: string[], mark: number): Promise<void> {
     const keep = new Set(current);
     const orphans = this.ctx.storage.transactionSync(() => {
       const sql = this.ctx.storage.sql;
-      const gone = sql.exec<{ sha: string }>('SELECT sha FROM attachment_refs WHERE artifact_id = ?',id).toArray().map(r => r.sha).filter(sha => !keep.has(sha));
+      const gone = sql.exec<{ sha: string }>(`SELECT sha FROM attachment_refs WHERE artifact_id = ? AND seq <= ?
+        AND (pending_since IS NULL OR pending_since < ?)`,id,mark,Date.now() - PENDING_MAX).toArray().map(r => r.sha).filter(sha => !keep.has(sha));
       for (const sha of gone) {
         sql.exec('DELETE FROM attachment_refs WHERE sha = ? AND artifact_id = ?',sha,id);
         sql.exec('DELETE FROM attachment_objects WHERE sha = ? AND artifact_id = ?',sha,id);
@@ -269,6 +333,7 @@ export class Registry extends DurableObject<Env> {
    * already names, or ones uploaded to it (principal attachment:<id>).
    */
   async allowedAttachments(id: string, shas: string[]): Promise<string[]> {
+    await this.settleStale();
     const sql = this.ctx.storage.sql;
     return [...new Set(shas)].filter(sha => !this.isDeleting(`attachments/${sha}`) && (
       sql.exec('SELECT 1 FROM attachment_refs WHERE sha = ? AND artifact_id = ?',sha,id).toArray().length ||
@@ -302,11 +367,13 @@ export class Registry extends DurableObject<Env> {
    * Forget artifact `id`'s attachment uploads older than `maxAge` seconds that
    * no thread attaches, and delete the bytes no artifact holds any more.
    */
-  async sweepAttachmentUploads(id: string, maxAge: number): Promise<void> {
+  async sweepAttachmentUploads(id: string, maxAge: number, current: string[]): Promise<void> {
+    const named = new Set(current);
     const orphans = this.ctx.storage.transactionSync(() => {
       const sql = this.ctx.storage.sql;
       const stale = sql.exec<{ sha: string }>(`SELECT sha FROM attachment_objects WHERE artifact_id = ? AND uploaded_at < ?
-        AND sha NOT IN (SELECT sha FROM attachment_refs WHERE artifact_id = ?)`,id,now() - maxAge,id).toArray().map(r => r.sha);
+        AND sha NOT IN (SELECT sha FROM attachment_refs WHERE artifact_id = ?)`,id,now() - maxAge,id).toArray().map(r => r.sha)
+        .filter(sha => !named.has(sha));
       for (const sha of stale) {
         sql.exec('DELETE FROM attachment_objects WHERE artifact_id = ? AND sha = ?',id,sha);
         sql.exec('DELETE FROM blob_uploads WHERE sha = ? AND principal = ?',sha,`attachment:${id}`);

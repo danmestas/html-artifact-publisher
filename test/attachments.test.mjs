@@ -379,3 +379,79 @@ test('bytes being deleted cannot be reused until the deletion is done', async ()
     rmSync(slowWork, { recursive: true, force: true });
   }
 });
+
+/** A Worker with test-only cleanup settings, its own state, and helpers bound to it. */
+async function withWorker(vars, body) {
+  const dir = mkdtempSync(join(tmpdir(), 'artifact-attachments-hooks-'));
+  const w = await startWorker(dir, vars);
+  const call = (path, { method = 'GET', token, body: b, raw } = {}) => fetch(w.base + path, {
+    method, headers: { Authorization: `Token ${token}`, 'Content-Type': 'image/png' }, body: raw ?? (b === undefined ? undefined : JSON.stringify(b)),
+  });
+  try { await body(w, call); } finally { w.stop(); rmSync(dir, { recursive: true, force: true }); }
+}
+
+test('an attach landing while a removal reconciles keeps its bytes', async () => {
+  await withWorker({ TEST_CLEANUP_PAUSE_MS: '4000' }, async (w, call) => {
+    const a = await createArtifact(w.base, w.owner, '<p>a</p>');
+    const ticket = (await (await call(`/api/artifacts/${a.id}/tickets`, { method: 'POST', token: a.comment, body: { text: 'x' } })).json()).ticketUuid;
+    const bytes = randomBytes(4000), sha = sha256(bytes);
+    const attach = name => call(`/api/artifacts/${a.id}/attachments`, { method: 'POST', token: a.comment, body: { target: ticket, name, type: 'image/png', sha256: sha, size: bytes.length } });
+    assert.equal((await call(`/api/artifacts/${a.id}/attachments/${sha}`, { method: 'PUT', token: a.comment, raw: bytes })).status, 201);
+    assert.equal((await attach('first.png')).status, 201);
+
+    // The removal reads the current attachments (none name the bytes), then pauses before reconciling.
+    const removing = call(`/api/artifacts/${a.id}/attachments`, { method: 'DELETE', token: a.comment, body: { target: ticket, name: 'first.png' } });
+    await new Promise(r => setTimeout(r, 1500));
+    const second = await attach('second.png');
+    assert.equal(second.status, 201, await second.clone().text());
+    assert.equal((await removing).status, 200);
+
+    const got = (await (await call(`/api/artifacts/${a.id}/attachments?target=${ticket}`, { token: a.read })).json()).attachments;
+    assert.equal(got.length, 1);
+    assert.equal(got[0].missing, undefined, 'second.png still has its bytes');
+    assert.ok(Buffer.from(await (await fetch(w.base + got[0].url)).arrayBuffer()).equals(bytes));
+  });
+});
+
+/** Artifact `a` points at blob `bytes`; `b` has uploaded them too. Returns helpers. */
+async function sharedBlob(w, call) {
+  const a = await createArtifact(w.base, w.owner, '<p>a</p>'), b = await createArtifact(w.base, w.owner, '<p>b</p>');
+  const bytes = randomBytes(5000), sha = sha256(bytes);
+  const pointer = Buffer.from(`artifact-blob 1\nsha256 ${sha}\nsize ${bytes.length}\ntype image/png\n`).toString('base64');
+  const commit = async x => {
+    const tip = (await (await call(`/api/artifacts/${x.id}`, { token: x.read })).json()).tip;
+    return call(`/api/artifacts/${x.id}`, { method: 'PUT', token: x.write, body: { parent: tip, files: { 'img.png': pointer } } });
+  };
+  const put = x => call(`/api/artifacts/${x.id}/blobs/${sha}`, { method: 'PUT', token: x.write, raw: bytes });
+  assert.equal((await put(a)).status, 201);
+  assert.equal((await commit(a)).status, 200);
+  assert.equal((await put(b)).status, 200);
+  return { a, b, bytes, commit, put };
+}
+
+test('a deletion that fails gives the bytes back', async () => {
+  await withWorker({ TEST_CLEANUP_FAULT: 'throw' }, async (w, call) => {
+    const { a, b, bytes, commit, put } = await sharedBlob(w, call);
+    assert.equal((await call(`/api/artifacts/${a.id}`, { method: 'DELETE', token: a.write })).status, 204);
+    // R2 refused the delete: the bytes are still there, and usable at once.
+    const again = await put(b);
+    assert.equal(again.status, 200, await again.clone().text());
+    assert.equal((await again.json()).stored, false);
+    assert.equal((await commit(b)).status, 200);
+    const bundle = await (await call(`/api/artifacts/${b.id}/bundle`, { token: b.read })).json();
+    assert.ok(Buffer.from(await (await fetch(w.base + bundle.blobs['img.png'].url)).arrayBuffer()).equals(bytes));
+  });
+});
+
+test('a deletion abandoned midway is finished by the next access after a while', async () => {
+  await withWorker({ TEST_CLEANUP_FAULT: 'abandon', TEST_TOMBSTONE_STALE_MS: '2000' }, async (w, call) => {
+    const { a, b, commit, put } = await sharedBlob(w, call);
+    assert.equal((await call(`/api/artifacts/${a.id}`, { method: 'DELETE', token: a.write })).status, 204);
+    assert.equal((await put(b)).status, 409, 'still being deleted');
+    await new Promise(r => setTimeout(r, 2500));
+    // Stale now: the next upload finishes the deletion, then stores the bytes afresh.
+    const again = await put(b);
+    assert.equal(again.status, 201, await again.clone().text());
+    assert.equal((await commit(b)).status, 200);
+  });
+});

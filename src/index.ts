@@ -42,7 +42,7 @@ import { Repo } from './repo';
 import { preview } from './preview';
 import { publicationRoutes } from './publications';
 import { accountRoutes, artifactCaller, csrf, identity, readBody } from './accounts';
-import { Registry } from './registry';
+import { Registry, testHooks } from './registry';
 import {
   attachmentLink, blobKey, blobLinks, externalRef, getBlob, isSha, missingBlobs, pointersIn, putBlob,
   serveAttachmentBytes, serveExternalAttachment, verifyAttachmentLink,
@@ -198,7 +198,13 @@ async function handleAttachments(req: Request, env: Env, id: string, rest: strin
     if (!allowed) {
       return json({ error: 'too many uploads: wait a few minutes', code: 'rate_limited' }, 429);
     }
-    await reg.sweepAttachmentUploads(id, UNATTACHED_UPLOAD_TTL);
+    // Register what the current attachments name first, as the list does: a stub
+    // pushed from a clone may name an upload not yet attached through the API.
+    const current = await currentExternals(stub, who);
+    if (current) {
+      await reg.refAttachments(id, await reg.allowedAttachments(id, current));
+      await reg.sweepAttachmentUploads(id, UNATTACHED_UPLOAD_TTL, current);
+    }
     const length = Number(req.headers.get('Content-Length') ?? NaN);
     const quota = parseInt(env.MAX_ATTACHMENT_BYTES, 10);
     let reserved = false;
@@ -259,8 +265,12 @@ async function handleAttachments(req: Request, env: Env, id: string, rest: strin
     // After a change, stop counting and keep only the R2 bytes the current attachments name.
     const done = async (r: FossilReply<unknown>, status: number) => {
       if (!r.ok) return reply(r);
-      const now = (await stub.op(who, { op: 'attachExternals' })) as FossilReply<{ sha256: string[] }>;
-      if (now.ok && now.result) await registry(env).reconcileAttachments(id, now.result.sha256);
+      // The mark comes before the read: a ref made or confirmed after it may name bytes the read missed.
+      const mark = await registry(env).attachmentMark();
+      const current = await currentExternals(stub, who);
+      const pause = testHooks(env).pause;
+      if (pause > 0) await new Promise(res => setTimeout(res, pause));
+      if (current) await registry(env).reconcileAttachments(id, current, mark);
       return json(r.result, status);
     };
     if (method === 'DELETE') return done((await stub.op(who, { op: 'attachDelete', target: b.target, name: b.name, user, guard })) as FossilReply<unknown>, 200);
@@ -278,19 +288,29 @@ async function handleAttachments(req: Request, env: Env, id: string, rest: strin
     if (typeof sha256 !== 'string' || !isSha(sha256) || typeof size !== 'number' || !Number.isSafeInteger(size) || size < 0 || size > max ||
         typeof type !== 'string' || !MEDIA_TYPE.test(type)) return json({ error: ATTACHMENT_BODY }, 400);
     const reg = registry(env);
-    // Record the reference before checking R2, so no other artifact's deletion removes the bytes mid-attach;
-    // bytes being deleted are not referenced, and so count as missing. A refused attach drops what it added.
-    const { refs, added } = await reg.refAttachments(id, await reg.allowedAttachments(id, [sha256]));
+    // Record the reference, pending, before checking R2 and writing: no other artifact's deletion
+    // removes the bytes mid-attach, and no reconcile drops them before the write is visible.
+    // Bytes being deleted are not referenced, and so count as missing.
+    const { refs, added } = await reg.refAttachments(id, await reg.allowedAttachments(id, [sha256]), true);
+    const kept = refs.filter(sha => !added.includes(sha));
     const head = refs.length ? await env.BLOBS.head(blobKey(sha256, 'attachments')) : null;
     if (!head || head.size !== size) {
       await reg.unrefAttachments(id, added);
+      await reg.confirmAttachments(id, kept);
       return json({ error: `upload the bytes with PUT …/attachments/${sha256} before attaching them`, code: 'missing_blob' }, 400);
     }
     const r = (await stub.op(who, { op: 'attachAddExternal', target: b.target, name: b.name, sha256, size, type, user, comment, guard, maxCount })) as FossilReply<unknown>;
-    if (!r.ok) await reg.unrefAttachments(id, added);
+    if (r.ok) await reg.confirmAttachments(id, refs);
+    else { await reg.unrefAttachments(id, added); await reg.confirmAttachments(id, kept); }
     return done(r, 201);
   }
   return null;
+}
+
+/** The R2 bytes the repository's current attachments name, or null when it cannot say. */
+async function currentExternals(stub: ReturnType<typeof repo>, who: Caller): Promise<string[] | null> {
+  const r = (await stub.op(who, { op: 'attachExternals' })) as FossilReply<{ sha256: string[] }>;
+  return r.ok && r.result ? r.result.sha256 : null;
 }
 
 /** GET /a/:id — an attachment through a signed link. */

@@ -59,8 +59,14 @@ bucket=html-artifact-publisher-blobs
 npx wrangler r2 bucket info "$bucket" >/dev/null 2>&1 || npx wrangler r2 bucket create "$bucket"
 # Uploads stage under tmp/ and are copied to their name once verified; a stage
 # outlives its upload only if the Worker stopped mid-upload. Expire those.
-if ! npx wrangler r2 bucket lifecycle list "$bucket" 2>/dev/null | grep -q 'expire-tmp'; then
-  npx wrangler r2 bucket lifecycle add "$bucket" expire-tmp tmp/ --expire-days 1 --force
+# A failure here only leaves stray stages to accumulate: warn, and deploy anyway.
+if rules=$(npx wrangler r2 bucket lifecycle list "$bucket" 2>/dev/null); then
+  if ! printf '%s\n' "$rules" | grep -q 'expire-tmp'; then
+    npx wrangler r2 bucket lifecycle add "$bucket" expire-tmp tmp/ --expire-days 1 --force ||
+      echo "deploy: warning: could not add the expire-tmp lifecycle rule to $bucket" >&2
+  fi
+else
+  echo "deploy: warning: could not list $bucket's lifecycle rules; not adding expire-tmp" >&2
 fi
 # Deploy static serving first; it has only R2, never app secrets or account bindings.
 if ! npx wrangler deploy --config wrangler.public.jsonc >"$public_log" 2>&1; then

@@ -25,7 +25,8 @@ const PENDING_MAX = 5 * 60_000;
  */
 export function testHooks(env: Env): { pause: number; fault: string; staleMs: number } {
   const v = env as unknown as Record<string, string | undefined>;
-  return { pause: Number(v.TEST_CLEANUP_PAUSE_MS ?? 0), fault: v.TEST_CLEANUP_FAULT ?? '', staleMs: Number(v.TEST_TOMBSTONE_STALE_MS ?? 300_000) };
+  // Empty is unset: deploy.sh blanks them.
+  return { pause: Number(v.TEST_CLEANUP_PAUSE_MS || 0), fault: v.TEST_CLEANUP_FAULT || '', staleMs: Number(v.TEST_TOMBSTONE_STALE_MS || 300_000) };
 }
 const LIVE = '(expires_at IS NULL OR expires_at > ?)';
 

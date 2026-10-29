@@ -23,6 +23,7 @@ Usage:
   node scripts/publish-html.mjs history <url>
   node scripts/publish-html.mjs list
   node scripts/publish-html.mjs delete <edit-url>
+  node scripts/publish-html.mjs new-comment-link <edit-url>   (the old comment link stops working)
   node scripts/publish-html.mjs watch <edit-or-comment-url> [--since <hash>] [--interval 30s] [--once] [--cache <dir>]
 
 Publish options:
@@ -88,7 +89,7 @@ if (hasFlag('--help') || hasFlag('-h')) {
   process.exit(0);
 }
 
-const COMMANDS = new Set(['publish', 'update', 'read', 'history', 'list', 'delete', 'watch']);
+const COMMANDS = new Set(['publish', 'update', 'read', 'history', 'list', 'delete', 'new-comment-link', 'watch']);
 const command = COMMANDS.has(positional[0]) ? positional.shift() : 'publish';
 
 const icon = flagValue('--icon');
@@ -323,6 +324,14 @@ async function remove() {
   if (!jsonOnly) console.log(`Deleted ${link.id}`);
 }
 
+async function newCommentLink() {
+  const [rawUrl] = positional;
+  if (!rawUrl) die('usage: new-comment-link <edit-url>');
+  const { commentUrl } = await parseLink(rawUrl).art.newCommentLink();
+  if (jsonOnly) console.log(JSON.stringify({ commentUrl }));
+  else console.log(`New comment link: ${commentUrl}\n   The old comment link no longer works.`);
+}
+
 async function watch() {
   const [rawUrl] = positional;
   if (!rawUrl) die('usage: watch <edit-or-comment-url> [--since <hash>] [--interval 30s] [--once] [--cache <dir>]');
@@ -378,7 +387,7 @@ function output(result, viewerUrl) {
   }
 }
 
-const run = { publish, update, read, history, list, delete: remove, watch }[command];
+const run = { publish, update, read, history, list, delete: remove, 'new-comment-link': newCommentLink, watch }[command];
 try {
   await run();
 } catch (e) {

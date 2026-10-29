@@ -118,3 +118,73 @@ func TestAttachOpsRefuse(t *testing.T) {
 		t.Error("attachOp claimed a non-attachment op")
 	}
 }
+
+func TestAttachOpsGuard(t *testing.T) {
+	r, ticket := ticketRepo(t)
+	add := func(name, user, guard string) error {
+		_, _, err := attachOp(r, "attachAdd", attachReq{Target: ticket, Name: name, User: user, Guard: guard, Content: []byte(user)})
+		return err
+	}
+	if err := add("ed.txt", "edit-link", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := add("c.txt", "comment-link", "comment-link"); err != nil {
+		t.Fatalf("a guarded add of a new name: %v", err)
+	}
+	var c coded
+	if err := add("ed.txt", "comment-link", "comment-link"); !errors.As(err, &c) || c.code != "forbidden" {
+		t.Errorf("a guarded add over another author's attachment: %v, want forbidden", err)
+	}
+	if err := add("c.txt", "comment-link", "comment-link"); err != nil {
+		t.Errorf("a guarded add over its own identity's attachment: %v", err)
+	}
+	_, _, err := attachOp(r, "attachDelete", attachReq{Target: ticket, Name: "ed.txt", User: "comment-link", Guard: "comment-link"})
+	if !errors.As(err, &c) || c.code != "forbidden" {
+		t.Errorf("a guarded delete of another author's attachment: %v, want forbidden", err)
+	}
+	if _, _, err := attachOp(r, "attachDelete", attachReq{Target: ticket, Name: "c.txt", User: "comment-link", Guard: "comment-link"}); err != nil {
+		t.Errorf("a guarded delete of its own identity's attachment: %v", err)
+	}
+	// An unguarded caller (an editor) may replace and delete anything.
+	if err := add("ed.txt", "edit-link", ""); err != nil {
+		t.Error(err)
+	}
+	if _, _, err := attachOp(r, "attachDelete", attachReq{Target: ticket, Name: "ed.txt", User: "edit-link"}); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestAttachOpsMaxCount(t *testing.T) {
+	r, ticket := ticketRepo(t)
+	other, _, err := r.TicketAdd(libfossil.TicketOpts{Fields: map[string]string{"title": "u", "status": "Open"}, User: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	add := func(target, name string) error {
+		_, _, err := attachOp(r, "attachAdd", attachReq{Target: target, Name: name, User: "u", Content: []byte(name), MaxCount: 2})
+		return err
+	}
+	if err := add(ticket, "a.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if err := add(other, "b.txt"); err != nil {
+		t.Fatal(err)
+	}
+	var c coded
+	if err := add(ticket, "c.txt"); !errors.As(err, &c) || c.code != "quota" {
+		t.Errorf("a third attachment across threads: %v, want quota", err)
+	}
+	if err := add(ticket, "a.txt"); err != nil {
+		t.Errorf("replacing an attachment adds none: %v", err)
+	}
+	if _, _, err := attachOp(r, "attachDelete", attachReq{Target: ticket, Name: "a.txt", User: "u"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := add(ticket, "c.txt"); err != nil {
+		t.Errorf("after a delete there is room again: %v", err)
+	}
+	_, _, err = attachOp(r, "attachAddExternal", attachReq{Target: ticket, Name: "d.png", User: "u", SHA256: strings.Repeat("ab", 32), Size: 1, Type: "image/png", MaxCount: 2})
+	if !errors.As(err, &c) || c.code != "quota" {
+		t.Errorf("an external attachment over the count: %v, want quota", err)
+	}
+}

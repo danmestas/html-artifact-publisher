@@ -326,7 +326,8 @@ function attachmentItem(t, a, can) {
       showImage(img, a.url);
     }
   }
-  if (can.commentBox) {
+  // A comment link may remove only what comment links attached (src/index.ts, Attachments).
+  if (can.edit || (can.commentBox && a.user === 'comment-link')) {
     const remove = el('button', { type: 'button', className: 'detach', textContent: 'Remove' });
     remove.setAttribute('aria-label', `Remove ${a.name}`);
     remove.addEventListener('click', async () => {

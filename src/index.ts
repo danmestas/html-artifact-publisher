@@ -49,7 +49,7 @@ import {
 } from './blobs';
 import { BLOB_THRESHOLD, typeOf } from '../public/blobs.js';
 import type { FossilReply } from './fossil';
-import { b64decode, b64encode, clampTtl, genId, genToken, isoOrNull } from './util';
+import { b64decode, b64encode, clampTtl, genId, genToken, isoOrNull, sha256hex } from './util';
 import { ATTACHED_FILE, attachedFrom } from './attached';
 import { ticketAuthor } from './ticket-author';
 import type { Caller, Role } from './repo';
@@ -86,7 +86,7 @@ function json(data: unknown, status = 200): Response {
 }
 
 const STATUS: Record<string, number> = {
-  bad_request: 400, forbidden: 403, not_found: 404, conflict: 409, unchanged: 409, too_large: 413, aborted: 500, internal: 500,
+  bad_request: 400, forbidden: 403, not_found: 404, conflict: 409, unchanged: 409, too_large: 413, quota: 413, aborted: 500, internal: 500,
 };
 
 /** A Fossil reply as an HTTP response: the result, or the error with its status. */
@@ -168,6 +168,10 @@ interface AttachmentRow {
 }
 
 const TICKET = /^[0-9a-f]{4,64}$/;
+/** Attachment uploads per artifact in 15 minutes; a client address may make four times as many. */
+const ATTACHMENT_PUTS = 60;
+/** How long an upload may wait to be attached before its bytes are swept. */
+const UNATTACHED_UPLOAD_TTL = 24 * 3600;
 const MEDIA_TYPE = /^[\w.+-]{1,64}\/[\w.+-]{1,128}$/;
 const ATTACHMENT_BODY = 'Body must be JSON with target (a thread\'s ticket id) and name, plus content (text up to 256 KB) or sha256, size and type of bytes uploaded with PUT …/attachments/<sha256>';
 
@@ -182,16 +186,41 @@ async function handleAttachments(req: Request, env: Env, id: string, rest: strin
     const role = await stub.role(who);
     if (role !== 'comment' && role !== 'write') return json({ error: 'the comment link is required to attach files' }, 403);
     const sha = upload[1]!, reg = registry(env);
-    return withCors(await putBlob(req, env, sha, {
-      known: async () => (await reg.allowedAttachments(id, [sha])).length > 0,
-      record: () => reg.recordUpload(sha, `attachment:${id}`),
-    }, 'attachments'));
+    const uploader = { known: async () => (await reg.allowedAttachments(id, [sha])).length > 0, record: () => reg.recordUpload(sha, `attachment:${id}`) };
+    if (method === 'HEAD' || !isSha(sha)) return withCors(await putBlob(req, env, sha, uploader, 'attachments'));
+    const ip = req.headers.get('CF-Connecting-IP') ?? 'local';
+    const allowed = await reg.rate([`attachment-put:${id}`], ATTACHMENT_PUTS, 900) &&
+      await reg.rate([`attachment-put-ip:${await sha256hex(ip)}`], ATTACHMENT_PUTS * 4, 900);
+    if (!allowed) {
+      return json({ error: 'too many uploads: wait a few minutes', code: 'rate_limited' }, 429);
+    }
+    await reg.sweepAttachmentUploads(id, UNATTACHED_UPLOAD_TTL);
+    const length = Number(req.headers.get('Content-Length') ?? NaN);
+    const quota = parseInt(env.MAX_ATTACHMENT_BYTES, 10);
+    let reserved = false;
+    if (Number.isSafeInteger(length) && length >= 0) {
+      const held = await reg.reserveAttachment(id, sha, length, quota);
+      if (held === 'over') return json({ error: `this artifact's attachments may hold at most ${quota} bytes`, code: 'quota' }, 413);
+      reserved = held === 'reserved';
+    }
+    const res = await putBlob(req, env, sha, uploader, 'attachments');
+    if (!res.ok && reserved) await reg.releaseAttachment(id, sha);
+    return withCors(res);
   }
   if (rest !== '/attachments') return null;
+
+  /** The thread `target` names, as a reply when it is not a thread of this artifact. */
+  const thread = async (target: string): Promise<Response | null> => {
+    const known = (await stub.op(who, { op: 'ticketChanges', ticketUuid: target })) as FossilReply<unknown>;
+    return known.ok ? null : reply(known);
+  };
 
   if (method === 'GET') {
     const target = new URL(req.url).searchParams.get('target') ?? '';
     if (!TICKET.test(target)) return json({ error: 'target must be a thread\'s ticket id' }, 400);
+    // Only threads: attachments on wiki pages or tech notes pushed from a clone stay out of reach.
+    const notThread = await thread(target);
+    if (notThread) return notThread;
     const r = (await stub.op(who, { op: 'attachList', target })) as FossilReply<{ attachments: AttachmentRow[] }>;
     if (!r.ok || !r.result) return reply(r);
     const reg = registry(env);
@@ -218,18 +247,21 @@ async function handleAttachments(req: Request, env: Env, id: string, rest: strin
   if (method === 'POST' || method === 'DELETE') {
     const b = await readBody(req, 2_000_000);
     if (!b || typeof b.target !== 'string' || !TICKET.test(b.target) || !validName(b.name)) return json({ error: ATTACHMENT_BODY }, 400);
+    const notThread = await thread(b.target);
+    if (notThread) return notThread;
     const role = await stub.role(who);
     const user = changeAuthor(role, actor);
-    if (method === 'DELETE') return reply((await stub.op(who, { op: 'attachDelete', target: b.target, name: b.name, user })) as FossilReply<unknown>);
+    // Comment links share one identity: each may change only what comment links attached.
+    const guard = role === 'comment' ? user : '';
+    if (method === 'DELETE') return reply((await stub.op(who, { op: 'attachDelete', target: b.target, name: b.name, user, guard })) as FossilReply<unknown>);
 
     const comment = typeof b.comment === 'string' ? b.comment.slice(0, 1000) : '';
-    const known = (await stub.op(who, { op: 'ticketChanges', ticketUuid: b.target })) as FossilReply<unknown>;
-    if (!known.ok) return reply(known);
+    const maxCount = parseInt(env.MAX_ATTACHMENTS, 10);
     if (typeof b.content === 'string') {
       const bytes = new TextEncoder().encode(b.content);
       if (bytes.length > BLOB_THRESHOLD) return json({ error: `content is over ${BLOB_THRESHOLD} bytes: upload it with PUT …/attachments/<sha256> and attach it by sha256`, code: 'too_large' }, 413);
       if (externalRef(bytes)) return json({ error: 'content is a pointer or an attachment stub; attach bytes by sha256 instead', code: 'bad_request' }, 400);
-      const r = (await stub.op(who, { op: 'attachAdd', target: b.target, name: b.name, data: b64encode(bytes), user, comment })) as FossilReply<unknown>;
+      const r = (await stub.op(who, { op: 'attachAdd', target: b.target, name: b.name, data: b64encode(bytes), user, comment, guard, maxCount })) as FossilReply<unknown>;
       return r.ok ? json(r.result, 201) : reply(r);
     }
     const { sha256, size, type } = b;
@@ -244,7 +276,7 @@ async function handleAttachments(req: Request, env: Env, id: string, rest: strin
     if (!head || head.size !== size) {
       return json({ error: `upload the bytes with PUT …/attachments/${sha256} before attaching them`, code: 'missing_blob' }, 400);
     }
-    const r = (await stub.op(who, { op: 'attachAddExternal', target: b.target, name: b.name, sha256, size, type, user, comment })) as FossilReply<unknown>;
+    const r = (await stub.op(who, { op: 'attachAddExternal', target: b.target, name: b.name, sha256, size, type, user, comment, guard, maxCount })) as FossilReply<unknown>;
     return r.ok ? json(r.result, 201) : reply(r);
   }
   return null;

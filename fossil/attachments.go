@@ -18,6 +18,13 @@ type attachReq struct {
 	SHA256  string // attachAddExternal: the bytes the Worker keeps in R2
 	Size    int64
 	Type    string
+	// Guard, when set, is the only author whose current attachment by Name
+	// the change may replace or delete: a comment link changes only what
+	// comment links attached.
+	Guard string
+	// MaxCount, when positive, caps the repository's current attachments
+	// across every thread; replacing one by name adds none.
+	MaxCount int
 }
 
 // attachmentView is one current attachment as the Worker sees it. A regular
@@ -76,6 +83,9 @@ func attachOp(r *libfossil.Repo, op string, a attachReq) (result any, ok bool, e
 		if err := checkStorable(a.Name, a.Content); err != nil {
 			return nil, true, fail("too_large", "%v", err)
 		}
+		if err := checkAdd(r, a); err != nil {
+			return nil, true, err
+		}
 		artifact, err := r.AttachmentAdd(a.Target, a.Name, a.Content, opts)
 		if err != nil {
 			return nil, true, fail("bad_request", "%v", err)
@@ -83,6 +93,9 @@ func attachOp(r *libfossil.Repo, op string, a attachReq) (result any, ok bool, e
 		return map[string]any{"artifact": artifact}, true, nil
 
 	case "attachAddExternal":
+		if err := checkAdd(r, a); err != nil {
+			return nil, true, err
+		}
 		ref := libfossil.ExternalRef{SHA256: a.SHA256, Size: a.Size, Type: a.Type, Name: a.Name}
 		artifact, err := r.AttachmentAddExternal(a.Target, ref, opts)
 		if err != nil {
@@ -92,6 +105,13 @@ func attachOp(r *libfossil.Repo, op string, a attachReq) (result any, ok bool, e
 
 	case "attachDelete":
 		opts.Comment = "" // fossil writes none on a deletion
+		cur, found, err := current(r, a.Target, a.Name)
+		if err != nil {
+			return nil, true, err
+		}
+		if found && a.Guard != "" && cur.User != a.Guard {
+			return nil, true, fail("forbidden", "%s was attached by %s; this link can remove only what comment links attached", a.Name, cur.User)
+		}
 		artifact, err := r.AttachmentDelete(a.Target, a.Name, opts)
 		if err != nil {
 			return nil, true, notFoundOr(err)
@@ -99,6 +119,42 @@ func attachOp(r *libfossil.Repo, op string, a attachReq) (result any, ok bool, e
 		return map[string]any{"artifact": artifact}, true, nil
 	}
 	return nil, false, nil
+}
+
+// current is target's current attachment by name, if any.
+func current(r *libfossil.Repo, target, name string) (libfossil.Attachment, bool, error) {
+	list, err := r.Attachments(target)
+	if err != nil {
+		return libfossil.Attachment{}, false, fail("not_found", "%v", err)
+	}
+	for _, at := range list {
+		if at.Name == name {
+			return at, true, nil
+		}
+	}
+	return libfossil.Attachment{}, false, nil
+}
+
+// checkAdd enforces a.Guard and a.MaxCount for an attachment about to be added.
+func checkAdd(r *libfossil.Repo, a attachReq) error {
+	cur, found, err := current(r, a.Target, a.Name)
+	if err != nil {
+		return err
+	}
+	if found && a.Guard != "" && cur.User != a.Guard {
+		return fail("forbidden", "%s was attached by %s; this link can replace only what comment links attached", a.Name, cur.User)
+	}
+	if found || a.MaxCount <= 0 {
+		return nil
+	}
+	var n int
+	if err := r.DB().QueryRow("SELECT count(*) FROM attachment WHERE isLatest AND coalesce(src,'') != ''").Scan(&n); err != nil {
+		return err
+	}
+	if n >= a.MaxCount {
+		return fail("quota", "this artifact already has %d attachments, the most it may hold", n)
+	}
+	return nil
 }
 
 func notFoundOr(err error) error {

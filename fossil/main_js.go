@@ -53,6 +53,8 @@ type request struct {
 	SHA256      string            `json:"sha256"`     // attachAddExternal: the bytes in R2
 	Size        int64             `json:"size"`       // attachAddExternal
 	Type        string            `json:"type"`       // attachAddExternal
+	Guard       string            `json:"guard"`      // attachments: the only author whose attachment may change
+	MaxCount    int               `json:"maxCount"`   // attachAdd*: the most current attachments the repository may hold
 }
 
 // Fossil logins for sync: the edit and read links' tokens are their passwords.
@@ -222,7 +224,7 @@ func handle(req request, body []byte) (any, error) {
 			return nil, fail("bad_request", "data is not base64")
 		}
 		a := attachReq{Target: req.Target, Name: req.Name, User: req.User, Comment: req.Comment,
-			Content: content, SHA256: req.SHA256, Size: req.Size, Type: req.Type}
+			Content: content, SHA256: req.SHA256, Size: req.Size, Type: req.Type, Guard: req.Guard, MaxCount: req.MaxCount}
 		if result, ok, err := attachOp(r, req.Op, a); ok {
 			return result, err
 		}

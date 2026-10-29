@@ -59,6 +59,9 @@
     "MAX_PAYLOAD_BYTES": "10485760",
     // Maximum size of one blob upload in bytes (Workers accept request bodies up to 100 MB)
     "MAX_BLOB_BYTES": "100000000",
+    // Per artifact: R2 bytes its attachments may hold, and current attachments across its threads.
+    "MAX_ATTACHMENT_BYTES": "200000000",
+    "MAX_ATTACHMENTS": "100",
     // Optional wake sink: webhook, notify, nats or none (see README, Wake sinks).
     // Empty kind keeps the NOTIFY_* configuration below. WAKE_SINK_SECRET is a secret.
     "WAKE_SINK_KIND": "",

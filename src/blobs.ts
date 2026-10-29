@@ -57,15 +57,17 @@ export interface Uploader {
 }
 
 /**
- * Store the request body as blob `sha`. The bytes are hashed as they stream
- * into R2; a body that doesn't match its name is deleted and refused. Bytes
- * already stored are uploaded and hashed again anyway: that is how a caller
- * proves it has them, rather than just their hash.
+ * Store the request body as blob `sha`. Bytes already stored are uploaded and
+ * hashed again anyway, without being written: that is how a caller proves it
+ * has them, rather than just their hash. New bytes are staged under tmp/,
+ * hashed as they stream in, and copied to their name only once they match it.
+ * Nothing an upload sends ever replaces or removes a stored object.
  */
 export async function putBlob(req: Request, env: Env, sha: string, who: Uploader): Promise<Response> {
   if (!isSha(sha)) return text(400, 'blob name must be a lowercase SHA-256');
+  const key = blobKey(sha);
   if (req.method === 'HEAD') {
-    const known = (await who.known()) && !!(await env.BLOBS.head(blobKey(sha)));
+    const known = (await who.known()) && !!(await env.BLOBS.head(key));
     return new Response(null, { status: known ? 200 : 404 });
   }
   const length = Number(req.headers.get('Content-Length') ?? NaN);
@@ -73,10 +75,11 @@ export async function putBlob(req: Request, env: Env, sha: string, who: Uploader
   if (!Number.isSafeInteger(length) || length < 0) return text(411, 'Content-Length is required');
   if (length > max) return text(413, `file is too large: at most ${max} bytes`);
   if (!req.body) return text(400, 'empty body');
-  const existing = await env.BLOBS.head(blobKey(sha));
+  const existing = await env.BLOBS.head(key);
   const digest = new crypto.DigestStream('SHA-256');
-  if (existing && existing.size === length) {
-    // Already stored: hash the upload without writing it again.
+  if (existing) {
+    // Stored bytes were verified when they arrived: other bytes cannot be these.
+    if (existing.size !== length) return text(400, `the bytes don't match their name: ${sha} is ${existing.size} bytes`);
     try { await req.body.pipeTo(digest); } catch { return text(400, 'upload did not complete'); }
     const actual = hex(new Uint8Array(await digest.digest));
     if (actual !== sha) return text(400, `the bytes don't match their name: they hash to ${actual}`);
@@ -84,22 +87,32 @@ export async function putBlob(req: Request, env: Env, sha: string, who: Uploader
     return Response.json({ sha256: sha, size: length, stored: false });
   }
 
+  const staged = `tmp/${crypto.randomUUID()}`;
   const [toR2, toHash] = req.body.tee();
   const hashed = toHash.pipeTo(digest);
   const sized = new FixedLengthStream(length);
   const piped = toR2.pipeTo(sized.writable);
   const type = (req.headers.get('Content-Type') ?? '').split(';')[0]!.trim().slice(0, 128) || 'application/octet-stream';
-  const put = env.BLOBS.put(blobKey(sha), sized.readable, { httpMetadata: { contentType: type } });
   try {
-    await Promise.all([hashed, piped, put]);
+    await Promise.all([hashed, piped, env.BLOBS.put(staged, sized.readable, { httpMetadata: { contentType: type } })]);
   } catch {
-    await env.BLOBS.delete(blobKey(sha));
+    await env.BLOBS.delete(staged);
     return text(400, 'upload did not complete');
   }
   const actual = hex(new Uint8Array(await digest.digest));
   if (actual !== sha) {
-    await env.BLOBS.delete(blobKey(sha));
+    await env.BLOBS.delete(staged);
     return text(400, `the bytes don't match their name: they hash to ${actual}`);
+  }
+  // Verified: copy them to their name. A concurrent upload that got there first
+  // wrote these same bytes, so writing them again changes nothing.
+  try {
+    const object = await env.BLOBS.get(staged);
+    if (!object) return text(500, 'the upload was lost before it could be stored');
+    const copy = new FixedLengthStream(object.size);
+    await Promise.all([object.body.pipeTo(copy.writable), env.BLOBS.put(key, copy.readable, { httpMetadata: { contentType: type } })]);
+  } finally {
+    await env.BLOBS.delete(staged);
   }
   await who.record();
   return Response.json({ sha256: sha, size: length, stored: true }, { status: 201 });

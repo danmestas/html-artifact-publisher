@@ -873,6 +873,12 @@ test('wake: a push of N tickets wakes N, and at most 40', { skip: !haveStockFoss
   assert.equal(new Set(all.map(w => w.key)).size, 43);
 });
 
+if (process.env.VERSION_TOAST_BROWSER_QA === '1') test('real browser: new version toast fits phones and loads the update', { timeout: 180000 }, async () => {
+  const { versionToastQA } = await import('./version-toast-browser.mjs');
+  const a = await create({ 'index.html': b64('<!doctype html><h1>Original page</h1>') });
+  await versionToastQA({ base, a, api, output: join(root, '.wrangler/version-toast-browser-qa') });
+});
+
 if (process.env.VIEWER_BROWSER_QA === '1') test('real browser: comment pins, thread panel, resolve and the read link', async () => {
   const { viewerQA, XSS } = await import('./viewer-browser.mjs');
   const a = await create({ 'index.html': b64('<!doctype html><h1 id="intro">Heading text</h1><p>The quick brown <em>fox</em> jumps over the lazy dog.</p>') }, { title: 'A long artifact title for a compact toolbar on even the narrowest phone' });

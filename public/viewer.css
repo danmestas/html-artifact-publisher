@@ -281,10 +281,11 @@ button:disabled { cursor: wait; opacity: .6; }
 
 #toast {
   position: fixed; left: 50%; bottom: max(20px, env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); z-index: 5;
-  display: flex; align-items: center; gap: 12px; padding: 10px 12px 10px 16px; max-width: calc(100vw - 24px);
+  display: flex; align-items: center; gap: 12px; padding: 10px 12px 10px 16px; width: max-content; max-width: calc(100vw - 24px);
   border-radius: 10px; background: var(--ink); color: var(--bar); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
 }
-#toast button { height: 30px; padding: 0 10px; border: none; border-radius: 6px; background: var(--bar); color: var(--ink); font-weight: 500; }
+#toastText { min-width: 0; overflow-wrap: anywhere; }
+#toast button { flex: none; white-space: nowrap; height: 30px; padding: 0 10px; border: none; border-radius: 6px; background: var(--bar); color: var(--ink); font-weight: 500; }
 
 /* ── Phone ───────────────────────────────────────────────────────────── */
 @media (max-width: 640px) {
@@ -300,6 +301,7 @@ button:disabled { cursor: wait; opacity: .6; }
   .popover.more { right: 8px; max-width: calc(100vw - 16px); }
   #threadPanel { right: 8px; }
   #oldStrip { gap: 6px; padding-inline: 8px; }
+  #toast { left: max(12px, env(safe-area-inset-left, 0px)); right: max(12px, env(safe-area-inset-right, 0px)); width: auto; max-width: none; transform: none; }
   .comment-actions { flex-wrap: wrap; }
   .comment-actions .hint:not(:empty) { flex-basis: 100%; }
 }

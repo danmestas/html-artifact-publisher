@@ -32,12 +32,20 @@ globalThis.__dosql = (q, params) => {
 const go = new Go();
 const { instance } = await WebAssembly.instantiate(readFileSync(new URL('../../src/fossil.wasm', import.meta.url)), go.importObject);
 go.run(instance);
+// The TinyGo engine exports fossil_call (no scheduler, so no js.FuncOf); a
+// standard Go build installs globalThis.fossilDO instead.
+const engine = instance.exports.fossil_call ? {
+  call(request, body) {
+    globalThis.__fossilIn = [request, body];
+    try { instance.exports.fossil_call(); return globalThis.__fossilOut; } finally { globalThis.__fossilIn = globalThis.__fossilOut = undefined; }
+  },
+} : globalThis.fossilDO;
 let peak = 0;
 function call(request) {
   db.exec('SAVEPOINT request');
   let reply;
   try {
-    reply = JSON.parse(globalThis.fossilDO.call(JSON.stringify({ user: 'memory-test', comment: 'Memory regression', ...request })));
+    reply = JSON.parse(engine.call(JSON.stringify({ user: 'memory-test', comment: 'Memory regression', ...request })));
     if (!reply.ok || reply.aborted) db.exec('ROLLBACK TO request');
   } catch (error) {
     db.exec('ROLLBACK TO request');

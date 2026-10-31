@@ -160,8 +160,10 @@ var (
 )
 
 func exec(q string, args []driver.Value) (out *res, err error) {
-	// database/sql cancels row/transaction cleanup goroutines between queries.
-	// TinyGo's cooperative scheduler must run them before their stacks accumulate.
+	// database/sql cancels row/transaction cleanup goroutines between queries;
+	// a cooperative scheduler must run them before their stacks accumulate. The
+	// TinyGo engine has no scheduler and no such goroutines (goroot.patch), so
+	// this only matters for GO_COMPILER=go.
 	runtime.Gosched()
 	if bridge.Type() != js.TypeFunction {
 		bridge = js.Global().Get("__dosql")

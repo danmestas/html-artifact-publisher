@@ -34,8 +34,29 @@ let current: SqlStorage | null = null;
 function boot(): FossilApi {
   if (api) return api;
   const go = new Go();
-  go.run(new WebAssembly.Instance(wasm, go.importObject));
-  api = (globalThis as unknown as { fossilDO: FossilApi }).fossilDO;
+  const instance = new WebAssembly.Instance(wasm, go.importObject);
+  go.run(instance);
+  // The TinyGo engine runs without a scheduler, so it cannot answer through a
+  // js.FuncOf callback: it exports fossil_call, which takes its arguments from
+  // __fossilIn and leaves the reply in __fossilOut (fossil/export_js.go). A
+  // standard Go build (GO_COMPILER=go) installs fossilDO instead.
+  const call = (instance.exports as { fossil_call?: () => void }).fossil_call;
+  if (call) {
+    const g = globalThis as unknown as { __fossilIn?: [string, Uint8Array | undefined]; __fossilOut?: string };
+    api = {
+      call(request, body) {
+        g.__fossilIn = [request, body];
+        try {
+          call();
+          return g.__fossilOut as string;
+        } finally {
+          g.__fossilIn = g.__fossilOut = undefined;
+        }
+      },
+    };
+  } else {
+    api = (globalThis as unknown as { fossilDO: FossilApi }).fossilDO;
+  }
   if (!api) throw new Error('the Fossil engine did not start');
   return api;
 }

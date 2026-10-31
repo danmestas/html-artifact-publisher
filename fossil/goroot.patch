@@ -1,6 +1,6 @@
 --- a/src/database/sql/sql.go
 +++ b/src/database/sql/sql.go
-@@ -838,7 +838,7 @@
+@@ -843,7 +843,7 @@
  		stop:      cancel,
  	}
  
@@ -9,7 +9,7 @@
  
  	return db
  }
-@@ -1088,7 +1088,7 @@
+@@ -1093,7 +1093,7 @@
  func (db *DB) startCleanerLocked() {
  	if (db.maxLifetime > 0 || db.maxIdleTime > 0) && db.numOpen > 0 && db.cleanerCh == nil {
  		db.cleanerCh = make(chan struct{}, 1)
@@ -18,7 +18,7 @@
  	}
  }
  
-@@ -1922,7 +1922,7 @@
+@@ -1927,7 +1927,7 @@
  		keepConnOnRollback: keepConnOnRollback,
  		ctx:                ctx,
  	}
@@ -27,7 +27,7 @@
  	return tx, nil
  }
  
-@@ -2993,7 +2993,7 @@
+@@ -3004,7 +3004,7 @@
  	}
  	closectx, cancel := context.WithCancel(ctx)
  	rs.cancel = cancel
@@ -38,7 +38,7 @@
  // awaitDone blocks until ctx, txctx, or closectx is canceled.
 --- a/src/context/context.go
 +++ b/src/context/context.go
-@@ -518,14 +518,7 @@
+@@ -519,14 +519,7 @@
  		return
  	}
  
@@ -56,7 +56,7 @@
  type stringer interface {
 --- a/src/time/sleep.go
 +++ b/src/time/sleep.go
-@@ -212,5 +212,5 @@
+@@ -179,5 +179,5 @@
  }
  
  func goFunc(arg any, seq uintptr, delta int64) {

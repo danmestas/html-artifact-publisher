@@ -101,7 +101,7 @@ On the Workers Paid plan ($5/month) a modest deployment stays inside the include
 ## Prerequisites
 
 - [Node.js 24+](https://nodejs.org/), the version CI uses. Publishing with `scripts/publish-html.mjs` alone works on Node 22+.
-- [Go 1.26+](https://go.dev/dl/) and exactly [TinyGo 0.43.0](https://github.com/tinygo-org/tinygo/releases/tag/v0.43.0) to build the Fossil engine (see [Building the Fossil engine](#building-the-fossil-engine))
+- [Go 1.27.3+](https://go.dev/dl/) and exactly [TinyGo 0.43.0](https://github.com/tinygo-org/tinygo/releases/tag/v0.43.0) to build the Fossil engine (see [Building the Fossil engine](#building-the-fossil-engine))
 - A Cloudflare account on the Workers Paid plan
 
 ## Quick start
@@ -110,7 +110,7 @@ The full walkthrough is [docs/self-hosting.md](docs/self-hosting.md). In short:
 
 ```bash
 npm ci
-npm run build:wasm                 # fossil/ → src/fossil.wasm, about 0.6 MB gzipped
+npm run build:wasm                 # fossil/ → src/fossil.wasm, about 0.75 MB gzipped
 npm test
 npm run deploy:prod                # secrets from Doppler; or export them and run sh scripts/deploy.sh
 
@@ -162,14 +162,14 @@ The end-to-end tests start their own `wrangler dev` with fresh state, and build 
 
 ## Building the Fossil engine
 
-`npm run build:wasm` compiles `fossil/` with TinyGo into `src/fossil.wasm` (and copies TinyGo's `wasm_exec.js`). Built correctly, it is **about 1.5 MB raw and 0.6 MB gzipped**, the same on Linux and macOS:
+`npm run build:wasm` compiles `fossil/` with TinyGo into `src/fossil.wasm` (and copies TinyGo's `wasm_exec.js`). Built correctly, it is **about 1.8 MB raw and 0.75 MB gzipped**, the same on Linux and macOS:
 
 1. **`npm ci` first.** It installs Binaryen 132 (`wasm-opt`) from npm, pinned in `package.json`. The build points TinyGo at it (`WASMOPT`) and runs one more `wasm-opt -Oz` pass with it. Don't install Binaryen yourself: TinyGo's macOS release doesn't bundle `wasm-opt`, and a Homebrew one made the build about 25% larger.
 2. **TinyGo exactly 0.43.0**, the version CI uses. The build checks it and stops otherwise. On macOS: download the `darwin` release from the link in Prerequisites (Homebrew may give another version); on Linux: the `linux-amd64` tarball, with its `bin/` on `PATH`.
-3. **Go from `fossil/go.mod`** (1.26). TinyGo uses it for the standard library. If a newer Go is installed globally, select Go 1.26 for this build with both `GOROOT` and `PATH`; native development can still use the newer version. Go 1.27.3 also builds with TinyGo 0.43.0, to about 753 KB gzipped.
+3. **Go from `fossil/go.mod`** (1.27.3). TinyGo uses it for the standard library, and `goroot.patch` (item 4) is made against it. If several Go versions are installed, select this one for the build with both `GOROOT` and `PATH`.
 4. **A patched copy of that Go tree.** The engine runs without a scheduler (`-scheduler=none`): TinyGo's default, asyncify, made it about 40% larger and three times slower, and each request already runs synchronously. The only goroutines in the program are six in Go's standard library (four in `database/sql`, one each in `context` and `time.AfterFunc`), and none do useful work in one synchronous request. The build copies the Go tree to `$TMPDIR` once per Go version and applies `fossil/goroot.patch`, which removes them and also leaves out the FIPS self-tests this build never runs. Without a scheduler `js.FuncOf` cannot call into Go, so the engine is a reactor (`-buildmode=c-shared`) that exports `fossil_call` (`fossil/export_js.go`), and `-panic-unwind=explicit` keeps `recover` working, so a panic is still an error reply. If `GOROOT` and the `go` on `PATH` are different versions, the build stops.
 
-The build fails if the result is over the size budget, 1,100,000 bytes gzipped (`FOSSIL_WASM_MAX_GZIP` in `fossil/build.sh`), and `deploy.sh` checks the same budget before deploying. If you hit it, look for the causes above before raising the number; raise it only on purpose, in the same commit as the change that needs it. The build passes `-tags libfossil_nohttp`, which leaves go-libfossil's HTTP client and server (and with them `net/http`, TLS and X.509) out of the engine; the engine serves sync with `HandleSyncWithOpts` and never dials out. `GO_COMPILER=go sh fossil/build.sh` builds with standard Go instead (about 2.4 MB gzipped, no budget): for debugging, never for deploying.
+The build fails if the result is over the size budget, 800,000 bytes gzipped (`FOSSIL_WASM_MAX_GZIP` in `fossil/build.sh`), and `deploy.sh` checks the same budget before deploying. If you hit it, look for the causes above before raising the number; raise it only on purpose, in the same commit as the change that needs it. The build passes `-tags libfossil_nohttp`, which leaves go-libfossil's HTTP client and server (and with them `net/http`, TLS and X.509) out of the engine; the engine serves sync with `HandleSyncWithOpts` and never dials out. `GO_COMPILER=go sh fossil/build.sh` builds with standard Go instead (about 2.4 MB gzipped, no budget): for debugging, never for deploying.
 
 ## CLI usage
 

@@ -1,0 +1,75 @@
+--- a/src/database/sql/sql.go
++++ b/src/database/sql/sql.go
+@@ -838,7 +838,7 @@
+ 		stop:      cancel,
+ 	}
+ 
+-	go db.connectionOpener(ctx)
++	_ = ctx // no scheduler: connections open on demand
+ 
+ 	return db
+ }
+@@ -1088,7 +1088,7 @@
+ func (db *DB) startCleanerLocked() {
+ 	if (db.maxLifetime > 0 || db.maxIdleTime > 0) && db.numOpen > 0 && db.cleanerCh == nil {
+ 		db.cleanerCh = make(chan struct{}, 1)
+-		go db.connectionCleaner(db.shortestIdleTimeLocked())
++		// no scheduler: no lifetime cleaner
+ 	}
+ }
+ 
+@@ -1922,7 +1922,7 @@
+ 		keepConnOnRollback: keepConnOnRollback,
+ 		ctx:                ctx,
+ 	}
+-	go tx.awaitDone()
++	// no scheduler: no context watcher
+ 	return tx, nil
+ }
+ 
+@@ -2993,7 +2993,7 @@
+ 	}
+ 	closectx, cancel := context.WithCancel(ctx)
+ 	rs.cancel = cancel
+-	go rs.awaitDone(ctx, txctx, closectx)
++	_, _ = txctx, closectx // no scheduler: no context watcher
+ }
+ 
+ // awaitDone blocks until ctx, txctx, or closectx is canceled.
+--- a/src/context/context.go
++++ b/src/context/context.go
+@@ -518,14 +518,7 @@
+ 		return
+ 	}
+ 
+-	goroutines.Add(1)
+-	go func() {
+-		select {
+-		case <-parent.Done():
+-			child.cancel(false, parent.Err(), Cause(parent))
+-		case <-child.Done():
+-		}
+-	}()
++	// no scheduler: a custom parent context does not propagate cancellation
+ }
+ 
+ type stringer interface {
+--- a/src/time/sleep.go
++++ b/src/time/sleep.go
+@@ -212,5 +212,5 @@
+ }
+ 
+ func goFunc(arg any, seq uintptr, delta int64) {
+-	go arg.(func())()
++	arg.(func())() // no scheduler: run the AfterFunc callback inline
+ }
+--- a/src/crypto/internal/fips140/cast.go
++++ b/src/crypto/internal/fips140/cast.go
+@@ -35,6 +35,7 @@
+ // use of the algorithm, an invocation of that algorithm should be added to
+ // fipstest.TestConditionals.
+ func CAST(name string, f func() error) {
++	return // FIPS self-tests left out: this build is never in FIPS mode
+ 	if strings.ContainsAny(name, ",#=:") {
+ 		panic("fips: invalid self-test name: " + name)
+ 	}

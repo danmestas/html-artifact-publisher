@@ -1,9 +1,5 @@
-github.com/danmestas/go-libfossil v0.16.3-0.20261026130907-f5d72f495b48 h1:0uqjfXHUwP0BExsN60GFdKLJB0OhG49UN318B5v26uU=
-github.com/danmestas/go-libfossil v0.16.3-0.20261026130907-f5d72f495b48/go.mod h1:srcBH/pQu2vKaebmyTIQcwJ5Jev2PUtL76JQXxEy7mQ=
-github.com/danmestas/go-libfossil v0.16.3-0.20261029015138-18537eda5563 h1:v+ISp+Ath3z2CI0sMjBFTtrdC8lcNtqceASPa2CF6VM=
-github.com/danmestas/go-libfossil v0.16.3-0.20261029015138-18537eda5563/go.mod h1:srcBH/pQu2vKaebmyTIQcwJ5Jev2PUtL76JQXxEy7mQ=
-github.com/danmestas/go-libfossil v0.16.3-0.20261029033001-957903560af7 h1:YRBQar8o8RNaA40wWy8OccjCEuHExdLamgHDyYAtU4w=
-github.com/danmestas/go-libfossil v0.16.3-0.20261029033001-957903560af7/go.mod h1:srcBH/pQu2vKaebmyTIQcwJ5Jev2PUtL76JQXxEy7mQ=
+github.com/danmestas/go-libfossil v0.16.3-0.20261031142249-ac3c853c062b h1:d8T28Vy812w2SyfMBW7a8GbJXVmsU3nkMEYC7lZAAVc=
+github.com/danmestas/go-libfossil v0.16.3-0.20261031142249-ac3c853c062b/go.mod h1:srcBH/pQu2vKaebmyTIQcwJ5Jev2PUtL76JQXxEy7mQ=
 github.com/danmestas/go-libfossil/db/driver/modernc v0.3.0 h1:O01NTY1LOkD9rcjneDAti5SC4RGvSARrrWtfnXyehBs=
 github.com/danmestas/go-libfossil/db/driver/modernc v0.3.0/go.mod h1:spdUGmH76DTTxNqmE2BaH3PvzGkilaNYnGQbaHO3T7M=
 github.com/danmestas/go-libfossil/db/driver/ncruces v0.3.0 h1:/0g6Ye9NFh6M9eH2n8shS/ahlyKK9Xtwl9w8K5/MEbE=

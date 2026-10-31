@@ -356,46 +356,50 @@ func nonNil(s []string) []string {
 	return s
 }
 
+// callEngine handles one request: args[0] the JSON request, args[1] an
+// optional body. It returns the JSON reply.
+func callEngine(args []js.Value) (out any) {
+	aborted = ""
+	reply := map[string]any{}
+	defer func() {
+		if p := recover(); p != nil {
+			reply = map[string]any{"error": fmt.Sprintf("panic: %v", p), "code": "internal"}
+		}
+		if aborted != "" {
+			reply["aborted"] = aborted
+		}
+		j, _ := json.Marshal(reply)
+		out = string(j)
+	}()
+	var req request
+	if err := json.Unmarshal([]byte(args[0].String()), &req); err != nil {
+		reply["error"], reply["code"] = err.Error(), "bad_request"
+		return nil
+	}
+	var body []byte
+	if len(args) > 1 && args[1].Truthy() {
+		body = make([]byte, args[1].Get("length").Int())
+		js.CopyBytesToGo(body, args[1])
+	}
+	result, err := handle(req, body)
+	if err != nil {
+		reply["error"], reply["code"] = err.Error(), "internal"
+		if result != nil {
+			reply["result"] = result
+		}
+		var c coded
+		if errors.As(err, &c) {
+			reply["code"] = c.code
+		}
+		return nil
+	}
+	reply["ok"], reply["result"] = true, result
+	return nil
+}
+
 func main() {
 	api := js.Global().Get("Object").New()
-	api.Set("call", js.FuncOf(func(_ js.Value, args []js.Value) (out any) {
-		aborted = ""
-		reply := map[string]any{}
-		defer func() {
-			if p := recover(); p != nil {
-				reply = map[string]any{"error": fmt.Sprintf("panic: %v", p), "code": "internal"}
-			}
-			if aborted != "" {
-				reply["aborted"] = aborted
-			}
-			j, _ := json.Marshal(reply)
-			out = string(j)
-		}()
-		var req request
-		if err := json.Unmarshal([]byte(args[0].String()), &req); err != nil {
-			reply["error"], reply["code"] = err.Error(), "bad_request"
-			return nil
-		}
-		var body []byte
-		if len(args) > 1 && args[1].Truthy() {
-			body = make([]byte, args[1].Get("length").Int())
-			js.CopyBytesToGo(body, args[1])
-		}
-		result, err := handle(req, body)
-		if err != nil {
-			reply["error"], reply["code"] = err.Error(), "internal"
-			if result != nil {
-				reply["result"] = result
-			}
-			var c coded
-			if errors.As(err, &c) {
-				reply["code"] = c.code
-			}
-			return nil
-		}
-		reply["ok"], reply["result"] = true, result
-		return nil
-	}))
+	api.Set("call", js.FuncOf(func(_ js.Value, args []js.Value) any { return callEngine(args) }))
 	js.Global().Set("fossilDO", api)
 	select {}
 }

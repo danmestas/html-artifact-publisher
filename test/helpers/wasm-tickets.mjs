@@ -8,7 +8,11 @@ import '../../src/wasm_exec.js';
 // a resolution is a change to it, and timelineSince tells which tickets
 // arrived after a known artifact.
 const db = new DatabaseSync(':memory:', { enableForeignKeyConstraints: false });
+// Set to make the next SELECT answer with a malformed result, so the engine
+// panics reading it (the panic check below).
+let malformed = false;
 globalThis.__dosql = (q, params) => {
+  if (malformed && /^\s*SELECT/i.test(q)) return { cols: ['x'], rows: 7, id: 0, n: 0 };
   try {
     const statement = db.prepare(q);
     const cols = statement.columns().map(c => c.name);
@@ -30,12 +34,20 @@ globalThis.__dosql = (q, params) => {
 const go = new Go();
 const { instance } = await WebAssembly.instantiate(readFileSync(new URL('../../src/fossil.wasm', import.meta.url)), go.importObject);
 go.run(instance);
+// The TinyGo engine exports fossil_call (no scheduler, so no js.FuncOf); a
+// standard Go build installs globalThis.fossilDO instead.
+const engine = instance.exports.fossil_call ? {
+  call(request, body) {
+    globalThis.__fossilIn = [request, body];
+    try { instance.exports.fossil_call(); return globalThis.__fossilOut; } finally { globalThis.__fossilIn = globalThis.__fossilOut = undefined; }
+  },
+} : globalThis.fossilDO;
 
 function call(request) {
   db.exec('SAVEPOINT request');
   let reply;
   try {
-    reply = JSON.parse(globalThis.fossilDO.call(JSON.stringify({ user: 'reader', comment: 'Ticket test', ...request })));
+    reply = JSON.parse(engine.call(JSON.stringify({ user: 'reader', comment: 'Ticket test', ...request })));
     if (!reply.ok || reply.aborted) db.exec('ROLLBACK TO request');
   } finally {
     db.exec('RELEASE request');
@@ -99,4 +111,13 @@ assert.notEqual(newer.tip, tip);
 assert.equal(unchanged.result.tip, tip, 'a later commit cannot change the acknowledged metadata-only base');
 assert.equal(call({ op: 'commit', parent: tip, files: { 'index.html': b64('<h1>page</h1>') } }).code, 'conflict');
 
-console.log(JSON.stringify({ tickets: tickets.length, changes: changes.length, since: since.length, info: Boolean(tipUuid) }));
+// A Go panic is an error reply, and the engine keeps serving: the TinyGo build
+// has no scheduler, and -panic-unwind=explicit is what keeps recover working.
+malformed = true;
+const panicked = call({ op: 'ticketList' });
+malformed = false;
+assert.equal(panicked.code, 'internal', JSON.stringify(panicked));
+assert.match(panicked.error, /^panic: /, JSON.stringify(panicked));
+assert.equal(ok({ op: 'ticketList' }).length, 2, 'the engine serves the next request after a panic');
+
+console.log(JSON.stringify({ tickets: tickets.length, changes: changes.length, since: since.length, info: Boolean(tipUuid), recovered: true }));

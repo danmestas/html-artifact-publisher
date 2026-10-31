@@ -57,7 +57,7 @@ Some rough examples:
 git clone https://github.com/danmestas/html-artifact-publisher
 cd html-artifact-publisher
 npm ci                 # also installs the pinned wasm-opt the build needs
-npm run build:wasm     # about 2.9 MB, 1.0 MB gzipped
+npm run build:wasm     # about 1.5 MB, 0.6 MB gzipped
 npm run typecheck && npm run test:go && npm test
 ```
 

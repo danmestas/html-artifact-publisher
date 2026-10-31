@@ -2,7 +2,7 @@
 # Build the Durable Object's Fossil engine: src/fossil.wasm and the matching
 # runtime glue src/wasm_exec.js, from this directory's Go program.
 #
-#   npm ci && npm run build:wasm             # TinyGo (default): ~1.5 MB raw, ~0.6 MB gzip
+#   npm ci && npm run build:wasm             # TinyGo (default): ~1.8 MB raw, ~0.75 MB gzip
 #   GO_COMPILER=go sh fossil/build.sh        # standard Go:  ~9 MB raw, ~2.4 MB gzip (debugging only)
 #
 # The TinyGo build is reproducible across Linux and macOS because every
@@ -16,7 +16,7 @@ out="$root/src"
 wasmopt="$root/node_modules/.bin/wasm-opt"
 # gzip -9 bytes. Raise it only on purpose, in the same commit as the change
 # that needs it.
-budget="${FOSSIL_WASM_MAX_GZIP:-1100000}"
+budget="${FOSSIL_WASM_MAX_GZIP:-800000}"
 # The engine serves sync with HandleSyncWithOpts and never dials out, so
 # go-libfossil's HTTP client and server (net/http, TLS, X.509) stay out.
 # libfossil_noslog writes go-libfossil's diagnostics as plain stderr lines

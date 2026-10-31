@@ -47,7 +47,7 @@ Some rough examples:
 
 **Tools (an agent can check these):**
 - Git, and Node.js 24 or newer (the version CI uses; the tests need it).
-- Go 1.26 and exactly TinyGo 0.43.0, to build the Fossil engine. See [Building the Fossil engine](../README.md#building-the-fossil-engine). If you deploy only through GitHub Actions, CI builds it for you and you can skip these.
+- Go 1.27.3 and exactly TinyGo 0.43.0, to build the Fossil engine. See [Building the Fossil engine](../README.md#building-the-fossil-engine). If you deploy only through GitHub Actions, CI builds it for you and you can skip these.
 
 ## Step by step
 
@@ -57,7 +57,7 @@ Some rough examples:
 git clone https://github.com/danmestas/html-artifact-publisher
 cd html-artifact-publisher
 npm ci                 # also installs the pinned wasm-opt the build needs
-npm run build:wasm     # about 1.5 MB, 0.6 MB gzipped
+npm run build:wasm     # about 1.8 MB, 0.75 MB gzipped
 npm run typecheck && npm run test:go && npm test
 ```
 
@@ -187,7 +187,7 @@ The instance owner can choose **Clean up unpublished files** (`POST /api/publica
 |---|---|
 | `deploy: valid owner/sender emails and an exact non-loopback HTTPS APP_ORIGIN are required` | A setting is missing or malformed. `APP_ORIGIN` must be `https://`, with no trailing slash |
 | Deploy fails creating or binding the R2 bucket | The API token lacks **Workers R2 Storage: Edit** |
-| `src/fossil.wasm is ... over the ... budget` | Wrong toolchain. Use TinyGo 0.43.0 and Go 1.26, run `npm ci` first, and don't install your own `wasm-opt` |
+| `src/fossil.wasm is ... over the ... budget` | Wrong toolchain. Use TinyGo 0.43.0 and Go 1.27.3, run `npm ci` first, and don't install your own `wasm-opt` |
 | The sign-in email never arrives | The sender domain isn't onboarded to Email Sending, or `EMAIL_FROM` isn't on it. Check Email Sending's delivery logs in the dashboard |
 | `Email sign-in is not configured` (503) | `EMAIL_FROM` or `APP_ORIGIN` isn't set on the deployed Worker |
 | The CLI says `missing_blob` | An image upload didn't finish. Run the same command again: uploads that already arrived are reused |

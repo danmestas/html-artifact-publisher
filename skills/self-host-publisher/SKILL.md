@@ -12,7 +12,7 @@ and follow it in order. In short:
 1. **Cost first.** It needs Cloudflare's Workers Paid plan ($5 a month), which covers most
    personal and team use. Tell the person this before they sign up.
 2. **Build and test locally:** `npm ci && npm run build:wasm && npm test` (TinyGo 0.43.0,
-   Go 1.26). Every test should pass before anything touches Cloudflare.
+   Go 1.27.3). Every test should pass before anything touches Cloudflare.
 3. **The person creates credentials in the dashboard**: account ID, an API token from the
    *Edit Cloudflare Workers* template with *Workers R2 Storage: Edit*, and (for sign-in by
    email) an Email Sending domain and sender. Never ask for a token, key or password in

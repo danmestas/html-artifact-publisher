@@ -1,5 +1,5 @@
-github.com/danmestas/go-libfossil v0.16.3-0.20261031133856-da069108b715 h1:r/54P9N6rZpxp/JW4FYEF7qnDryhdXt+ITnv9dtO9VI=
-github.com/danmestas/go-libfossil v0.16.3-0.20261031133856-da069108b715/go.mod h1:srcBH/pQu2vKaebmyTIQcwJ5Jev2PUtL76JQXxEy7mQ=
+github.com/danmestas/go-libfossil v0.16.3-0.20261031142249-ac3c853c062b h1:d8T28Vy812w2SyfMBW7a8GbJXVmsU3nkMEYC7lZAAVc=
+github.com/danmestas/go-libfossil v0.16.3-0.20261031142249-ac3c853c062b/go.mod h1:srcBH/pQu2vKaebmyTIQcwJ5Jev2PUtL76JQXxEy7mQ=
 github.com/danmestas/go-libfossil/db/driver/modernc v0.3.0 h1:O01NTY1LOkD9rcjneDAti5SC4RGvSARrrWtfnXyehBs=
 github.com/danmestas/go-libfossil/db/driver/modernc v0.3.0/go.mod h1:spdUGmH76DTTxNqmE2BaH3PvzGkilaNYnGQbaHO3T7M=
 github.com/danmestas/go-libfossil/db/driver/ncruces v0.3.0 h1:/0g6Ye9NFh6M9eH2n8shS/ahlyKK9Xtwl9w8K5/MEbE=

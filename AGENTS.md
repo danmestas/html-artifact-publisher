@@ -16,7 +16,7 @@ npm run build:wasm     # fossil/ → src/fossil.wasm
 - **Never install or use another `wasm-opt`** (Homebrew, apt, a TinyGo-bundled one on your
   PATH). The build uses `node_modules/.bin/wasm-opt` for TinyGo's own passes and a final
   `-Oz` pass, which is what makes the engine the same size on every OS.
-- A correct build prints about **3,112,000 bytes, 1,084,300 gzipped**. The build fails above
+- A correct build prints about **2,931,100 bytes, 1,024,200 gzipped**. The build fails above
   1,100,000 bytes gzipped. Find the cause (README, "Building the Fossil engine") rather than
   raising the budget. Raise `FOSSIL_WASM_MAX_GZIP` only when a change in the same commit
   needs it, and say so in the commit message.

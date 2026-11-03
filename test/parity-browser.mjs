@@ -87,9 +87,9 @@ export async function parityQA({base,api,owner,browserOwner,member,run,evaluate,
     assert.equal(fallback.status,201);ids.push(fallback.json.id);
     run('set','media','dark');run('open',base+'/p/'+fallback.json.id);run('wait','--load','networkidle');
     assert.match(evaluate('document.body.innerText'),/Static preview unavailable/);
-    assert.equal(evaluate('getComputedStyle(document.body).backgroundColor'),'rgb(29, 38, 51)');
+    assert.equal(evaluate('getComputedStyle(document.body).backgroundColor'),'rgb(28, 28, 26)');
     run('set','media','light');
-    assert.equal(evaluate('getComputedStyle(document.body).backgroundColor'),'rgb(255, 255, 255)');
+    assert.equal(evaluate('getComputedStyle(document.body).backgroundColor'),'rgb(251, 251, 250)');
     // Preferences must survive actual navigation, not just an injected data attribute.
     for(const width of [1440,390]) for(const theme of ['light','dark','system']) {
       run('set','viewport',String(width),'1000');run('set','media','dark');

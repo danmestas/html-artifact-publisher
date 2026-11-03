@@ -17,7 +17,7 @@ export async function preview(req: Request, env: Env, id: string): Promise<Respo
     'Referrer-Policy': 'no-referrer', 'X-Robots-Tag': 'noindex, nofollow',
   };
   if (!result.ok) return new Response('Preview unavailable', { status: 404, headers });
-  const fallback = () => new Response('<!doctype html><html><head><style>:root{color-scheme:light dark}body{font:36px/1.5 system-ui;padding:40px;background:#fff;color:#202d40}@media(prefers-color-scheme:dark){body{background:#1d2633;color:#e7edf6}}</style></head><body><p>Static preview unavailable.</p><p>Open the artifact to view its content.</p></body></html>', { headers });
+  const fallback = () => new Response('<!doctype html><html><head><style>:root{color-scheme:light dark}body{font:36px/1.5 system-ui;padding:40px;background:#FBFBFA;color:#1C1C1A}@media(prefers-color-scheme:dark){body{background:#1C1C1A;color:#EDEBE6}}</style></head><body><p>Static preview unavailable.</p><p>Open the artifact to view its content.</p></body></html>', { headers });
   if (!result.result?.data) return fallback();
   const html = new TextDecoder().decode(b64decode(result.result.data));
   const sanitized = await new HTMLRewriter().on('*', {

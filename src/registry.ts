@@ -12,7 +12,7 @@ export interface Entry {
   id: string; slug: string | null; title: string; createdAt: number; updatedAt: number;
   expiresAt: number | null; tip: string; ownerId?: string; archived?: boolean; icon?: string;
 }
-export type Account = { id: string; email: string; name: string; role: 'owner' | 'member'; status: 'active' | 'invited' | 'disabled' };
+export type Account = { id: string; email: string; name: string; role: 'owner' | 'member'; status: 'active' | 'invited' | 'disabled'; created_at?: number | null };
 type Row = { id: string; slug: string | null; title: string; created_at: number; updated_at: number; expires_at: number | null; tip: string; owner_id: string | null; archived: number; icon: string };
 const now = () => Math.floor(Date.now() / 1000);
 /** How long an attach may hold its ref pending before reconciling treats it as abandoned (ms). */
@@ -72,6 +72,9 @@ export class Registry extends DurableObject<Env> {
       sql.exec('ALTER TABLE blob_uploads ADD COLUMN used INTEGER NOT NULL DEFAULT 0');
     }
     if (!cols.some(c => c.name === 'owner_id')) sql.exec('ALTER TABLE artifacts ADD COLUMN owner_id TEXT');
+    // When an account was invited (null for accounts that predate the column), and whom an audited action was about.
+    if (!sql.exec<{ name: string }>('PRAGMA table_info(accounts)').toArray().some(c => c.name === 'created_at')) sql.exec('ALTER TABLE accounts ADD COLUMN created_at INTEGER');
+    if (!sql.exec<{ name: string }>('PRAGMA table_info(activity)').toArray().some(c => c.name === 'target')) sql.exec('ALTER TABLE activity ADD COLUMN target TEXT');
     if (!cols.some(c => c.name === 'archived')) sql.exec('ALTER TABLE artifacts ADD COLUMN archived INTEGER NOT NULL DEFAULT 0');
     if (!cols.some(c => c.name === 'icon')) sql.exec("ALTER TABLE artifacts ADD COLUMN icon TEXT NOT NULL DEFAULT 'document'");
     sql.exec(`CREATE INDEX IF NOT EXISTS artifacts_name_order ON artifacts(title COLLATE NOCASE,id);
@@ -451,7 +454,7 @@ export class Registry extends DurableObject<Env> {
   async byEmail(email: string): Promise<Account | null> { return this.ctx.storage.sql.exec<Account>('SELECT * FROM accounts WHERE email = ?',email).toArray()[0] ?? null; }
   async people(): Promise<Account[]> { return this.ctx.storage.sql.exec<Account>('SELECT * FROM accounts ORDER BY email LIMIT 1000').toArray(); }
   async invite(email: string, name: string): Promise<Account> {
-    this.ctx.storage.sql.exec(`INSERT OR IGNORE INTO accounts VALUES (?, ?, ?, 'member', 'invited')`,genId(),email,name);
+    this.ctx.storage.sql.exec(`INSERT OR IGNORE INTO accounts (id,email,name,role,status,created_at) VALUES (?, ?, ?, 'member', 'invited', ?)`,genId(),email,name,now());
     return (await this.byEmail(email))!;
   }
   async status(id: string, status: string): Promise<void> {
@@ -541,11 +544,18 @@ export class Registry extends DurableObject<Env> {
       if (opts.view === 'shared') { clauses.push("COALESCE(a.owner_id,'instance-owner')!=? AND g.permission IS NOT NULL"); args.push(user.id); }
       if (opts.view === 'starred') clauses.push('s.user_id IS NOT NULL');
     } else {
-      if (opts.status !== 'all') { clauses.push('a.archived=?'); args.push(opts.status === 'archived' ? 1 : 0); }
       if (opts.ownerId) { clauses.push("COALESCE(a.owner_id,'instance-owner')=?"); args.push(opts.ownerId); }
     }
     if (opts.q) { clauses.push("instr(lower(a.title),lower(?)) > 0"); args.push(opts.q); }
     const joins = "FROM artifacts a LEFT JOIN accounts u ON u.id=COALESCE(a.owner_id,'instance-owner') LEFT JOIN grants g ON g.artifact_id=a.id AND g.user_id=? LEFT JOIN stars s ON s.artifact_id=a.id AND s.user_id=?";
+    // The inventory's status tabs show how many are active and archived under the other filters.
+    let counts: { all: number; active: number; archived: number } | undefined;
+    if (opts.admin) {
+      const archived = this.ctx.storage.sql.exec<{ n: number }>(`SELECT count(*) AS n ${joins} WHERE ${[...clauses,'a.archived=1'].join(' AND ')}`,...args).one().n;
+      const active = this.ctx.storage.sql.exec<{ n: number }>(`SELECT count(*) AS n ${joins} WHERE ${[...clauses,'a.archived=0'].join(' AND ')}`,...args).one().n;
+      counts = { all: active + archived, active, archived };
+      if (opts.status !== 'all') { clauses.push('a.archived=?'); args.push(opts.status === 'archived' ? 1 : 0); }
+    }
     const total = this.ctx.storage.sql.exec<{ n: number }>(`SELECT count(*) AS n ${joins} WHERE ${clauses.join(' AND ')}`,...args).one().n;
     // SQLite NOCASE folds ASCII only, not locale-specific Unicode ordering.
     // Keep the same collation and ID tie-breaker in the seek and ORDER BY.
@@ -563,13 +573,13 @@ export class Registry extends DurableObject<Env> {
     const rows = this.ctx.storage.sql.exec<Row & { ownerName: string; starred: number; permission: 'read' | 'write'; shared: number }>(`SELECT a.*,u.name AS ownerName,s.user_id IS NOT NULL AS starred, g.permission, EXISTS(SELECT 1 FROM grants x WHERE x.artifact_id=a.id) AS shared ${joins} WHERE ${clauses.join(' AND ')} ORDER BY ${byName ? 'a.title COLLATE NOCASE ASC,a.id ASC' : 'a.updated_at DESC,a.id DESC'} LIMIT ?`,...args,opts.limit+1).toArray();
     const more = rows.length > opts.limit; rows.splice(opts.limit);
     const last = rows.at(-1);
-    return { artifacts: rows.map(r => ({ ...toEntry(r), ownerName: r.ownerName ?? 'Instance owner', accessLabel: (r.owner_id ?? 'instance-owner') === user.id ? (r.shared ? 'Shared by you' : 'Private') : (user.role === 'owner' || r.permission === 'write' ? 'Can edit' : 'Can view'), starred: !!r.starred, permission: user.role === 'owner' || (r.owner_id ?? 'instance-owner') === user.id ? 'write' as const : r.permission, canManage: user.role === 'owner' || (r.owner_id ?? 'instance-owner') === user.id, visibility: r.shared ? 'shared' : 'private' })), total, nextCursor: more && last ? JSON.stringify(byName ? ['name',last.title,last.id] : [last.updated_at,last.id]) : null };
+    return { artifacts: rows.map(r => ({ ...toEntry(r), ownerName: r.ownerName ?? 'Instance owner', accessLabel: (r.owner_id ?? 'instance-owner') === user.id ? (r.shared ? 'Shared by you' : 'Private') : (user.role === 'owner' || r.permission === 'write' ? 'Can edit' : 'Can view'), starred: !!r.starred, permission: user.role === 'owner' || (r.owner_id ?? 'instance-owner') === user.id ? 'write' as const : r.permission, canManage: user.role === 'owner' || (r.owner_id ?? 'instance-owner') === user.id, visibility: r.shared ? 'shared' : 'private' })), total, ...(counts ? { counts } : {}), nextCursor: more && last ? JSON.stringify(byName ? ['name',last.title,last.id] : [last.updated_at,last.id]) : null };
   }
-  async audit(userId: string, action: string, id: string | null = null, title: string | null = null): Promise<void> {
-    this.ctx.storage.sql.exec('INSERT INTO activity VALUES (?,?,?,?,?,?)',genId(),userId,action,id,title,now());
+  async audit(userId: string, action: string, id: string | null = null, title: string | null = null, target: string | null = null): Promise<void> {
+    this.ctx.storage.sql.exec('INSERT INTO activity (id,actor_id,action,artifact_id,artifact_title,created_at,target) VALUES (?,?,?,?,?,?,?)',genId(),userId,action,id,title,now(),target);
   }
   async activity(limit: number) {
-    return this.ctx.storage.sql.exec<{ id: string; actorName: string; action: string; artifactId: string | null; artifactTitle: string | null; createdAt: number }>('SELECT e.id,a.name AS actorName,e.action,e.artifact_id AS artifactId,e.artifact_title AS artifactTitle,e.created_at AS createdAt FROM activity e LEFT JOIN accounts a ON a.id=e.actor_id ORDER BY e.created_at DESC,e.id DESC LIMIT ?',limit).toArray();
+    return this.ctx.storage.sql.exec<{ id: string; actorName: string; action: string; artifactId: string | null; artifactTitle: string | null; target: string | null; createdAt: number }>('SELECT e.id,a.name AS actorName,e.action,e.artifact_id AS artifactId,e.artifact_title AS artifactTitle,e.target,e.created_at AS createdAt FROM activity e LEFT JOIN accounts a ON a.id=e.actor_id ORDER BY e.created_at DESC,e.id DESC LIMIT ?',limit).toArray();
   }
 }
 function toEntry(r: Row): Entry { return { id:r.id,slug:r.slug,title:r.title,createdAt:r.created_at,updatedAt:r.updated_at,expiresAt:r.expires_at,tip:r.tip,ownerId:r.owner_id ?? 'instance-owner',archived:!!r.archived,icon:r.icon ?? 'document' }; }

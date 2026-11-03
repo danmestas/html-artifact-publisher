@@ -14,28 +14,30 @@
   <a class="skip-link" href="#main">Skip to content</a>
   <div id="boot" class="boot" role="status">Opening your library…</div>
   <section id="login" class="login" hidden aria-labelledby="login-title">
-    <div class="login-story">
-      <div class="brand"><span class="mark" aria-hidden="true">a</span> Artifacts</div>
-      <h1>A home for the things you make.</h1>
-      <p>Keep your pages, tools, and ideas together. Pick up where you left off, or share something worth opening.</p>
-      <span class="muted">Private by default. Shared on purpose.</span>
-    </div>
+    <div class="login-story"><div class="brand"><span class="mark" aria-hidden="true">a</span> Artifacts</div></div>
     <div class="login-form"><div class="form-inner">
-      <h2 id="login-title">Welcome back</h2>
-      <p id="login-description" class="muted">Sign in to your artifact library.</p>
+      <h2 id="login-title">Sign in to Artifacts</h2>
+      <p id="login-description" class="muted">We’ll email you a one-time link. No password.</p>
       <form id="login-form">
         <label for="login-email">Email address</label>
         <input id="login-email" type="email" autocomplete="email" placeholder="you@example.com" maxlength="254" required>
         <button class="primary full" type="submit">Email me a sign-in link</button>
       </form>
+      <div id="sent-panel" class="sent" hidden>
+        <div class="env" aria-hidden="true"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg></div>
+        <p id="sent-text"></p>
+        <button id="resend-link" class="full" type="button">Resend link</button>
+        <button id="sent-different-email" class="linkish" type="button">Use a different email</button>
+      </div>
       <div id="verify-panel" hidden>
-        <p>Continue to use this one-time sign-in link. Only continue if you requested it or were invited to this instance.</p>
+        <p class="verify-note">Only continue if you asked for this link or were invited here.</p>
         <button id="verify-button" class="primary full" type="button">Continue to your library</button>
-        <button id="different-email" class="full" type="button">Use a different email</button>
+        <p class="verify-escape"><button id="different-email" class="linkish" type="button">This wasn’t me · use a different email</button></p>
       </div>
       <p id="login-feedback" class="notice" role="status" hidden></p>
-      <div class="explain">An invitation is required to join.<br>Already invited? Use the email address on your invitation.</div>
+      <div id="login-explain" class="explain">Invite-only. Use the address your invitation was sent to.</div>
     </div></div>
+    <p class="tagline">A home for the things you make. Private by default, shared on purpose.</p>
   </section>
   <div id="app" class="shell" hidden>
     <aside class="sidebar">
@@ -52,23 +54,33 @@
           <button data-view="admin" data-owner-only hidden>Every artifact</button>
           <button data-view="people" data-owner-only hidden>People & invitations</button>
           <button data-view="activity" data-owner-only hidden>Activity</button>
-          <span class="nav-label">Your account</span>
-          <button data-view="credentials">API credentials</button>
         </nav>
         <div class="account">
-          <div class="identity"><strong id="account-name"></strong><span id="account-email" class="muted"></span><span id="account-role" class="tiny"></span></div>
-          <label for="theme">Appearance</label><select id="theme" data-appearance><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select>
-          <button id="logout" class="full">Sign out</button>
+          <button id="account-menu-button" class="account-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="account-menu">
+            <span id="account-avatar" class="avatar" aria-hidden="true"></span>
+            <span class="identity"><strong id="account-name"></strong><span id="account-email" class="muted"></span></span>
+            <span class="chev" aria-hidden="true"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></span>
+          </button>
+          <div id="account-menu" class="account-menu" hidden>
+            <span id="account-role" class="tiny"></span>
+            <label for="theme">Appearance</label><select id="theme" data-appearance><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select>
+            <button data-view="credentials" type="button">API credentials</button>
+            <button id="logout" type="button">Sign out</button>
+          </div>
         </div>
       </div>
     </aside>
     <main id="main" class="main" tabindex="-1">
       <header class="page-header"><div><h1 id="page-title">Your artifacts</h1><p id="page-description" class="muted"></p></div><button id="page-action" class="primary" hidden></button></header>
-      <div id="admin-notice" class="notice" hidden>You can inspect and manage every artifact in this instance, including private and archived work.</div>
       <form id="filters" class="toolbar" role="search">
         <div class="search"><label class="sr-only" for="search">Search artifacts</label><input id="search" type="search" placeholder="Search artifacts…" maxlength="200" autocomplete="off"></div>
         <select id="owner-filter" aria-label="Filter by owner" hidden><option value="">Every owner</option></select>
-        <select id="status-filter" aria-label="Filter by status" hidden><option value="all">Every status</option><option value="active">Active</option><option value="archived">Archived</option></select>
+        <div id="status-filter" class="tabs" role="group" aria-label="Filter by status" hidden>
+          <button type="button" data-status="all" aria-pressed="true">All<small></small></button>
+          <button type="button" data-status="active" aria-pressed="false">Active<small></small></button>
+          <button type="button" data-status="archived" aria-pressed="false">Archived<small></small></button>
+        </div>
+        <span class="spacer" aria-hidden="true"></span>
         <select id="sort" aria-label="Sort artifacts"><option value="recent">Recently updated</option><option value="name">Name A–Z</option></select>
         <div id="layout-switch" class="segmented" role="group" aria-label="Library layout"><button type="button" data-layout="grid" aria-pressed="true">Grid</button><button type="button" data-layout="list" aria-pressed="false">List</button></div>
       </form>

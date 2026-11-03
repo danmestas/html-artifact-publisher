@@ -78,8 +78,10 @@ export async function parityQA({base,api,owner,browserOwner,member,run,evaluate,
     assert.equal(evaluate('new URLSearchParams(location.search).has("cursor")'),false);
     run('back');wait('.artifact-title');assert.equal(evaluate('document.getElementById("sort").value'),'name');
     run('open',base+'/?view=admin&q=Parity+browser&sort=name');wait('.artifact-row');
-    assert.match(evaluate('document.querySelector(".inventory-head").textContent'),/OwnerVisibility \/ statusUpdated/);
-    assert.deepEqual(evaluate('[...document.querySelectorAll(".artifact-row:first-child .cell .sr-only")].map(e=>e.textContent)'),['Owner: ','Visibility and status: ','Updated: ']);
+    assert.match(evaluate('document.querySelector(".inventory-head").textContent'),/OwnerVisibilityStatusUpdated/);
+    assert.deepEqual(evaluate('[...document.querySelectorAll(".artifact-row:first-child .cell .sr-only")].map(e=>e.textContent)'),['Owner: ','Visibility: ','Status: ','Updated: ']);
+    assert.equal(evaluate('document.querySelectorAll(".artifact-row .access-badge").length'),0,'the inventory does not wear the reader\'s own access');
+    assert.match(evaluate('document.querySelector("#status-filter [data-status=archived]").textContent'),/Archived\d+/,'status tabs carry counts');
     run('set','viewport','390','1000');selectQA();
     const fallback=await api('/api/artifacts',{method:'POST',cookie:owner.cookie,body:{title:'Unavailable preview fixture',ttlSeconds:null,files:{'index.html':Buffer.from('<script>window.interactiveOnly=true</script>').toString('base64')}}});
     assert.equal(fallback.status,201);ids.push(fallback.json.id);
@@ -94,7 +96,7 @@ export async function parityQA({base,api,owner,browserOwner,member,run,evaluate,
       run('open',base+'/?q=Parity+browser&sort=name');wait('.artifact-title');
       if(width===390) click('#nav-toggle');
       assert.ok(evaluate('(()=>{const a=document.querySelector(".account").getBoundingClientRect(),s=document.querySelector(".sidebar").getBoundingClientRect();return Math.abs(a.left-s.left)<=1 && Math.abs(a.right-s.right)<=1})()'),'account divider spans the sidebar');
-      run('select','#theme',theme);
+      click('#account-menu-button');wait('#account-menu:not([hidden])');run('select','#theme',theme);run('press','Escape');
       const expected=theme==='light'?'light':'dark';
       assert.equal(evaluate('getComputedStyle(document.documentElement).colorScheme'),expected);
       selectQA();run('screenshot',join(output,`selects-library-${theme}-${width}.png`));
@@ -145,6 +147,7 @@ export async function parityQA({base,api,owner,browserOwner,member,run,evaluate,
     run('open',base+'/');wait('.artifact-title');
     assert.equal(evaluate('getComputedStyle(document.documentElement).colorScheme'),'light','sign-in restores the saved choice despite a dark system');
     assert.equal(evaluate('document.getElementById("theme").value'),'light');
+    assert.equal(evaluate('document.querySelector(".preview-label")'),null,'cards carry no caption');
   } finally {
     socket.close();
     for(const id of ids) await api('/api/artifacts/'+id,{method:'DELETE',cookie:owner.cookie});

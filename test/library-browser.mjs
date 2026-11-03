@@ -270,7 +270,7 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
     run('open',base+'/?view=people');wait('#page-action');click('#page-action');wait('#invite-email');
     run('fill','#invite-email','browser-invitation@example.com');run('fill','#invite-name','Browser invitation');click('#dialog-body button[type=submit]');run('wait','--fn','!document.getElementById("dialog").open');run('wait','[aria-busy="false"]');
     evaluate('[...document.querySelectorAll(".record")].find(e=>e.textContent.includes("browser-invitation@example.com")).querySelector(".record-actions button:last-child").click()');
-    wait('#dialog[open]');click('#dialog-body button[type=submit]');run('wait','--fn','!document.getElementById("dialog").open');run('wait','[aria-busy="false"]');
+    wait('#dialog[open]');run('find','role','button','click','--name','Suspend account');wait('#dialog-body button[type=submit]');click('#dialog-body button[type=submit]');run('wait','--fn','!document.getElementById("dialog").open');run('wait','[aria-busy="false"]');
     assert.ok((await api('/api/people',{cookie:owner.cookie})).json.users.some(u=>u.email==='browser-invitation@example.com'&&u.status==='disabled'));
     // A failed library fetch offers recovery without dropping the signed-in user.
     evaluate(`(()=>{const original=window.fetch;window.fetch=(...args)=>{if(String(args[0]).startsWith('/api/library')){window.fetch=original;return Promise.reject(new Error('Local test connection failure'))}return original(...args)}})()`);
@@ -279,15 +279,17 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
     run('find','role','button','click','--name','Try again');wait('.artifact-title');
     assert.equal(evaluate('document.getElementById("page-error").hidden'),true);
     const savedThemeBeforeLogout=evaluate('JSON.parse(localStorage.getItem("artifact-library-preferences")).theme');
-    click('#nav-toggle');wait('#navigation');click('#logout');wait('#login:not([hidden])');
+    click('#nav-toggle');wait('#navigation');click('#account-menu-button');wait('#account-menu:not([hidden])');click('#logout');wait('#login:not([hidden])');
     assert.equal(evaluate('document.querySelectorAll(".artifact-title").length'),0);
     assert.equal(evaluate('document.documentElement.dataset.theme||null'),null,'logout restores system appearance');
     assert.equal(evaluate('JSON.parse(localStorage.getItem("artifact-library-preferences")).theme'),savedThemeBeforeLogout,'logout retains the in-app preference');
     run('open',base+'/login#token='+'0'.repeat(64));wait('#verify-button');click('#verify-button');wait('#login-feedback:not([hidden])');
     assert.ok(evaluate('document.getElementById("login-feedback").textContent.includes("request a fresh sign-in link")'));
     run('screenshot',join(output,'invalid-login-phone.png'));
-    click('#different-email');wait('#login-email');run('fill','#login-email','unknown-browser@example.com');click('#login-form button[type=submit]');wait('#login-feedback:not([hidden])');
-    assert.ok(evaluate('document.getElementById("login-feedback").textContent.includes("invited account")'));
+    click('#different-email');wait('#login-email');run('fill','#login-email','unknown-browser@example.com');click('#login-form button[type=submit]');wait('#sent-panel:not([hidden])');
+    assert.ok(evaluate('document.getElementById("sent-text").textContent.includes("invited account")'));
+    assert.equal(evaluate('document.getElementById("login-form").hidden'),true,'the sent state replaces the form');
+    assert.ok(evaluate('document.getElementById("resend-link").disabled'),'resend waits before it can be used again');
     writeFileSync(join(output,'layout-evidence.json'),JSON.stringify(evidence,null,2));
     return {permutations:evidence.length,output};
   } catch (error) {

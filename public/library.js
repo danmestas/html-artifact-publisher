@@ -11,8 +11,8 @@ const VIEWS = {
   shared: ['Shared with me', 'Work that other people have shared directly with you.'],
   starred: ['Starred artifacts', 'A personal shelf for the work you want to come back to.'],
   archived: ['Archived artifacts', 'Find archived work. Creators and the instance owner can restore it from the artifact menu.'],
-  admin: ['Every artifact', 'The complete inventory, across every account.'],
-  people: ['People & invitations', 'Invite people to create their own library.'],
+  admin: ['Every artifact', 'The complete inventory across every account, including private and archived work.'],
+  people: ['People & invitations', 'Invite people to create their own library. Membership allows sign-in, not access to anyone’s artifacts.'],
   activity: ['Activity', 'Recent administrative changes in this instance.'],
   credentials: ['API credentials', 'Publish from the CLI using a credential tied to your account.'],
   publications: ['Published links', 'Manage public copies of exact artifact versions, separately from your private library.'],
@@ -28,6 +28,11 @@ let page = 1;
 let toastTimer;
 let searchTimer;
 let loginToken = '';
+let loginState = 'form'; // 'form' | 'sent'; a captured link shows the verify step instead
+let sentEmail = '';
+let resendTimer;
+let activityEvents = [];
+let activityFilter = 'all';
 let publicationCleanupResult = '';
 let preferences = {};
 try { preferences = JSON.parse(localStorage.getItem('artifact-library-preferences') || '{}') || {}; } catch { /* Optional per-browser preferences. */ }
@@ -65,10 +70,12 @@ function button(text, action, className = '') {
   b.addEventListener('click', action);
   return b;
 }
-function message(id, text = '') {
+function message(id, text = '', tone = 'info') {
   $(id).textContent = text;
   $(id).hidden = !text;
+  $(id).classList.toggle('is-error', !!text && tone === 'error');
 }
+const initials = s => String(s || '').split(/[\s.@_-]+/).filter(Boolean).slice(0, 2).map(w => w[0].toUpperCase()).join('');
 function notify(text) {
   message('toast', text);
   clearTimeout(toastTimer);
@@ -104,6 +111,7 @@ async function api(path, { method = 'GET', body } = {}) {
     if (response.status === 401 && user) {
       user = null;
       $('dialog').close();
+      loginState = 'form';
       showLogin();
       message('login-feedback', 'Your session has ended. Sign in again to continue.');
     }
@@ -114,25 +122,63 @@ async function api(path, { method = 'GET', body } = {}) {
 function showLogin() {
   document.documentElement.setAttribute('data-system-appearance', '');
   clearPreviews();
+  closeAccountMenu();
   $('boot').hidden = true;
   $('app').hidden = true;
   $('login').hidden = false;
-  $('login-form').hidden = !!loginToken;
-  $('verify-panel').hidden = !loginToken;
-  $('login-title').textContent = loginToken ? 'Your library is one click away' : 'Welcome back';
-  $('login-description').textContent = loginToken ? 'Confirm your sign-in to continue.' : 'Sign in to your artifact library.';
+  const step = loginToken ? 'verify' : loginState;
+  $('login-form').hidden = step !== 'form';
+  $('sent-panel').hidden = step !== 'sent';
+  $('verify-panel').hidden = step !== 'verify';
+  $('login-explain').hidden = step !== 'form';
+  $('login-title').textContent = step === 'verify' ? 'Finish signing in' : step === 'sent' ? 'Check your inbox' : 'Sign in to Artifacts';
+  $('login-description').textContent = step === 'verify' ? `You opened a one-time sign-in link for ${location.host}.` : 'We’ll email you a one-time link. No password.';
+  $('login-description').hidden = step === 'sent';
+}
+// The wording never says whether the address belongs to an account.
+async function requestLink(email) {
+  await api('/api/auth/request', { method: 'POST', body: { email } });
+  sentEmail = email;
+  loginState = 'sent';
+  $('sent-text').replaceChildren('If ', node('strong', { textContent: email }), ' belongs to an invited account, a sign-in link is on its way. It expires in 15 minutes.');
+  startResendCountdown();
+  showLogin();
+}
+function startResendCountdown(seconds = 30) {
+  const b = $('resend-link');
+  let left = seconds;
+  clearTimeout(resendTimer);
+  const tick = () => {
+    b.disabled = left > 0;
+    b.textContent = left > 0 ? `Resend in 0:${String(left).padStart(2, '0')}` : 'Resend link';
+    if (left-- > 0) resendTimer = setTimeout(tick, 1000);
+  };
+  tick();
+}
+function backToForm() {
+  loginToken = '';
+  loginState = 'form';
+  clearTimeout(resendTimer);
+  message('login-feedback');
+  showLogin();
+  $('login-email').focus();
 }
 $('login-form').addEventListener('submit', async e => {
   e.preventDefault();
   const b = e.submitter;
   b.disabled = true;
   message('login-feedback');
-  try {
-    await api('/api/auth/request', { method: 'POST', body: { email: $('login-email').value.trim() } });
-    message('login-feedback', 'If this email belongs to an invited account, a sign-in link is on its way. Check your inbox. The link expires in 15 minutes.');
-  } catch (err) { message('login-feedback', err.message); }
+  try { await requestLink($('login-email').value.trim()); }
+  catch { message('login-feedback', 'The link could not be sent. Try again in a moment, or contact the person who invited you.', 'error'); }
   finally { b.disabled = false; }
 });
+$('resend-link').addEventListener('click', async () => {
+  $('resend-link').disabled = true;
+  message('login-feedback');
+  try { await requestLink(sentEmail); }
+  catch { message('login-feedback', 'The link could not be sent. Try again in a moment, or contact the person who invited you.', 'error'); $('resend-link').disabled = false; }
+});
+$('sent-different-email').addEventListener('click', backToForm);
 $('verify-button').addEventListener('click', async () => {
   $('verify-button').disabled = true;
   message('login-feedback');
@@ -142,14 +188,23 @@ $('verify-button').addEventListener('click', async () => {
     user = data.user;
     history.replaceState(null, '', '/');
     await showApp();
-  } catch (err) { message('login-feedback', `${err.message} You can request a fresh sign-in link using your email.`); }
+  } catch (err) { message('login-feedback', `${err.message} You can request a fresh sign-in link using your email.`, 'error'); }
   finally { $('verify-button').disabled = false; }
 });
-$('different-email').addEventListener('click', () => {
-  loginToken = '';
-  message('login-feedback');
-  showLogin();
-  $('login-email').focus();
+$('different-email').addEventListener('click', backToForm);
+// The account menu: appearance, API credentials and sign out, behind one row.
+function closeAccountMenu() {
+  $('account-menu').hidden = true;
+  $('account-menu-button').setAttribute('aria-expanded', 'false');
+}
+$('account-menu-button').addEventListener('click', () => {
+  const open = $('account-menu').hidden;
+  $('account-menu').hidden = !open;
+  $('account-menu-button').setAttribute('aria-expanded', String(open));
+});
+document.addEventListener('click', e => { if (!$('account-menu').hidden && !e.target.closest('.account')) closeAccountMenu(); });
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && !$('account-menu').hidden) { closeAccountMenu(); $('account-menu-button').focus(); }
 });
 $('logout').addEventListener('click', async () => {
   $('logout').disabled = true;
@@ -162,6 +217,7 @@ $('logout').addEventListener('click', async () => {
     $('content').replaceChildren();
     $('dialog').close();
     history.replaceState(null, '', '/login');
+    loginState = 'form';
     showLogin();
   } catch (err) { notify(err.message); }
   finally { $('logout').disabled = false; }
@@ -182,6 +238,7 @@ function writeUrl(replace = false) {
 function closeNavigation() {
   document.querySelector('.sidebar').classList.remove('expanded');
   $('nav-toggle').setAttribute('aria-expanded', 'false');
+  closeAccountMenu();
 }
 $('nav-toggle').addEventListener('click', () => {
   const expanded = document.querySelector('.sidebar').classList.toggle('expanded');
@@ -221,11 +278,21 @@ $('sort').addEventListener('change', () => {
   state.sort = $('sort').value;
   resetPagination(); writeUrl(); loadPage();
 });
-for (const id of ['owner-filter', 'status-filter']) $(id).addEventListener('change', () => {
+$('owner-filter').addEventListener('change', () => {
   state.ownerId = $('owner-filter').value;
-  state.status = $('status-filter').value;
   resetPagination(); writeUrl(); loadPage();
 });
+document.querySelectorAll('#status-filter [data-status]').forEach(b => b.addEventListener('click', () => {
+  if (state.status === b.dataset.status) return;
+  state.status = b.dataset.status;
+  resetPagination(); writeUrl(); loadPage();
+}));
+function renderStatusCounts(counts) {
+  document.querySelectorAll('#status-filter [data-status]').forEach(b => {
+    const n = counts?.[b.dataset.status];
+    b.querySelector('small').textContent = Number.isFinite(n) ? String(n) : '';
+  });
+}
 document.querySelectorAll('[data-layout]').forEach(b => b.addEventListener('click', () => {
   layout = b.dataset.layout;
   preferences.layout = layout;
@@ -251,6 +318,7 @@ async function showApp() {
   $('app').hidden = false;
   $('account-name').textContent = user.name || user.email;
   $('account-email').textContent = user.email;
+  $('account-avatar').textContent = initials(user.name || user.email);
   $('account-role').textContent = user.role === 'owner' ? 'Instance owner' : 'Member';
   document.querySelectorAll('[data-owner-only]').forEach(n => { n.hidden = user.role !== 'owner'; });
   await loadPage();
@@ -287,12 +355,11 @@ async function loadPage() {
   $('layout-switch').hidden = !library;
   $('owner-filter').hidden = !inventory;
   $('status-filter').hidden = !inventory;
-  $('admin-notice').hidden = !inventory;
   $('privacy-note').hidden = view === 'publications';
   clearPreviews();
   $('sort').value = state.sort;
   $('search').value = state.q;
-  $('status-filter').value = state.status;
+  document.querySelectorAll('#status-filter [data-status]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.status === state.status)));
   document.querySelectorAll('[data-layout]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.layout === layout)));
   const action = library && view !== 'archived' ? ['Publish artifact', openUpload] : view === 'people' ? ['Invite someone', openInvite] : view === 'credentials' ? ['Create credential', openCreateCredential] : view === 'publications' && user.role === 'owner' ? ['Clean up unpublished files', openPublicationCleanup] : null;
   $('page-action').hidden = !action;
@@ -320,6 +387,7 @@ async function loadPage() {
       const data = await api(`${inventory ? '/api/admin/artifacts' : '/api/library'}?${p}`);
       if (seq !== loadSequence) return;
       renderArtifacts(data.artifacts, inventory);
+      if (inventory) renderStatusCounts(data.counts);
       nextCursor = data.nextCursor;
       $('previous').disabled = !state.cursor;
       $('next').disabled = !nextCursor;
@@ -346,8 +414,8 @@ async function loadPage() {
     } else if (view === 'activity') {
       const data = await api('/api/admin/activity?limit=25');
       if (seq !== loadSequence) return;
-      renderActivity(data.events);
-      $('result-status').textContent = 'Most recent 25 events';
+      activityEvents = data.events;
+      renderActivity();
     } else {
       const data = await api('/api/credentials');
       if (seq !== loadSequence) return;
@@ -398,8 +466,31 @@ document.addEventListener('click', e => {
   const anchor = e.target.closest('a');
   if (anchor?.origin === location.origin && anchor.pathname.startsWith('/v/')) rememberLibraryNavigation();
 }, true);
+const mine = item => (item.ownerId || 'instance-owner') === user?.id;
+// Only what the access badge does not already say: when, and whose if not yours.
 function meta(item) {
-  return `${item.ownerName || 'Instance owner'} · ${item.visibility || 'private'}${item.archived ? ' · archived' : ''} · ${relativeDate(item.updatedAt)}`;
+  return `Updated ${relativeDate(item.updatedAt)}${mine(item) ? '' : ` · ${item.ownerName || 'Instance owner'}`}`;
+}
+function starButton(item, className) {
+  const b = node('button', { type: 'button', className });
+  const paint = () => {
+    b.textContent = item.starred ? '★' : '☆';
+    b.setAttribute('aria-pressed', String(!!item.starred));
+    b.ariaLabel = `${item.starred ? 'Unstar' : 'Star'} ${item.title || 'artifact'}`;
+    b.title = item.starred ? 'Unstar' : 'Star';
+  };
+  paint();
+  b.addEventListener('click', async () => {
+    b.disabled = true;
+    try {
+      await api(`/api/artifacts/${encodeURIComponent(item.id)}/star`, { method: 'PUT', body: { starred: !item.starred } });
+      item.starred = !item.starred;
+      if (state.view === 'starred') { await loadPage(); return; }
+      paint();
+    } catch (err) { notify(err.message); }
+    finally { b.disabled = false; }
+  });
+  return b;
 }
 const desktopPreviews = matchMedia('(min-width: 761px)');
 let previewObserver;
@@ -441,32 +532,38 @@ function renderArtifacts(items, inventory) {
   }
   const grid = !inventory && layout === 'grid';
   const list = node('div', { className: grid ? 'artifact-grid' : 'artifact-list', role: 'list' });
+  const cell = (label, className, ...content) => node('span', { className: `cell ${className}` }, node('span', { className: 'sr-only', textContent: label }), ...content);
+  const chip = (text, kind) => node('span', { className: `chip ${kind}`, textContent: text });
   for (const item of items) {
     const title = node('a', { className: 'artifact-title', href: viewerUrl(item), title: item.title, textContent: item.title || 'Untitled artifact' });
     const icon = node('span', { className: 'artifact-icon', ariaHidden: 'true' });
     icon.innerHTML = iconSvg(item.icon);
     title.prepend(icon);
-    if (item.starred) title.prepend(node('span', { className: 'star-mark', textContent: '★', ariaLabel: 'Starred' }));
-    const summary = node('div', {}, title, node('div', { className: 'shelf-meta' },
-      node('span', { className: 'access-badge', textContent: item.accessLabel }),
+    const badge = node('span', { className: 'access-badge', textContent: item.accessLabel });
+    // The inventory is about everyone's work; the reader's own access is beside the point there.
+    const summary = node('div', {}, title, node('div', { className: 'shelf-meta' }, inventory ? null : badge,
       node('span', { className: 'artifact-meta', title: meta(item), textContent: meta(item) })));
     const menu = button('⋯', () => openManage(item), 'icon-button artifact-menu');
     menu.setAttribute('aria-label', `${item.canManage ? 'Manage' : 'Details for'} ${item.title || 'artifact'}`);
-    const entry = node('article', { className: grid ? 'artifact-card' : 'artifact-row', role: 'listitem' });
+    const entry = node('article', { className: grid ? 'artifact-card' : `artifact-row${inventory ? ' inventory-row' : ''}${item.archived ? ' is-archived' : ''}`, role: 'listitem' });
     if (grid) {
-      const preview = node('a', { className: 'artifact-preview', href: viewerUrl(item), tabIndex: -1, ariaHidden: 'true' },
-        node('span', { className: 'preview-label', textContent: 'Static preview · Open to interact' }));
+      const preview = node('a', { className: 'artifact-preview', href: viewerUrl(item), tabIndex: -1, ariaHidden: 'true' });
       preview.dataset.id = item.id;
-      entry.append(preview, node('div', { className: 'artifact-summary' }, summary, menu));
+      entry.append(preview, node('div', { className: 'artifact-summary' }, summary, node('div', { className: 'card-actions' }, starButton(item, 'icon-button star-button'), menu)));
     } else {
-      entry.append(summary, node('span', { className: 'cell' }, node('span', { className: 'sr-only', textContent: 'Owner: ' }), item.ownerName || 'Instance owner'),
-        node('span', { className: 'cell' }, node('span', { className: 'sr-only', textContent: 'Visibility and status: ' }), `${item.visibility || 'private'} / ${item.archived ? 'archived' : 'active'}`),
-        node('span', { className: 'cell time-cell' }, node('span', { className: 'sr-only', textContent: 'Updated: ' }), relativeDate(item.updatedAt)), menu);
+      entry.append(summary, cell('Owner: ', 'owner-cell', mine(item) ? 'You' : item.ownerName || 'Instance owner'));
+      if (inventory) {
+        entry.append(cell('Visibility: ', 'visibility-cell', chip(item.visibility === 'shared' ? 'Shared' : 'Private', item.visibility === 'shared' ? 'shared' : 'private')),
+          cell('Status: ', 'status-cell', chip(item.archived ? 'Archived' : 'Active', item.archived ? 'archived' : 'active')));
+      }
+      entry.append(cell('Updated: ', 'time-cell', relativeDate(item.updatedAt)));
+      if (!inventory) entry.append(starButton(item, 'row-star'));
+      entry.append(menu);
     }
     list.append(entry);
   }
-  const headings = node('div', { className: 'inventory-head', ariaHidden: 'true' },
-    ...['Artifact / access', 'Owner', 'Visibility / status', 'Updated', ''].map(textContent => node('span', { textContent })));
+  const headings = node('div', { className: `inventory-head${inventory ? ' inventory' : ''}`, ariaHidden: 'true' },
+    ...(inventory ? ['Artifact', 'Owner', 'Visibility', 'Status', 'Updated', ''] : ['Artifact', 'Owner', 'Updated', '', '']).map(textContent => node('span', { textContent })));
   $('content').replaceChildren(...(grid ? [list] : [headings, list]));
   loadPreviews();
 }
@@ -543,33 +640,102 @@ function openPublicationCleanup() {
   });
 }
 function renderPeople(users) {
-  const list = node('div', { className: 'record-list' });
-  for (const p of users) {
-    const row = node('div', { className: 'record' }, node('div', { className: 'identity' },
-      node('strong', { textContent: p.name || p.email }), node('small', { textContent: p.email })),
-    node('span', { className: 'badge', textContent: p.role === 'owner' ? 'Instance owner' : p.status === 'invited' ? 'Invitation pending' : p.status === 'disabled' ? 'Suspended' : 'Active member' }));
-    if (p.role !== 'owner') {
-      const actions = node('div', { className: 'record-actions' });
-      if (p.status === 'invited') actions.append(button('Resend invitation', () => confirmAction('Resend invitation?', `Send a fresh invitation to ${p.email}?`, 'Send invitation', async () => {
-        await api('/api/invitations', { method: 'POST', body: { email: p.email, name: p.name } });
-        notify('Invitation sent.');
-      })));
-      actions.append(button(p.status === 'disabled' ? 'Reactivate' : 'Suspend', () => openSuspend(p)));
-      row.append(actions);
-    }
-    list.append(row);
-  }
-  $('content').replaceChildren(node('div', { className: 'notice', textContent: 'Membership allows sign-in, not access to everyone’s artifacts. Suspension ends all sessions and revokes personal API credentials.' }), list);
+  const members = users.filter(p => p.role === 'owner' || p.status === 'active');
+  const invited = users.filter(p => p.role !== 'owner' && p.status === 'invited');
+  const suspended = users.filter(p => p.role !== 'owner' && p.status === 'disabled');
+  const groups = [['Members', members], ['Invitations', invited], ['Suspended', suspended]].filter(([, list]) => list.length);
+  $('content').replaceChildren(...groups.map(([name, list]) => node('section', { className: 'people-group' },
+    node('h2', { className: 'group-head' }, name, node('small', { textContent: String(list.length) })),
+    node('div', { className: 'record-list' }, ...list.map(personRow)))));
 }
-function renderActivity(events) {
-  if (!events.length) return $('content').replaceChildren(empty('No activity yet', 'Administrative changes will appear here.'));
-  const list = node('div', { className: 'record-list' });
-  for (const event of events) {
-    const detail = node('div', { className: 'identity' }, node('strong', { textContent: event.action.replaceAll('_', ' ') }),
-      node('small', { textContent: `${event.actorName || 'Account'}${event.artifactTitle ? ` · ${event.artifactTitle}` : ''}` }));
-    list.append(node('div', { className: 'record activity-record' }, detail, node('time', { dateTime: event.createdAt, textContent: dateText(event.createdAt) })));
+function personName(p) { return p.name && p.name !== p.email ? p.name : ''; }
+function personRow(p) {
+  const owner = p.role === 'owner', invited = p.status === 'invited', suspended = p.status === 'disabled';
+  const name = personName(p);
+  const detail = [name ? p.email : '', invited ? (p.createdAt ? `Invitation sent ${dateText(p.createdAt)}` : 'Invitation pending') : ''].filter(Boolean).join(' · ');
+  const row = node('div', { className: `record person${suspended ? ' is-suspended' : ''}` },
+    node('span', { className: 'avatar', ariaHidden: 'true', textContent: initials(name || p.email) }),
+    node('div', { className: 'identity' }, node('strong', { textContent: name || p.email }), detail ? node('small', { textContent: detail }) : null),
+    node('span', { className: `state ${owner ? 'owner' : invited ? 'invited' : suspended ? 'disabled' : 'active'}`, textContent: owner ? 'Instance owner' : invited ? 'Invited · not yet signed in' : suspended ? 'Suspended' : 'Active' }));
+  if (!owner) {
+    const actions = node('div', { className: 'record-actions' });
+    if (invited) actions.append(button('Resend', () => resendInvitation(p), 'linkish'));
+    const more = button('⋯', () => openPerson(p), 'icon-button');
+    more.setAttribute('aria-label', `Actions for ${name || p.email}`);
+    actions.append(more);
+    row.append(actions);
   }
-  $('content').replaceChildren(list);
+  return row;
+}
+function resendInvitation(p) {
+  confirmAction('Resend invitation?', `Send a fresh invitation to ${p.email}?`, 'Send invitation', async () => {
+    await api('/api/invitations', { method: 'POST', body: { email: p.email, name: personName(p) } });
+    notify('Invitation sent.');
+  });
+}
+function openPerson(p) {
+  const invited = p.status === 'invited', suspended = p.status === 'disabled';
+  const details = node('dl', { className: 'details-grid' });
+  for (const [label, value] of [['Email', p.email], ['Status', invited ? 'Invited, not yet signed in' : suspended ? 'Suspended' : 'Active member']]) {
+    details.append(node('dt', { textContent: label }), node('dd', { textContent: value }));
+  }
+  const actions = node('div', { className: 'manage-actions' });
+  if (invited) actions.append(button('Resend invitation', () => resendInvitation(p)));
+  actions.append(button(suspended ? 'Reactivate account' : 'Suspend account', () => openSuspend(p), suspended ? '' : 'danger'));
+  openDialog(personName(p) || p.email, details, actions);
+}
+// Each audit row as a sentence. The audit keeps the actor; artifact and account targets when recorded.
+const EVENT_KIND = { archive: 'artifacts', restore: 'artifacts', rename: 'artifacts', transfer: 'artifacts', sharing_change: 'artifacts', invite: 'people', account_disabled: 'people', account_active: 'people', credential_create: 'credentials', credential_revoke: 'credentials', sign_in: 'sign-ins' };
+const EVENT_GLYPH = { artifacts: '▤', people: '✉', credentials: '⚿', 'sign-ins': '→', account_disabled: '⊘', account_active: '✓' };
+function eventSentence(e) {
+  const artifact = e.artifactId ? node('a', { href: viewerUrl({ id: e.artifactId }), textContent: e.artifactTitle || 'an artifact' }) : (e.artifactTitle || 'an artifact');
+  const target = e.target || '';
+  const verbs = {
+    invite: ['invited ', target || 'someone'], archive: ['archived ', artifact], restore: ['restored ', artifact], rename: ['renamed ', artifact],
+    transfer: ['transferred ', artifact], sharing_change: ['changed who can open ', artifact], sign_in: ['signed in'],
+    account_disabled: ['suspended ', target || 'an account'], account_active: ['reactivated ', target || 'an account'],
+    credential_create: ['created an API credential'], credential_revoke: ['revoked an API credential'],
+  };
+  return verbs[e.action] || [String(e.action || '').replaceAll('_', ' ')];
+}
+function dayLabel(value) {
+  const d = new Date(value), today = new Date();
+  if (Number.isNaN(d.getTime())) return 'Unknown date';
+  const days = Math.floor((new Date(today.getFullYear(), today.getMonth(), today.getDate()) - new Date(d.getFullYear(), d.getMonth(), d.getDate())) / 86400000);
+  return days === 0 ? 'Today' : days === 1 ? 'Yesterday' : d.toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' });
+}
+function renderActivity() {
+  const events = activityEvents;
+  if (!events.length) {
+    $('result-status').textContent = 'No events';
+    return $('content').replaceChildren(empty('No activity yet', 'Administrative changes will appear here.'));
+  }
+  const kinds = [['all', 'Everything'], ['artifacts', 'Artifacts'], ['people', 'People'], ['credentials', 'Credentials'], ['sign-ins', 'Sign-ins']];
+  const filter = node('div', { className: 'event-filter', role: 'group', ariaLabel: 'Show' }, ...kinds.map(([kind, label]) => {
+    const b = button(label, () => { activityFilter = kind; renderActivity(); });
+    b.setAttribute('aria-pressed', String(activityFilter === kind));
+    return b;
+  }));
+  const shown = events.filter(e => activityFilter === 'all' || EVENT_KIND[e.action] === activityFilter);
+  const out = [filter];
+  let day = '', list = null;
+  for (const e of shown) {
+    const label = dayLabel(e.createdAt);
+    if (label !== day) {
+      day = label;
+      out.push(node('h2', { className: 'day-head', textContent: label }));
+      list = node('div', { className: 'record-list' });
+      out.push(list);
+    }
+    const kind = EVENT_KIND[e.action] || 'artifacts';
+    list.append(node('div', { className: `event${kind === 'sign-ins' ? ' quiet' : ''}` },
+      node('span', { className: 'ico', ariaHidden: 'true', textContent: EVENT_GLYPH[e.action] || EVENT_GLYPH[kind] }),
+      node('span', {}, node('strong', { textContent: e.actorName || 'Account' }), ' ', ...eventSentence(e)),
+      node('time', { dateTime: e.createdAt, textContent: relativeDate(e.createdAt), title: new Date(e.createdAt).toLocaleString() })));
+  }
+  if (!shown.length) out.push(empty('Nothing of that kind', 'No recent events match this filter.'));
+  $('content').replaceChildren(...out);
+  $('result-status').textContent = activityFilter === 'all' ? `Newest ${events.length} event${events.length === 1 ? '' : 's'}` : `${shown.length} of the newest ${events.length} events`;
 }
 function cliSetupGuide() {
   const commands = [
@@ -880,7 +1046,7 @@ async function main() {
   } catch (err) {
     $('boot').hidden = true;
     showLogin();
-    message('login-feedback', `Could not check your session. ${err.message}`);
+    message('login-feedback', 'Could not check whether you are signed in. Reload the page to try again.', 'error');
   }
 }
 main();

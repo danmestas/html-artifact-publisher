@@ -158,7 +158,7 @@ export class Registry extends DurableObject<Env> {
         // A UNIQUE collision with a member fails closed rather than silently
         // promoting that member or merging two accounts' access.
         sql.exec("UPDATE accounts SET email=?, name='Instance owner' WHERE id='instance-owner'",email);
-      } else if (!owner) sql.exec("INSERT INTO accounts VALUES ('instance-owner', ?, 'Instance owner', 'owner', 'active')",email);
+      } else if (!owner) sql.exec("INSERT INTO accounts (id,email,name,role,status,created_at) VALUES ('instance-owner', ?, 'Instance owner', 'owner', 'active', ?)",email,now());
     });
   }
   async add(e: Entry): Promise<boolean> {

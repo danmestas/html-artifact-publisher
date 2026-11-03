@@ -138,7 +138,7 @@ export async function accountRoutes(req: Request, env: Env): Promise<Response | 
     const result = await r.library(user,{ admin:path==='/api/admin/artifacts',view,status,cursor,sort,q:(url.searchParams.get('q') ?? '').slice(0,300),ownerId:(url.searchParams.get('ownerId') ?? '').slice(0,64),limit:limitOf(url) });
     return json({ ...result,artifacts:result.artifacts.map(e => ({ ...e,createdAt:isoOrNull(e.createdAt),updatedAt:isoOrNull(e.updatedAt),expiresAt:isoOrNull(e.expiresAt),viewerUrl:`${url.origin}/v/${e.slug ?? e.id}` })) });
   }
-  if (path==='/api/people' && method==='GET') return json({ users:await r.people() });
+  if (path==='/api/people' && method==='GET') return json({ users:(await r.people()).map(u => ({ ...publicUser(u),status:u.status,createdAt:isoOrNull(u.created_at ?? null) })) });
   if (path==='/api/invitations' && method==='POST') {
     const b = await smallBody(req); const address = email(b?.email);
     if (!address || (b?.name!==undefined && (typeof b.name!=='string' || b.name.length>100))) return error('Valid email and name required');
@@ -147,7 +147,7 @@ export async function accountRoutes(req: Request, env: Env): Promise<Response | 
     if (!(await r.rate([`email:${await sha256hex(address)}`]))) return error('Please wait before resending',429);
     const invited = await r.invite(address,typeof b?.name==='string' ? b.name.trim() || address : address);
     const response = await sendLogin(req,env,invited);
-    if (response.ok) await r.audit(user.id,'invite');
+    if (response.ok) await r.audit(user.id,'invite',null,null,address);
     return response;
   }
   const person = /^\/api\/people\/([A-Za-z0-9_-]{1,64})$/.exec(path);
@@ -156,7 +156,7 @@ export async function accountRoutes(req: Request, env: Env): Promise<Response | 
     if (!target) return error('Account not found',404);
     if (target.role==='owner') return error('Cannot change the instance owner',403);
     if (b?.status!=='active' && b?.status!=='disabled') return error('Invalid status');
-    await r.status(target.id,b.status); await r.audit(user.id,`account_${b.status}`); return json({ ok:true });
+    await r.status(target.id,b.status); await r.audit(user.id,`account_${b.status}`,null,null,target.name && target.name!==target.email ? `${target.name} (${target.email})` : target.email); return json({ ok:true });
   }
   if (path==='/api/admin/activity' && method==='GET') return json({ events:(await r.activity(limitOf(url))).map(e => ({ ...e,createdAt:isoOrNull(e.createdAt) })) });
   if (path==='/api/credentials') {

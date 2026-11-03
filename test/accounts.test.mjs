@@ -131,6 +131,10 @@ test('permission isolation, named grants, account metadata, archive, transfer an
   assert.equal((await api(path,{token:write})).json.readToken,read,'explicit legacy edit token retains read-link retrieval');
   assert.equal((await api(path+'/sharing',{cookie:c.cookie})).json.grants.length,0);
   assert.ok((await api('/api/admin/activity',{cookie:owner.cookie})).json.events.some(e=>e.action==='transfer'));
+  assert.ok((await api('/api/admin/activity',{cookie:owner.cookie})).json.events.some(e=>e.action==='invite' && typeof e.target==='string' && e.target.includes('@')),'an invitation records whom it went to');
+  assert.ok((await api('/api/people',{cookie:owner.cookie})).json.users.every(u=>'createdAt' in u),'people carry an invited-on time');
+  const inventory=(await api('/api/admin/artifacts',{cookie:owner.cookie})).json;
+  assert.equal(inventory.counts.all,inventory.counts.active+inventory.counts.archived,'inventory counts add up');
   const legacyArtifact=await create({bearer:legacy});
   assert.ok((await api('/api/library?view=mine',{cookie:owner.cookie})).json.artifacts.some(e=>e.id===legacyArtifact.id && e.ownerId==='instance-owner'));
   assert.equal((await api(path,{method:'DELETE',cookie:c.cookie})).status,204);

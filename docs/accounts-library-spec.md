@@ -32,9 +32,9 @@ All JSON errors `{error: string}`, no-store. Browser fetch uses same-origin cook
 - POST `/api/auth/verify` body `{token}` -> session cookie and `{user}`. Login page reads token from URL fragment, removes it immediately, then POSTs only on explicit Continue click so mail scanners do not consume it. Callback URL `APP_ORIGIN/login#token=...`.
 - POST `/api/auth/logout` -> clear cookie + `{ok:true}`.
 - GET `/api/library?view=all|mine|shared|starred|archived&q=&sort=recent|name&cursor=&limit=25` -> `{artifacts:[{id,title,ownerId,ownerName,updatedAt,createdAt,expiresAt,viewerUrl,permission:'read'|'write',canManage:boolean,archived:boolean,starred:boolean,visibility:'private'|'shared',accessLabel:string}],total:number,nextCursor:string|null}`. Archive excluded by default. Total uses the same permission/filter conditions before pagination.
-- GET `/api/admin/artifacts?q=&ownerId=&status=all|active|archived&sort=recent|name&cursor=&limit=25` -> same list. Instance owner only. Default recent order is updatedAt descending then ID descending. Name order is title with SQLite NOCASE ascending then ID ascending. Treat returned cursor strings as opaque: existing recent cursors encode `[timestamp,id]`; name cursors encode `["name",title,id]`. Reject cursors incompatible with the selected sort.
+- GET `/api/admin/artifacts?q=&ownerId=&status=all|active|archived&sort=recent|name&cursor=&limit=25` -> same list plus `counts:{all,active,archived}` under the same search and owner filter, for the status tabs. Instance owner only. Default recent order is updatedAt descending then ID descending. Name order is title with SQLite NOCASE ascending then ID ascending. Treat returned cursor strings as opaque: existing recent cursors encode `[timestamp,id]`; name cursors encode `["name",title,id]`. Reject cursors incompatible with the selected sort.
 - GET `/p/:id` -> authorized, private/no-store, sanitized static HTML preview. Uses existing read permission, an opaque response sandbox and restrictive CSP; no artifact scripts, bridge, navigation or external resources. Unsupported/oversized content receives an explicit fallback. This is separate from the interactive `/v/:id` viewer.
-- GET `/api/people` -> `{users:[{id,email,name,role,status}]}`. Instance owner only.
+- GET `/api/people` -> `{users:[{id,email,name,role,status,createdAt}]}`. `createdAt` is when the account was invited (null for accounts that predate it). Instance owner only.
 - POST `/api/invitations` body `{email,name?}` -> `{ok:true}` sends invite/login link; owner only; existing active members must not be demoted or reinvited accidentally.
 - PATCH `/api/people/:id` body `{status:'active'|'disabled'}` -> `{ok:true}`, owner only, not owner target.
 - GET `/api/artifacts/:id/sharing` -> `{ownerId,grants:[{userId,email,name,permission:'read'|'write'}]}` creator/instance-owner only. Include users eligible to share via `users:[{id,email,name}]` so members do not need `/api/people` access.
@@ -42,7 +42,7 @@ All JSON errors `{error: string}`, no-store. Browser fetch uses same-origin cook
 - PATCH `/api/artifacts/:id/manage` body `{archived?:boolean,ownerId?:string,title?:string}` -> `{ok:true}`; owner transfer instance-owner only, rename/archive creator or instance owner.
 - PUT `/api/artifacts/:id/star` body `{starred:boolean}` -> `{ok:true}` account with access; per user.
 - DELETE `/api/artifacts/:id` -> existing 204; session-based deletion only creator/instance owner, not ordinary edit grantee.
-- GET `/api/admin/activity?limit=25` -> `{events:[{id,actorName,action,artifactId,artifactTitle,createdAt}]}` instance owner only.
+- GET `/api/admin/activity?limit=25` -> `{events:[{id,actorName,action,artifactId,artifactTitle,target,createdAt}]}` instance owner only. `target` names the account an `invite`, `account_disabled` or `account_active` event was about; null otherwise and for older rows.
 - GET `/api/credentials` -> `{credentials:[{id,name,createdAt}]}` own credentials only.
 - POST `/api/credentials` body `{name}` -> `{id,name,token}` one-time display.
 - DELETE `/api/credentials/:id` -> `{ok:true}` own credentials only.

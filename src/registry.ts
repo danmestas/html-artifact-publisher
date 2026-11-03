@@ -12,9 +12,11 @@ export interface Entry {
   id: string; slug: string | null; title: string; createdAt: number; updatedAt: number;
   expiresAt: number | null; tip: string; ownerId?: string; archived?: boolean; icon?: string;
 }
-export type Account = { id: string; email: string; name: string; role: 'owner' | 'member'; status: 'active' | 'invited' | 'disabled'; created_at?: number | null };
+export type Account = { id: string; email: string; name: string; role: 'owner' | 'member'; status: 'active' | 'invited' | 'disabled'; created_at?: number | null; signed_in_at?: number | null };
 type Row = { id: string; slug: string | null; title: string; created_at: number; updated_at: number; expires_at: number | null; tip: string; owner_id: string | null; archived: number; icon: string };
 const now = () => Math.floor(Date.now() / 1000);
+/** How long a sign-in link works, in seconds. The mail and the sign-in page state the same figure. */
+export const LOGIN_TTL = 3600;
 /** How long an attach may hold its ref pending before reconciling treats it as abandoned (ms). */
 const PENDING_MAX = 5 * 60_000;
 
@@ -74,6 +76,12 @@ export class Registry extends DurableObject<Env> {
     if (!cols.some(c => c.name === 'owner_id')) sql.exec('ALTER TABLE artifacts ADD COLUMN owner_id TEXT');
     // When an account was invited (null for accounts that predate the column), and whom an audited action was about.
     if (!sql.exec<{ name: string }>('PRAGMA table_info(accounts)').toArray().some(c => c.name === 'created_at')) sql.exec('ALTER TABLE accounts ADD COLUMN created_at INTEGER');
+    // When the account last completed a sign-in: reactivating one that never did restores "invited".
+    // Accounts that were already active when the column arrived count as having signed in.
+    if (!sql.exec<{ name: string }>('PRAGMA table_info(accounts)').toArray().some(c => c.name === 'signed_in_at')) {
+      sql.exec('ALTER TABLE accounts ADD COLUMN signed_in_at INTEGER');
+      sql.exec("UPDATE accounts SET signed_in_at = COALESCE(created_at, 0) WHERE status != 'invited'");
+    }
     if (!sql.exec<{ name: string }>('PRAGMA table_info(activity)').toArray().some(c => c.name === 'target')) sql.exec('ALTER TABLE activity ADD COLUMN target TEXT');
     if (!cols.some(c => c.name === 'archived')) sql.exec('ALTER TABLE artifacts ADD COLUMN archived INTEGER NOT NULL DEFAULT 0');
     if (!cols.some(c => c.name === 'icon')) sql.exec("ALTER TABLE artifacts ADD COLUMN icon TEXT NOT NULL DEFAULT 'document'");
@@ -459,25 +467,46 @@ export class Registry extends DurableObject<Env> {
   }
   async status(id: string, status: string): Promise<void> {
     this.ctx.storage.transactionSync(() => {
-      this.ctx.storage.sql.exec(`UPDATE accounts SET status = ? WHERE id = ? AND role != 'owner'`,status,id);
+      // Reactivating an account that never completed a sign-in puts it back under Invitations.
+      if (status === 'active') this.ctx.storage.sql.exec(`UPDATE accounts SET status = CASE WHEN signed_in_at IS NULL THEN 'invited' ELSE 'active' END WHERE id = ? AND role != 'owner'`,id);
+      else this.ctx.storage.sql.exec(`UPDATE accounts SET status = ? WHERE id = ? AND role != 'owner'`,status,id);
       if (status === 'disabled') {
         for (const t of ['sessions','credentials','logins']) this.ctx.storage.sql.exec(`DELETE FROM ${t} WHERE user_id = ?`,id);
       }
     });
   }
   /** Count one attempt against each of `keys`: false once any has had `limit` within its `window` seconds. */
-  async rate(keys: string[], limit = 5, window = 900): Promise<boolean> {
+  async rate(keys: (string | [string, number])[], limit = 5, window = 900): Promise<boolean> {
     return this.ctx.storage.transactionSync(() => {
       const sql = this.ctx.storage.sql;
       sql.exec('DELETE FROM rate_limits WHERE expires <= ?',now());
-      const allowed = keys.every(key => (sql.exec<{ count: number }>('SELECT count FROM rate_limits WHERE key = ?',key).toArray()[0]?.count ?? 0) < limit);
-      if (allowed) for (const key of keys) sql.exec('INSERT INTO rate_limits VALUES (?,1,?) ON CONFLICT(key) DO UPDATE SET count=count+1',key,now()+window);
+      const pairs = keys.map(k => (typeof k === 'string' ? [k,limit] as [string, number] : k));
+      const allowed = pairs.every(([key,max]) => (sql.exec<{ count: number }>('SELECT count FROM rate_limits WHERE key = ?',key).toArray()[0]?.count ?? 0) < max);
+      if (allowed) for (const [key] of pairs) sql.exec('INSERT INTO rate_limits VALUES (?,1,?) ON CONFLICT(key) DO UPDATE SET count=count+1',key,now()+window);
       return allowed;
+    });
+  }
+  /** Seconds until `key` is under `limit` again; 0 when it is now. */
+  async rateWait(key: string, limit = 5): Promise<number> {
+    const row = this.ctx.storage.sql.exec<{ count: number; expires: number }>('SELECT count,expires FROM rate_limits WHERE key = ?',key).toArray()[0];
+    return row && row.count >= limit && row.expires > now() ? row.expires - now() : 0;
+  }
+  /** When the pending sign-in link for `userId` expires, as a unix time, or null. */
+  async loginExpiry(userId: string): Promise<number | null> {
+    return this.ctx.storage.sql.exec<{ expires: number }>('SELECT max(expires) AS expires FROM logins WHERE user_id = ? AND expires > ?',userId,now()).toArray()[0]?.expires ?? null;
+  }
+  /** Remove an account that never signed in, with its pending links. False when it is not such an account. */
+  async withdraw(id: string): Promise<boolean> {
+    return this.ctx.storage.transactionSync(() => {
+      const sql = this.ctx.storage.sql;
+      const gone = sql.exec<{ id: string }>(`DELETE FROM accounts WHERE id = ? AND role != 'owner' AND status = 'invited' AND signed_in_at IS NULL RETURNING id`,id).toArray().length > 0;
+      if (gone) for (const t of ['logins','sessions','credentials']) sql.exec(`DELETE FROM ${t} WHERE user_id = ?`,id);
+      return gone;
     });
   }
   async login(hash: string, userId: string): Promise<void> {
     this.ctx.storage.sql.exec('DELETE FROM logins WHERE expires <= ?',now());
-    this.ctx.storage.sql.exec('INSERT INTO logins VALUES (?,?,?)',hash,userId,now()+900);
+    this.ctx.storage.sql.exec('INSERT INTO logins VALUES (?,?,?)',hash,userId,now()+LOGIN_TTL);
   }
   async verify(hash: string, sessionHash: string): Promise<Account | null> {
     return this.ctx.storage.transactionSync(() => {
@@ -486,7 +515,7 @@ export class Registry extends DurableObject<Env> {
       if (!token) return null;
       const user = sql.exec<Account>(`SELECT * FROM accounts WHERE id = ? AND status IN ('active','invited')`,token.user_id).toArray()[0];
       if (!user) return null;
-      sql.exec(`UPDATE accounts SET status = 'active' WHERE id = ?`,user.id);
+      sql.exec(`UPDATE accounts SET status = 'active', signed_in_at = ? WHERE id = ?`,now(),user.id);
       sql.exec('DELETE FROM sessions WHERE expires <= ?',now());
       sql.exec('INSERT INTO sessions VALUES (?,?,?)',sessionHash,user.id,now()+604800);
       return { ...user, status: 'active' };
@@ -578,8 +607,28 @@ export class Registry extends DurableObject<Env> {
   async audit(userId: string, action: string, id: string | null = null, title: string | null = null, target: string | null = null): Promise<void> {
     this.ctx.storage.sql.exec('INSERT INTO activity (id,actor_id,action,artifact_id,artifact_title,created_at,target) VALUES (?,?,?,?,?,?,?)',genId(),userId,action,id,title,now(),target);
   }
-  async activity(limit: number) {
-    return this.ctx.storage.sql.exec<{ id: string; actorName: string; action: string; artifactId: string | null; artifactTitle: string | null; target: string | null; createdAt: number }>('SELECT e.id,a.name AS actorName,e.action,e.artifact_id AS artifactId,e.artifact_title AS artifactTitle,e.target,e.created_at AS createdAt FROM activity e LEFT JOIN accounts a ON a.id=e.actor_id ORDER BY e.created_at DESC,e.id DESC LIMIT ?',limit).toArray();
+  /** The newest audit events, optionally of one kind, after a cursor of [createdAt, id]. */
+  async activity(limit: number, kind = '', cursor = '') {
+    const clauses: string[] = []; const args: (string | number)[] = [];
+    const actions = ACTIVITY_KINDS[kind];
+    if (actions) { clauses.push(`e.action IN (${actions.map(() => '?').join(',')})`); args.push(...actions); }
+    if (cursor) {
+      try {
+        const [time,id] = JSON.parse(cursor) as [number, string];
+        if (Number.isFinite(time) && typeof id === 'string') { clauses.push('(e.created_at < ? OR (e.created_at = ? AND e.id < ?))'); args.push(time,time,id); }
+      } catch { /* an unreadable cursor starts from the newest */ }
+    }
+    const rows = this.ctx.storage.sql.exec<{ id: string; actorName: string; action: string; artifactId: string | null; artifactTitle: string | null; target: string | null; createdAt: number }>(`SELECT e.id,a.name AS actorName,e.action,e.artifact_id AS artifactId,e.artifact_title AS artifactTitle,e.target,e.created_at AS createdAt FROM activity e LEFT JOIN accounts a ON a.id=e.actor_id${clauses.length ? ' WHERE ' + clauses.join(' AND ') : ''} ORDER BY e.created_at DESC,e.id DESC LIMIT ?`,...args,limit+1).toArray();
+    const more = rows.length > limit; rows.splice(limit);
+    const last = rows.at(-1);
+    return { events: rows, nextCursor: more && last ? JSON.stringify([last.createdAt,last.id]) : null };
   }
 }
+/** The audit actions each Activity filter shows. */
+export const ACTIVITY_KINDS: Record<string, string[]> = {
+  artifacts: ['archive','restore','rename','transfer','sharing_change'],
+  people: ['invite','invite_withdrawn','account_disabled','account_active'],
+  credentials: ['credential_create','credential_revoke'],
+  'sign-ins': ['sign_in'],
+};
 function toEntry(r: Row): Entry { return { id:r.id,slug:r.slug,title:r.title,createdAt:r.created_at,updatedAt:r.updated_at,expiresAt:r.expires_at,tip:r.tip,ownerId:r.owner_id ?? 'instance-owner',archived:!!r.archived,icon:r.icon ?? 'document' }; }

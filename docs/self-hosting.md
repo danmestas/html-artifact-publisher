@@ -125,6 +125,8 @@ The output should say `"linkVerified": true`. Open its `viewerUrl`: you should s
 
 **You:** open `APP_ORIGIN` in a browser, sign in with the owner email, and check that the sign-in email arrives. Then invite a second address that you control, and check that it can sign in too.
 
+Sign-in links work once and for an hour. Requests are limited to 5 per address and 60 per client IP in any 15 minutes; past either limit the page still says the link is on its way, and nothing is sent. Several people behind one office or conference address share the 60.
+
 To check public snapshots, open the test artifact as its owner, choose **Share → Publish**, and confirm that every file in the selected version will become public. Open the resulting public URL in a signed-out/private browser window. Check both the page and its local supporting files. Standalone JavaScript can work; external/CDN dependencies are blocked by the public CSP. Then unpublish it from **Published links** and check that its public URL and copied-file URLs return 404 while the private source and history still open.
 
 ### 6. Automatic deploys from GitHub (optional)

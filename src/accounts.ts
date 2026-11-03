@@ -1,5 +1,6 @@
 import type { Account } from './registry';
 import type { Caller } from './repo';
+import { ACTIVITY_KINDS, LOGIN_TTL } from './registry';
 import { genId, genToken, isoOrNull, sha256hex, timingSafeEqual } from './util';
 
 export const registry = (env: Env) => env.REGISTRY.getByName('registry');
@@ -75,7 +76,7 @@ async function sendLogin(req: Request, env: Env, user: Account): Promise<Respons
   const loginUrl = `${origin.origin}/login#token=${token}`;
   if (testMail(req,env)) return json({ ok:true,loginUrl });
   try {
-    await env.EMAIL.send({ from:env.EMAIL_FROM,to:user.email,subject:'Sign in to your artifact library',text:`Use this one-time link within 15 minutes:\n${loginUrl}\n\nIf you did not request this, ignore this message.` });
+    await env.EMAIL.send({ from:env.EMAIL_FROM,to:user.email,subject:'Sign in to your artifact library',text:`Use this one-time link within ${LOGIN_TTL/60} minutes:\n${loginUrl}\n\nIf you did not request this, ignore this message.` });
   } catch {
     // Invalidate a failed delivery; do not reveal provider errors or tokens.
     await registry(env).discardLogin(hash);
@@ -98,7 +99,8 @@ export async function accountRoutes(req: Request, env: Env): Promise<Response | 
     const b = await smallBody(req); const address = email(b?.email);
     if (!address) return json({ ok:true });
     const ip = req.headers.get('CF-Connecting-IP') ?? 'local';
-    if (!(await r.rate([`email:${await sha256hex(address)}`,`ip:${await sha256hex(ip)}`]))) return json({ ok:true });
+    // 5 links per address keep one inbox from being flooded; 60 per client address lets an office behind one NAT sign in.
+    if (!(await r.rate([`email:${await sha256hex(address)}`,[`ip:${await sha256hex(ip)}`,60]]))) return json({ ok:true });
     const user = await r.byEmail(address);
     return user && user.status!=='disabled' ? sendLogin(req,env,user) : json({ ok:true });
   }
@@ -138,19 +140,33 @@ export async function accountRoutes(req: Request, env: Env): Promise<Response | 
     const result = await r.library(user,{ admin:path==='/api/admin/artifacts',view,status,cursor,sort,q:(url.searchParams.get('q') ?? '').slice(0,300),ownerId:(url.searchParams.get('ownerId') ?? '').slice(0,64),limit:limitOf(url) });
     return json({ ...result,artifacts:result.artifacts.map(e => ({ ...e,createdAt:isoOrNull(e.createdAt),updatedAt:isoOrNull(e.updatedAt),expiresAt:isoOrNull(e.expiresAt),viewerUrl:`${url.origin}/v/${e.slug ?? e.id}` })) });
   }
-  if (path==='/api/people' && method==='GET') return json({ users:(await r.people()).map(u => ({ ...publicUser(u),status:u.status,createdAt:isoOrNull(u.created_at ?? null) })) });
+  if (path==='/api/people' && method==='GET') {
+    const users = [];
+    for (const u of await r.people()) {
+      const invited = u.status==='invited';
+      users.push({ ...publicUser(u),status:u.status,createdAt:isoOrNull(u.created_at ?? null),
+        ...(invited ? { resendAfter:await r.rateWait(`email:${await sha256hex(u.email)}`),inviteExpiresAt:isoOrNull(await r.loginExpiry(u.id)) } : {}) });
+    }
+    return json({ users });
+  }
   if (path==='/api/invitations' && method==='POST') {
     const b = await smallBody(req); const address = email(b?.email);
     if (!address || (b?.name!==undefined && (typeof b.name!=='string' || b.name.length>100))) return error('Valid email and name required');
     const existing = await r.byEmail(address);
     if (existing && existing.status!=='invited') return error('Account already exists',409);
-    if (!(await r.rate([`email:${await sha256hex(address)}`]))) return error('Please wait before resending',429);
+    if (!(await r.rate([`email:${await sha256hex(address)}`]))) { const retryAfter = await r.rateWait(`email:${await sha256hex(address)}`); return json({ error:`Please wait ${Math.max(1,Math.ceil(retryAfter/60))} minutes before resending`,retryAfter },429,{ 'Retry-After':String(retryAfter) }); }
     const invited = await r.invite(address,typeof b?.name==='string' ? b.name.trim() || address : address);
     const response = await sendLogin(req,env,invited);
     if (response.ok) await r.audit(user.id,'invite',null,null,address);
     return response;
   }
   const person = /^\/api\/people\/([A-Za-z0-9_-]{1,64})$/.exec(path);
+  if (person && method==='DELETE') {
+    const target = await r.account(person[1]!);
+    if (!target) return error('Account not found',404);
+    if (!(await r.withdraw(target.id))) return error('Only an invitation that was never accepted can be withdrawn',409);
+    await r.audit(user.id,'invite_withdrawn',null,null,target.email); return json({ ok:true });
+  }
   if (person && method==='PATCH') {
     const b = await smallBody(req); const target = await r.account(person[1]!);
     if (!target) return error('Account not found',404);
@@ -158,7 +174,12 @@ export async function accountRoutes(req: Request, env: Env): Promise<Response | 
     if (b?.status!=='active' && b?.status!=='disabled') return error('Invalid status');
     await r.status(target.id,b.status); await r.audit(user.id,`account_${b.status}`,null,null,target.name && target.name!==target.email ? `${target.name} (${target.email})` : target.email); return json({ ok:true });
   }
-  if (path==='/api/admin/activity' && method==='GET') return json({ events:(await r.activity(limitOf(url))).map(e => ({ ...e,createdAt:isoOrNull(e.createdAt) })) });
+  if (path==='/api/admin/activity' && method==='GET') {
+    const kind = url.searchParams.get('kind') ?? '';
+    if (kind && !ACTIVITY_KINDS[kind]) return error('Unknown activity kind');
+    const page = await r.activity(limitOf(url),kind,(url.searchParams.get('cursor') ?? '').slice(0,200));
+    return json({ events:page.events.map(e => ({ ...e,createdAt:isoOrNull(e.createdAt) })),nextCursor:page.nextCursor });
+  }
   if (path==='/api/credentials') {
     if (method==='GET') return json({ credentials:(await r.credentials(user.id)).map(c => ({ ...c,createdAt:isoOrNull(c.createdAt) })) });
     if (method==='POST') {

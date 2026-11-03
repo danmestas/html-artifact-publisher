@@ -129,7 +129,7 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
         assert.equal(result.error,null,JSON.stringify(result));
         assert.ok(result.targets.every(h=>h>=44),JSON.stringify(result));
         assert.ok(result.contrast>=4.5,JSON.stringify(result));
-        if(width===390) {assert.equal(result.nav,'none');assert.ok(result.headerHeight<=90,JSON.stringify(result));assert.ok(result.rows.every(h=>h>=72&&h<=88),JSON.stringify(result));}
+        if(width===390) {assert.equal(result.nav,'none');assert.ok(result.headerHeight<=90,JSON.stringify(result));assert.ok(result.rows.every(h=>h>=44),JSON.stringify(result));}
         evidence.push(result);
         selectQA();
         run('screenshot',join(output,`${view}-${theme}-${width}.png`));
@@ -139,21 +139,21 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
     assert.equal(evaluate('document.getElementById("sort").value'),'name');
     const sortedTitles=evaluate('[...document.querySelectorAll(".artifact-title")].map(e=>e.textContent.replace(/^★/,"").toLowerCase())');
     assert.deepEqual(sortedTitles,[...sortedTitles].sort());
-    assert.equal(evaluate('document.querySelectorAll(".artifact-title").length'),25);
-    const firstPage=evaluate('[...document.querySelectorAll(".artifact-title")].map(e=>new URL(e.href).pathname)');
+    assert.equal(evaluate('document.querySelectorAll(".artifact-title").length'),12,'the first batch is 12');
+    assert.match(evaluate('document.getElementById("shown").textContent'),/^12 of \d+ shown$/);
+    const firstBatch=evaluate('[...document.querySelectorAll(".artifact-title")].map(e=>new URL(e.href).pathname)');
     // Chromium pointer activation must use the post-scroll target coordinates.
-    evaluate('document.getElementById("next").scrollIntoView({block:"center",behavior:"instant"})');
-    click('#next');run('wait','--fn','document.getElementById("page-number").textContent==="Page 2"');run('wait','[aria-busy="false"]');
-    const secondPage=evaluate('[...document.querySelectorAll(".artifact-title")].map(e=>new URL(e.href).pathname)');
-    assert.ok(secondPage.length>0 && secondPage.every(href=>!firstPage.includes(href)),'next page advances without duplicates');
-    const secondPageUrl=evaluate('location.pathname+location.search');
+    evaluate('document.getElementById("more").scrollIntoView({block:"center",behavior:"instant"})');
+    click('#more');run('wait','--fn','document.querySelectorAll(".artifact-title").length===24');
+    const shown=evaluate('[...document.querySelectorAll(".artifact-title")].map(e=>new URL(e.href).pathname)');
+    assert.deepEqual(shown.slice(0,12),firstBatch,'show more appends after the first batch');
+    assert.equal(new Set(shown).size,24,'show more adds no duplicates');
+    const shownUrl=evaluate('location.pathname+location.search');
+    assert.match(shownUrl,/[?&]n=24(&|$)/,'the URL records how many are shown');
     click('#content article:first-child .artifact-title');wait('#bar:not([hidden])');click('#backLibrary');wait('.artifact-title');run('wait','[aria-busy="false"]');
-    assert.equal(evaluate('location.pathname+location.search'),secondPageUrl,'Library returns to the same pagination cursor');
-    assert.equal(evaluate('document.getElementById("page-number").textContent'),'Page 2');
-    assert.deepEqual(evaluate('[...document.querySelectorAll(".artifact-title")].map(e=>new URL(e.href).pathname)'),secondPage);
-    evaluate('document.getElementById("previous").scrollIntoView({block:"center",behavior:"instant"})');
-    click('#previous');run('wait','--fn','document.getElementById("page-number").textContent==="Page 1"');run('wait','[aria-busy="false"]');
-    assert.deepEqual(evaluate('[...document.querySelectorAll(".artifact-title")].map(e=>new URL(e.href).pathname)'),firstPage);
+    assert.equal(evaluate('location.pathname+location.search'),shownUrl,'Library returns with the same batches shown');
+    run('wait','--fn','document.querySelectorAll(".artifact-title").length===24');
+    assert.deepEqual(evaluate('[...document.querySelectorAll(".artifact-title")].map(e=>new URL(e.href).pathname)'),shown);
     run('fill','#search','very long artifact');run('press','Enter');run('wait','[aria-busy="false"]');
     run('wait','--fn','document.querySelectorAll(".artifact-title").length===1');
     const filteredUrl=evaluate('location.pathname+location.search');
@@ -283,8 +283,12 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
     assert.equal(evaluate('document.querySelectorAll(".artifact-title").length'),0);
     assert.equal(evaluate('document.documentElement.dataset.theme||null'),null,'logout restores system appearance');
     assert.equal(evaluate('JSON.parse(localStorage.getItem("artifact-library-preferences")).theme'),savedThemeBeforeLogout,'logout retains the in-app preference');
-    run('open',base+'/login#token='+'0'.repeat(64));wait('#verify-button');click('#verify-button');wait('#login-feedback:not([hidden])');
-    assert.ok(evaluate('document.getElementById("login-feedback").textContent.includes("request a fresh sign-in link")'));
+    run('open',base+'/login#token='+'0'.repeat(64));wait('#verify-button');
+    assert.equal(evaluate('document.activeElement.id'),'verify-button','the verify step focuses Continue');
+    click('#verify-button');wait('#login-form:not([hidden])');
+    assert.equal(evaluate('document.getElementById("login-title").textContent'),'This link has expired','an expired link offers a new one instead of a dead end');
+    assert.equal(evaluate('document.getElementById("login-submit").textContent'),'Email me a new link');
+    assert.equal(evaluate('document.activeElement.id'),'login-email','the email field takes focus');
     run('screenshot',join(output,'invalid-login-phone.png'));
     click('#different-email');wait('#login-email');run('fill','#login-email','unknown-browser@example.com');click('#login-form button[type=submit]');wait('#sent-panel:not([hidden])');
     assert.ok(evaluate('document.getElementById("sent-text").textContent.includes("invited account")'));

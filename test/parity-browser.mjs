@@ -114,15 +114,12 @@ export async function parityQA({base,api,owner,browserOwner,member,run,evaluate,
       click('#backLibrary');wait('.artifact-title');
       assert.equal(evaluate('getComputedStyle(document.documentElement).colorScheme'),expected);
     }
-    requests.clear();run('open',base+'/?q=Parity+browser&sort=name');wait('.artifact-title');run('wait','--load','networkidle');
-    assert.equal(evaluate('document.querySelectorAll(".artifact-preview iframe").length'),0,'phone does not create hidden frames');
-    assert.equal([...requests.values()].filter(r=>r.url.startsWith(base+'/p/')).length,0,'phone makes no preview requests');
-    const heights=evaluate('[...document.querySelectorAll(".artifact-summary")].map(e=>e.getBoundingClientRect().height)');
-    assert.ok(heights.every(h=>h>=72&&h<=88),JSON.stringify(heights));
+    requests.clear();run('open',base+'/?q=Parity+browser&sort=name');wait('.artifact-title');wait('.artifact-preview iframe');run('wait','--load','networkidle');
+    // Phones get previews too: two columns of cards, each preview a sandboxed static document.
+    assert.equal(evaluate('getComputedStyle(document.querySelector(".artifact-grid")).gridTemplateColumns.split(" ").length'),2,'phone grid has two columns');
+    assert.equal(evaluate('[...document.querySelectorAll(".artifact-preview iframe")].every(e=>e.getAttribute("sandbox")==="")'),true,'phone previews are sandboxed');
+    assert.equal(evaluate('document.documentElement.scrollWidth>innerWidth'),false,'phone cards do not overflow');
     run('screenshot',join(output,'parity-phone.png'));
-    run('set','viewport','1440','1000');run('wait','.artifact-preview iframe');
-    run('set','viewport','390','1000');
-    assert.equal(evaluate('document.querySelectorAll(".artifact-preview iframe").length'),0,'resizing removes frames');
     run('set','viewport','1440','1000');run('wait','.artifact-preview iframe');
     click('[data-layout="list"]');wait('.artifact-row');
     assert.equal(evaluate('document.querySelectorAll(".artifact-preview iframe").length'),0,'list removes frames');

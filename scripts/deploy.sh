@@ -90,6 +90,9 @@ set --
 [ -z "${NOTIFY_AGENT:-}" ] || set -- "$@" --var "NOTIFY_AGENT:$NOTIFY_AGENT"
 [ -z "${NOTIFY_SUBSCRIBER:-}" ] || set -- "$@" --var "NOTIFY_SUBSCRIBER:$NOTIFY_SUBSCRIBER"
 npx wrangler deploy --secrets-file "$secrets" --var "APP_ORIGIN:$APP_ORIGIN" --var "PUBLIC_ORIGIN:$PUBLIC_ORIGIN" --var "EMAIL_FROM:$EMAIL_FROM" --var 'TEST_MAIL_TRANSPORT:' \
-  --var 'TEST_CLEANUP_PAUSE_MS:' --var 'TEST_CLEANUP_FAULT:' --var 'TEST_TOMBSTONE_STALE_MS:' --var 'TEST_UPLOAD_HOLD_MS:' "$@"
+  --var 'TEST_CLEANUP_PAUSE_MS:' --var 'TEST_CLEANUP_FAULT:' --var 'TEST_TOMBSTONE_STALE_MS:' --var 'TEST_UPLOAD_HOLD_MS:' \
+  --var 'TEST_EXPIRATION_FAULT:' --var 'TEST_EXPIRATION_RETRY_MS:' \
+  --var 'TEST_EXPIRATION_HOLD_REVISION:' --var 'TEST_EXPIRATION_HOLD_MS:' --var 'TEST_EXPIRATION_STATE:' \
+  --var 'TEST_EXPIRATION_SETTLE_MS:' --var 'TEST_EXPIRATION_ALARM_HOLD_MS:' "$@"
 # CI must not mistake the first (public) Worker URL for the signed-in app.
 printf 'APP_URL=%s\nPUBLIC_URL=%s\n' "$APP_ORIGIN" "$PUBLIC_ORIGIN"

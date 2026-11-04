@@ -93,6 +93,20 @@ function dateText(value) {
   const d = new Date(value);
   return Number.isNaN(d.getTime()) ? 'Unknown date' : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
 }
+// Expiration is stored as UTC and shown in the browser's zone, with the zone named.
+function dateTimeText(value) {
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? 'Unknown date' : d.toLocaleString(undefined, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' });
+}
+const timeZoneName = () => Intl.DateTimeFormat().resolvedOptions().timeZone || 'local time';
+function localDateTimeValue(value) {
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return '';
+  const pad = n => String(n).padStart(2, '0');
+  // Seconds are kept so saving an untouched prefilled value cannot round them
+  // away; the input carries step="1" to accept them.
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
 function relativeDate(value) {
   const ms = Date.now() - new Date(value).getTime();
   if (!Number.isFinite(ms)) return 'Unknown date';
@@ -268,6 +282,7 @@ function writeUrl(replace = false) {
   if (state.n > BATCH) p.set('n', String(state.n));
   if (state.sort === 'name') p.set('sort', state.sort);
   history[replace ? 'replaceState' : 'pushState'](null, '', '/' + (p.size ? '?' + p : ''));
+  refreshViewerLinks();
 }
 function closeNavigation() {
   document.querySelector('.sidebar').classList.remove('expanded');
@@ -497,6 +512,18 @@ async function loadPage() {
 function viewerUrl(item) {
   const query = new URLSearchParams({ returnTo: location.pathname + location.search });
   return `/v/${encodeURIComponent(item.id)}?${query}`;
+}
+// Links are built while rendering, so "Show more" must rewrite the returnTo on
+// rows already on the page; Back then restores the batches the URL records.
+function refreshViewerLinks() {
+  for (const anchor of document.querySelectorAll('#content a[href^="/v/"]')) {
+    try {
+      const href = new URL(anchor.getAttribute('href'), location.origin);
+      if (href.origin !== location.origin) continue;
+      href.searchParams.set('returnTo', location.pathname + location.search);
+      anchor.setAttribute('href', href.pathname + href.search);
+    } catch { /* A malformed href is left as it is. */ }
+  }
 }
 let restoreScroll = null;
 function rememberLibraryNavigation() {
@@ -792,14 +819,14 @@ function openPerson(p) {
   openDialog(personName(p) || p.email, details, actions);
 }
 // Each audit row as a sentence. The audit keeps the actor; artifact and account targets when recorded.
-const EVENT_KIND = { archive: 'artifacts', restore: 'artifacts', rename: 'artifacts', transfer: 'artifacts', sharing_change: 'artifacts', invite: 'people', invite_withdrawn: 'people', account_disabled: 'people', account_active: 'people', credential_create: 'credentials', credential_revoke: 'credentials', sign_in: 'sign-ins' };
+const EVENT_KIND = { archive: 'artifacts', restore: 'artifacts', rename: 'artifacts', transfer: 'artifacts', sharing_change: 'artifacts', expiration: 'artifacts', invite: 'people', invite_withdrawn: 'people', account_disabled: 'people', account_active: 'people', credential_create: 'credentials', credential_revoke: 'credentials', sign_in: 'sign-ins' };
 const EVENT_GLYPH = { artifacts: '▤', people: '✉', credentials: '⚿', 'sign-ins': '→', account_disabled: '⊘', account_active: '✓' };
 function eventSentence(e) {
   const artifact = e.artifactId ? node('a', { href: viewerUrl({ id: e.artifactId }), textContent: e.artifactTitle || 'an artifact' }) : (e.artifactTitle || 'an artifact');
   const target = e.target || '';
   const verbs = {
     invite: ['invited ', target || 'someone'], invite_withdrawn: ['withdrew the invitation to ', target || 'someone'], archive: ['archived ', artifact], restore: ['restored ', artifact], rename: ['renamed ', artifact],
-    transfer: ['transferred ', artifact], sharing_change: ['changed who can open ', artifact], sign_in: ['signed in'],
+    transfer: ['transferred ', artifact], sharing_change: ['changed who can open ', artifact], expiration: ['changed the expiration of ', artifact], sign_in: ['signed in'],
     account_disabled: ['suspended ', target || 'an account'], account_active: ['reactivated ', target || 'an account'],
     credential_create: ['created an API credential'], credential_revoke: ['revoked an API credential'],
   };
@@ -942,7 +969,7 @@ function openManage(item) {
     // Your own access is only news when the artifact is someone else's.
     ...(item.canManage ? [] : [['Access', item.permission === 'write' ? 'Can edit' : 'Can view']]), ['Status', item.archived ? 'Archived' : 'Active'],
     ['Updated', dateText(item.updatedAt)], ['Created', dateText(item.createdAt)],
-    ['Expires', item.expiresAt ? dateText(item.expiresAt) : 'Does not expire'],
+    ['Expires', item.expiresAt ? dateTimeText(item.expiresAt) : 'Does not expire'],
   ]) details.append(node('dt', { textContent: label }), node('dd', { textContent: value }));
   const actions = node('div', { className: 'manage-actions' },
     node('a', { className: 'button-link', href: viewerUrl(item), textContent: 'Open artifact and history' }),
@@ -952,6 +979,7 @@ function openManage(item) {
     })));
   if (item.canManage) {
     actions.append(button('Manage access', () => openSharing(item)), button('Rename', () => openRename(item)),
+      button('Expiration', () => openExpiration(item)),
       button(item.archived ? 'Restore to library' : 'Archive artifact', () => confirmAction(item.archived ? 'Restore artifact?' : 'Archive artifact?',
         item.archived ? 'This artifact will return to the library. Its existing sharing stays the same.' : 'This hides the artifact from the default library. Existing links and named access will still work. You can restore it from Archived; the instance owner can also restore it from Every artifact.',
         item.archived ? 'Restore artifact' : 'Archive artifact', async () => {
@@ -974,6 +1002,49 @@ function openRename(item) {
   });
   openDialog('Rename artifact', form);
   title.focus(); title.select();
+}
+function openExpiration(item) {
+  const form = node('form');
+  const mode = node('select', { id: 'expiration-mode' },
+    node('option', { value: 'date', textContent: 'Expire on a date' }), node('option', { value: 'never', textContent: 'Never expires' }));
+  const date = node('input', { id: 'expiration-date', type: 'datetime-local', step: '1', required: true });
+  if (item.expiresAt) date.value = localDateTimeValue(item.expiresAt);
+  mode.value = item.expiresAt ? 'date' : 'never';
+  // The label belongs to the field: hiding only the input would leave it
+  // orphaned above an empty gap, so the whole wrapper goes with it.
+  const dateField = node('div', { id: 'expiration-date-field' },
+    node('label', { htmlFor: 'expiration-date', textContent: 'Date and time' }), date);
+  const showDate = (focus) => {
+    const never = mode.value === 'never';
+    dateField.hidden = never;
+    date.disabled = never;
+    if (!never && focus) date.focus();
+  };
+  mode.addEventListener('change', () => showDate(true));
+  formField(form, 'Expiration', mode);
+  showDate(false);
+  form.append(dateField);
+  form.append(node('p', { className: 'explain', id: 'expiration-zone', textContent: `Times use this browser's time zone (${timeZoneName()}); the artifact expires at that instant everywhere. Expiration removes the artifact and its history from the library and stops its links. It does not unpublish independent public copies.` }));
+  const current = item.expiresAt ? `Currently expires ${dateTimeText(item.expiresAt)}.` : 'This artifact does not expire.';
+  form.append(node('p', { className: 'muted', textContent: current }));
+  submit(form, 'Save expiration', async () => {
+    let expiresAt;
+    if (mode.value === 'never') expiresAt = null;
+    else {
+      if (!date.value) throw new Error('Choose a date and time, or choose Never expires.');
+      const chosen = new Date(date.value);
+      if (Number.isNaN(chosen.getTime())) throw new Error('Choose a valid date and time.');
+      if (chosen.getTime() <= Date.now()) throw new Error('Choose a time in the future. Past dates would expire the artifact at once.');
+      expiresAt = chosen.toISOString();
+    }
+    const result = await api(`/api/artifacts/${encodeURIComponent(item.id)}/manage`, { method: 'PATCH', body: { expiresAt } });
+    // A 202 means the deadline is stored but the library has not caught up yet:
+    // saying it was saved would claim more than the server confirmed.
+    if (result?.expirationPending) notify('Expiration update accepted. The library is still updating; refresh shortly.');
+    else notify(expiresAt ? 'Expiration saved.' : 'Expiration cleared. This artifact will not expire.');
+  });
+  openDialog('Expiration', form);
+  if (mode.value === 'date') { date.focus(); date.select?.(); } else mode.focus();
 }
 async function openSharing(item) {
   const seq = openDialog('Manage access', node('p', { className: 'muted', textContent: 'Loading people and permissions…' }));

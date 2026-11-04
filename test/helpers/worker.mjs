@@ -3,6 +3,7 @@
 // kept in the test's directory.
 
 import { spawn, execFileSync } from 'node:child_process';
+import { createServer } from 'node:net';
 import { join } from 'node:path';
 
 const root = new URL('../..', import.meta.url).pathname;
@@ -12,9 +13,32 @@ export const haveStockFossil = (() => {
   try { execFileSync(stockFossil, ['version'], { stdio: 'ignore' }); return true; } catch { return false; }
 })();
 
+/** Whether 127.0.0.1:port can be bound right now; a leftover Worker would collide. */
+function portFree(port) {
+  return new Promise(resolve => {
+    const probe = createServer();
+    probe.once('error', () => resolve(false));
+    probe.once('listening', () => probe.close(() => resolve(true)));
+    probe.listen(port, '127.0.0.1');
+  });
+}
+
+/** A port in the test range that nothing holds. A caller may name one to match an origin. */
+export async function freePort(wanted) {
+  if (wanted !== undefined) {
+    if (!(await portFree(wanted))) throw new Error(`port ${wanted} is already in use`);
+    return wanted;
+  }
+  for (let i = 0; i < 100; i++) {
+    const port = 20000 + Math.floor(Math.random() * 2000);
+    if (await portFree(port)) return port;
+  }
+  throw new Error('no free port in the test range');
+}
+
 /** Start wrangler dev with `vars`; resolves to { base, owner, stop } once /healthz answers. */
-export async function startWorker(work, vars = {}) {
-  const port = 20000 + Math.floor(Math.random() * 2000);
+export async function startWorker(work, vars = {}, { port: wanted } = {}) {
+  const port = await freePort(wanted);
   const base = `http://127.0.0.1:${port}`;
   const owner = 'worker-helper-owner-token';
   const varArgs = Object.entries({ BEARER_TOKEN: owner, ...vars }).flatMap(([k, v]) => ['--var', `${k}:${v}`]);

@@ -85,6 +85,9 @@ export class Registry extends DurableObject<Env> {
     if (!sql.exec<{ name: string }>('PRAGMA table_info(activity)').toArray().some(c => c.name === 'target')) sql.exec('ALTER TABLE activity ADD COLUMN target TEXT');
     if (!cols.some(c => c.name === 'archived')) sql.exec('ALTER TABLE artifacts ADD COLUMN archived INTEGER NOT NULL DEFAULT 0');
     if (!cols.some(c => c.name === 'icon')) sql.exec("ALTER TABLE artifacts ADD COLUMN icon TEXT NOT NULL DEFAULT 'document'");
+    // The newest expiration revision the Repo has projected here. A repeated
+    // projection of the same revision is a no-op, and an older one is refused.
+    if (!cols.some(c => c.name === 'expiration_revision')) sql.exec('ALTER TABLE artifacts ADD COLUMN expiration_revision INTEGER NOT NULL DEFAULT 0');
     sql.exec(`CREATE INDEX IF NOT EXISTS artifacts_name_order ON artifacts(title COLLATE NOCASE,id);
       CREATE INDEX IF NOT EXISTS artifacts_library_order ON artifacts(updated_at DESC,id DESC);
       CREATE INDEX IF NOT EXISTS artifacts_owner ON artifacts(owner_id,archived,updated_at DESC,id DESC);
@@ -560,6 +563,50 @@ export class Registry extends DurableObject<Env> {
       if (changes.ownerId) sql.exec('DELETE FROM grants WHERE artifact_id=?',id);
     });
   }
+  /**
+   * The Repo's projection of a newer expiration intent. The revision is a CAS:
+   * a repeat of a revision already applied is acknowledged without changing
+   * anything or auditing again (the first reply may have been lost), and an
+   * older revision is refused, so a delayed retry cannot undo a newer
+   * deadline. The audit entry is written once, with the same acceptance.
+   * Returns whether this call was accepted, refused as stale, or found no row
+   * (the artifact may have been deleted, which a projection must never
+   * reinsert).
+   */
+  async projectExpiration(input: { id: string; expiresAt: number | null; revision: number; actor: string; title: string | null }): Promise<'applied' | 'stale' | 'missing'> {
+    // Test-only: make the projection fail so convergence through the Repo's
+    // retry alarm can be observed. 'throw' fails every call; 'fail-once' fails
+    // the first after the flag was set, then lets the retry through. Unset in
+    // production; wrangler.jsonc declares it blank and deploy.sh blanks it again.
+    const env = this.env as unknown as Record<string, string | undefined>;
+    if (env.TEST_EXPIRATION_FAULT === 'throw') throw new Error('injected expiration projection failure');
+    if (env.TEST_EXPIRATION_FAULT === 'fail-once' && !(await this.ctx.storage.get<boolean>('expiration-fault-used'))) {
+      await this.ctx.storage.put('expiration-fault-used', true);
+      throw new Error('injected expiration projection failure');
+    }
+    // Test-only: commit the first projection, then lose its reply, so the Repo
+    // retries the same revision. Distinct from failing before the write.
+    const dropAck = env.TEST_EXPIRATION_FAULT === 'drop-ack-once' && !(await this.ctx.storage.get<boolean>('expiration-ack-dropped'));
+    if (dropAck) await this.ctx.storage.put('expiration-ack-dropped', true);
+    const outcome = this.ctx.storage.transactionSync(() => {
+      const sql = this.ctx.storage.sql;
+      const row = sql.exec<{ expiration_revision: number }>('SELECT expiration_revision FROM artifacts WHERE id=?',input.id).toArray()[0];
+      if (!row) return 'missing';
+      // Equal means an earlier attempt committed here but its reply was lost:
+      // acknowledge it again without touching the row or auditing twice. Only
+      // a strictly older revision is stale.
+      if (input.revision < row.expiration_revision) return 'stale';
+      if (input.revision === row.expiration_revision) return 'applied';
+      sql.exec('UPDATE artifacts SET expires_at=?, expiration_revision=? WHERE id=?',input.expiresAt,input.revision,input.id);
+      // Clearing an expiration also cancels any old deadline the library still
+      // filters on; the row write above does that, and the audit says so once.
+      if (input.actor) sql.exec('INSERT INTO activity (id,actor_id,action,artifact_id,artifact_title,created_at,target) VALUES (?,?,?,?,?,?,?)',
+        genId(),input.actor,'expiration',input.id,input.title,now(),null);
+      return 'applied';
+    });
+    if (dropAck) throw new Error('injected lost projection acknowledgement');
+    return outcome;
+  }
   async star(id: string, userId: string, starred: boolean): Promise<void> {
     this.ctx.storage.sql.exec(starred ? 'INSERT OR IGNORE INTO stars VALUES (?,?)' : 'DELETE FROM stars WHERE artifact_id=? AND user_id=?',id,userId);
   }
@@ -626,9 +673,42 @@ export class Registry extends DurableObject<Env> {
 }
 /** The audit actions each Activity filter shows. */
 export const ACTIVITY_KINDS: Record<string, string[]> = {
-  artifacts: ['archive','restore','rename','transfer','sharing_change'],
+  artifacts: ['archive','restore','rename','transfer','sharing_change','expiration'],
   people: ['invite','invite_withdrawn','account_disabled','account_active'],
   credentials: ['credential_create','credential_revoke'],
   'sign-ins': ['sign_in'],
 };
+/**
+ * Validate a requested expiration (`expiresAt` on the manage endpoint) against
+ * the same ceiling creation uses. Returns the unix-seconds value, null for
+ * "never expires", or an error message. Only an ISO 8601 UTC instant with a
+ * `Z` suffix is accepted, so a date without a timezone cannot be read as the
+ * server's local time.
+ */
+export function parseExpiration(value: unknown, maxTtl: number, secondsNow: number): { expiresAt: number | null } | { error: string } {
+  if (value === null) return { expiresAt: null };
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?Z$/.test(value)) {
+    return { error: 'expiresAt must be an ISO 8601 UTC date such as 2026-12-31T23:59:00Z, or null for no expiration' };
+  }
+  const ms = Date.parse(value);
+  if (!Number.isFinite(ms)) return { error: 'expiresAt is not a valid date' };
+  // Date.parse rolls impossible days forward (Feb 31 becomes Mar 2), so a date
+  // is only accepted when every component survives the round trip.
+  const d = new Date(ms);
+  const [year, month, day] = value.slice(0, 10).split('-').map(Number);
+  const [hour, minute] = value.slice(11, 16).split(':').map(Number);
+  const second = value.length > 19 ? Number(value.slice(17, 19)) : 0;
+  if (d.getUTCFullYear() !== year || d.getUTCMonth() + 1 !== month || d.getUTCDate() !== day
+    || d.getUTCHours() !== hour || d.getUTCMinutes() !== minute || d.getUTCSeconds() !== second) {
+    return { error: 'expiresAt is not a real calendar date and time' };
+  }
+  const expiresAt = Math.floor(ms / 1000);
+  if (expiresAt <= secondsNow) return { error: 'Expiration must be in the future' };
+  if (!Number.isSafeInteger(maxTtl) || maxTtl <= 0) return { error: 'Expiration is not configured on this instance' };
+  if (expiresAt > secondsNow + maxTtl) {
+    return { error: `Expiration must be within ${Math.floor(maxTtl / 86400)} days` };
+  }
+  return { expiresAt };
+}
+
 function toEntry(r: Row): Entry { return { id:r.id,slug:r.slug,title:r.title,createdAt:r.created_at,updatedAt:r.updated_at,expiresAt:r.expires_at,tip:r.tip,ownerId:r.owner_id ?? 'instance-owner',archived:!!r.archived,icon:r.icon ?? 'document' }; }

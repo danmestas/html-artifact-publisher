@@ -6,7 +6,7 @@
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn, execFile, execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, readdirSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash, createHmac, randomBytes } from 'node:crypto';
@@ -115,6 +115,16 @@ function fossil(...args) {
   } catch (e) {
     return { ok: false, out: String(e.stderr) + String(e.stdout) };
   }
+}
+
+// Keep the event loop free during large syncs: otherwise an idle HTTP socket
+// can close while execFileSync blocks, then get reused before its close is read.
+function fossilAsync(...args) {
+  return new Promise(resolve => {
+    execFile(fsclient, args, { cwd: work, encoding: 'utf8', timeout: 60000 }, (error, stdout, stderr) => {
+      resolve({ ok: !error, out: error ? String(stderr) + String(stdout) : stdout });
+    });
+  });
 }
 
 function cli(...args) {
@@ -245,9 +255,9 @@ test('multi-file asset updates, history and sync remain usable', async () => {
   }
   assert.equal((await api(`/api/artifacts/${a.id}/files/index.html?at=${a.tip}`, { token: a.read })).text, '<h1>before assets</h1>');
   const clone = join(work, `${a.id}-assets.fossil`);
-  const cloned = fossil('clone', a.cloneUrl, clone);
+  const cloned = await fossilAsync('clone', a.cloneUrl, clone);
   assert.ok(cloned.ok, cloned.out);
-  const pushed = fossil('push', clone, a.cloneUrl, 'index.html', '<h1>after asset sync</h1>', 'Asset sync recovery');
+  const pushed = await fossilAsync('push', clone, a.cloneUrl, 'index.html', '<h1>after asset sync</h1>', 'Asset sync recovery');
   assert.ok(pushed.ok, pushed.out);
   const bundle = await api(`/api/artifacts/${a.id}/bundle`, { token: a.read });
   assert.equal(bundle.status, 200, bundle.text);

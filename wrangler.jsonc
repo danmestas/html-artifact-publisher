@@ -51,6 +51,15 @@
     "EMAIL_FROM": "",
     // Never enable outside an isolated localhost test server.
     "TEST_MAIL_TRANSPORT": "",
+    // Fault-injection hooks for the expiration convergence tests. Blank in every
+    // deployed configuration; deploy.sh blanks them again on its command line.
+    "TEST_EXPIRATION_FAULT": "",
+    "TEST_EXPIRATION_RETRY_MS": "",
+    "TEST_EXPIRATION_HOLD_REVISION": "",
+    "TEST_EXPIRATION_HOLD_MS": "",
+    "TEST_EXPIRATION_STATE": "",
+    "TEST_EXPIRATION_SETTLE_MS": "",
+    "TEST_EXPIRATION_ALARM_HOLD_MS": "",
     // Maximum TTL in seconds (30 days)
     "MAX_TTL_SECONDS": "2592000",
     // Default TTL when not specified (7 days)

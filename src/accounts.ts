@@ -1,6 +1,6 @@
 import type { Account } from './registry';
 import type { Caller } from './repo';
-import { ACTIVITY_KINDS, LOGIN_TTL } from './registry';
+import { ACTIVITY_KINDS, LOGIN_TTL, parseExpiration } from './registry';
 import { genId, genToken, isoOrNull, sha256hex, timingSafeEqual } from './util';
 
 export const registry = (env: Env) => env.REGISTRY.getByName('registry');
@@ -92,7 +92,7 @@ const limitOf = (url: URL) => Math.min(100,Math.max(1,Number.parseInt(url.search
 /** Account routes; null leaves the existing artifact/sync API in charge. */
 export async function accountRoutes(req: Request, env: Env): Promise<Response | null> {
   const url = new URL(req.url), path = url.pathname, method = req.method;
-  if (!/^\/api\/(session$|auth\/|library$|admin\/|people(?:\/|$)|invitations$|credentials(?:\/|$)|artifacts\/[^/]+\/(sharing|manage|star)$)/.test(path)) return null;
+  if (!/^\/api\/(session$|auth\/|library$|admin\/|people(?:\/|$)|invitations$|credentials(?:\/|$)|artifacts\/[^/]+\/(sharing|manage|star|expiration-state)$)/.test(path)) return null;
   const r = registry(env); const actor = await identity(req,env);
   if (path==='/api/session' && method==='GET') return json({ user:actor.user ? publicUser(actor.user) : null });
   if (path==='/api/auth/request' && method==='POST') {
@@ -192,6 +192,17 @@ export async function accountRoutes(req: Request, env: Env): Promise<Response | 
   }
   const credential = /^\/api\/credentials\/([A-Za-z0-9_-]{1,64})$/.exec(path);
   if (credential && method==='DELETE') { await r.revoke(user.id,credential[1]!); await r.audit(user.id,'credential_revoke'); return json({ ok:true }); }
+  // Test-only read of the Repo's durability state, so a test can see a pending
+  // intent and its armed alarm while a projection is still outstanding. The
+  // hook variable is blank in every deployed configuration.
+  const state = /^\/api\/artifacts\/([A-Za-z0-9_-]{1,64})\/expiration-state$/.exec(path);
+  if (state && method==='GET') {
+    if (!(env as unknown as Record<string,string|undefined>).TEST_EXPIRATION_STATE) return error('Not found',404);
+    const id = await r.resolve(state[1]!); if (!id) return error('Not found',404);
+    const entry = await r.get(id); const permission = await r.permission(id,user);
+    if (!permission || !entry || !(admin || entry.ownerId===user.id)) return error('Not found',404);
+    return json(await env.REPO.getByName(id).expirationState());
+  }
   const artifact = /^\/api\/artifacts\/([A-Za-z0-9_-]{1,64})\/(sharing|manage|star)$/.exec(path);
   if (artifact) {
     const id = await r.resolve(artifact[1]!); if (!id) return error('Not found',404);
@@ -214,7 +225,7 @@ export async function accountRoutes(req: Request, env: Env): Promise<Response | 
       }
     }
     if (artifact[2]==='manage' && method==='PATCH') {
-      const b = await smallBody(req); if (!b || !Object.keys(b).length || Object.keys(b).some(k => !['archived','ownerId','title'].includes(k))) return error('Invalid management request');
+      const b = await smallBody(req); if (!b || !Object.keys(b).length || Object.keys(b).some(k => !['archived','ownerId','title','expiresAt'].includes(k))) return error('Invalid management request');
       if (b.archived!==undefined && typeof b.archived!=='boolean') return error('archived must be boolean');
       if (b.title!==undefined && (typeof b.title!=='string' || !b.title.trim() || b.title.length>300)) return error('Title must have 1–300 characters');
       if (b.ownerId!==undefined) {
@@ -222,10 +233,39 @@ export async function accountRoutes(req: Request, env: Env): Promise<Response | 
         const target = typeof b.ownerId==='string' ? await r.account(b.ownerId) : null;
         if (!target || target.status!=='active') return error('New owner must be active');
       }
+      // Omitted leaves the current expiration. Repo owns the deadline;
+      // Registry projects it for the library and access checks.
+      const requested = b.expiresAt===undefined ? undefined : parseExpiration(b.expiresAt, Number.parseInt(env.MAX_TTL_SECONDS,10), Math.floor(Date.now()/1000));
+      if (requested && 'error' in requested) return error(requested.error);
       const changes = b as { archived?: boolean; ownerId?: string; title?: string };
-      if (changes.title) await env.REPO.getByName(id).rename(changes.title.trim());
-      await r.manage(id,{ ...changes,...(changes.title ? { title:changes.title.trim() } : {}) });
-      await r.audit(user.id,changes.ownerId ? 'transfer' : changes.archived===true ? 'archive' : changes.archived===false ? 'restore' : 'rename',id,entry.title); return json({ ok:true });
+      const renamed = changes.title ? changes.title.trim() : null;
+      // Expiration is owned by the Repo: it persists the deadline and the
+      // revision naming this intent, then projects it to the library row
+      // itself. A failed projection stays pending there and its alarm retries,
+      // so convergence is scheduled rather than assumed.
+      //
+      // It runs before the other changes so its answer is not a partial
+      // success: a Repo that is already gone must answer not found without a
+      // rename or archive having landed first. The audit title is the one the
+      // artifact will have once this request finishes.
+      let expiration = null as null | { projected: boolean; found: boolean };
+      if (requested) expiration = await env.REPO.getByName(id).setExpiration(requested.expiresAt,user.id,renamed ?? entry.title);
+      if (expiration && !expiration.found) return error('Not found',404);
+      if (renamed) await env.REPO.getByName(id).rename(renamed);
+      await r.manage(id,{ ...changes,...(renamed ? { title:renamed } : {}) });
+      // Each change a request makes is audited under its own kind; a combined
+      // request must not lose the expiration to a rename or archive. The
+      // expiration entry comes from the Repo's accepted projection instead, so
+      // a retry cannot write it twice.
+      const audited: [string, string | null][] = [];
+      if (renamed) audited.push(['rename', renamed]);
+      if (changes.archived !== undefined) audited.push([changes.archived ? 'archive' : 'restore', entry.title]);
+      if (changes.ownerId) audited.push(['transfer', entry.title]);
+      for (const [action, title] of audited) await r.audit(user.id, action, id, title);
+      // Report the projection honestly: the deadline is durable either way, but
+      // a caller should not be told the library agrees when it does not yet.
+      if (expiration && !expiration.projected) return json({ ok:true, expirationPending:true },202);
+      return json({ ok:true });
     }
   }
   return error('Method not allowed',405);

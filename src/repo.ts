@@ -89,7 +89,9 @@ export class Repo extends DurableObject<Env> {
   }
 
   private ensureTable(): void {
-    if (this.tableReady) return;
+    // A Durable Object may be evicted between calls while its storage lives
+    // on, so a cached "ready" is only trusted while the table is really there.
+    if (this.tableReady) { try { this.ctx.storage.sql.exec(`SELECT 1 FROM _artifact LIMIT 0`); return; } catch { /* rebuilt below */ } }
     const sql = this.ctx.storage.sql;
     sql.exec(`CREATE TABLE IF NOT EXISTS _artifact (
       id TEXT NOT NULL, title TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER,
@@ -101,6 +103,13 @@ export class Repo extends DurableObject<Env> {
       sql.exec(`ALTER TABLE _artifact ADD COLUMN comment_hash TEXT NOT NULL DEFAULT ''`);
       sql.exec(`ALTER TABLE _artifact ADD COLUMN comment_token TEXT NOT NULL DEFAULT ''`);
     }
+    // Expiration is this object's authority; the revision names the newest
+    // intent so a stale Registry projection can never overwrite a newer one.
+    const artifactCols = sql.exec<{ name: string }>('PRAGMA table_info(_artifact)').toArray().map(c => c.name);
+    if (!artifactCols.includes('expiration_revision')) sql.exec(`ALTER TABLE _artifact ADD COLUMN expiration_revision INTEGER NOT NULL DEFAULT 0`);
+    if (!artifactCols.includes('projected_revision')) sql.exec(`ALTER TABLE _artifact ADD COLUMN projected_revision INTEGER NOT NULL DEFAULT 0`);
+    if (!artifactCols.includes('pending_actor')) sql.exec(`ALTER TABLE _artifact ADD COLUMN pending_actor TEXT`);
+    if (!artifactCols.includes('pending_title')) sql.exec(`ALTER TABLE _artifact ADD COLUMN pending_title TEXT`);
     this.tableReady = true;
   }
 
@@ -273,16 +282,175 @@ export class Repo extends DurableObject<Env> {
     this.ctx.storage.sql.exec(`UPDATE _artifact SET title = ?`, title);
   }
 
+  /**
+   * Store a new expiration (unix seconds, or null for none) and make the
+   * alarm agree. The Repo is the authority: the deadline and the revision
+   * that names this intent are written here first, so a failed Registry
+   * projection loses nothing and is retried by this object's own alarm.
+   */
+  async setExpiration(expiresAt: number | null, actor: string, title: string | null): Promise<{ projected: boolean; found: boolean }> {
+    // Test-only: hold the call after it was authorized but before it looks at
+    // the row, so a request can cross the deadline. Unset in production.
+    const env = this.env as unknown as Record<string, string | undefined>;
+    if (env.TEST_EXPIRATION_SETTLE_MS) await new Promise(resolve => setTimeout(resolve, Number(env.TEST_EXPIRATION_SETTLE_MS)));
+    // After the wait, not before: the alarm may have destroyed this repository
+    // meanwhile, and the table has to exist before it can be asked about.
+    this.ensureTable();
+    const now = Math.floor(Date.now() / 1000);
+    const revision = this.ctx.storage.transactionSync(() => {
+      const sql = this.ctx.storage.sql;
+      const row = sql.exec<{ expiration_revision: number; expires_at: number | null }>(`SELECT expiration_revision, expires_at FROM _artifact LIMIT 1`).toArray()[0];
+      if (!row) return null;
+      // A request authorized before the deadline can arrive after it, ahead of
+      // the alarm that destroys this repository. Writing then would revive an
+      // expired artifact, so the row is checked for expiry in the same
+      // transaction that would change it.
+      if (row.expires_at != null && row.expires_at <= now) return null;
+      sql.exec(`UPDATE _artifact SET expires_at = ?, expiration_revision = expiration_revision + 1, pending_actor = ?, pending_title = ?`, expiresAt, actor, title);
+      return row.expiration_revision + 1;
+    });
+    if (revision == null) return { projected: false, found: false };
+    // Arm the wake before the external call: if this isolate dies while the
+    // Registry is being asked, the durable intent still has an alarm to retry
+    // it. Re-evaluated after the answer so a confirmed ack cancels the retry.
+    await this.scheduleAlarm();
+    // Test-only: die here, after the intent is durable and the alarm is armed,
+    // but before the Registry is ever asked. Convergence must then come from
+    // the Repo's own alarm alone; with a wake armed only after the projection
+    // this leaves nothing to run. Unset in production.
+    if ((this.env as unknown as Record<string, string | undefined>).TEST_EXPIRATION_FAULT === 'crash-before-projection') {
+      throw new Error('injected crash before projection');
+    }
+    const projected = await this.project(revision);
+    await this.scheduleAlarm();
+    return { projected, found: true };
+  }
+
+  /** How often a pending Registry projection is retried (ms). */
+  private retryMs(): number {
+    return Number((this.env as unknown as Record<string, string | undefined>).TEST_EXPIRATION_RETRY_MS || 0) || 2000;
+  }
+
+  /**
+   * Test-only view of the durability state: whether an intent is still owed to
+   * the Registry, and when the one alarm will next run. Blank in production;
+   * wrangler.jsonc and deploy.sh blank the flag that reaches it.
+   */
+  async expirationState(): Promise<{ pending: boolean; alarmAt: number | null }> {
+    this.ensureTable();
+    if (!this.ctx.storage.sql.exec(`SELECT 1 FROM _artifact`).toArray().length) return { pending: false, alarmAt: null };
+    return { pending: this.pending(), alarmAt: await this.ctx.storage.getAlarm() };
+  }
+
+  /**
+   * Push the current desired deadline to the Registry. Only the revision that
+   * is still current is acknowledged, so an older call can never clear a newer
+   * intent; a retry of the same revision is idempotent.
+   */
+  private async project(revision: number): Promise<boolean> {
+    const row = this.ctx.storage.sql
+      .exec<{ id: string; expires_at: number | null; pending_actor: string | null; pending_title: string | null }>(
+        `SELECT id, expires_at, pending_actor, pending_title FROM _artifact LIMIT 1`,
+      ).toArray()[0];
+    if (!row) return false;
+    // Test-only: widen the window between reading this intent and projecting
+    // it, so an older call can be made to arrive after a newer one. Unset in
+    // production; wrangler.jsonc declares it blank and deploy.sh blanks it.
+    const env = this.env as unknown as Record<string, string | undefined>;
+    if (env.TEST_EXPIRATION_HOLD_REVISION === String(revision)) {
+      await new Promise(resolve => setTimeout(resolve, Number(env.TEST_EXPIRATION_HOLD_MS) || 1000));
+    }
+    let outcome: 'applied' | 'stale' | 'missing';
+    try {
+      outcome = await this.env.REGISTRY.getByName('registry').projectExpiration({
+        id: row.id, expiresAt: row.expires_at, revision, actor: row.pending_actor ?? '', title: row.pending_title,
+      });
+    } catch {
+      // The Registry could not be reached: the intent stays pending here and
+      // the alarm retries it. The caller is told the projection is unconfirmed.
+      return false;
+    }
+    if (outcome === 'missing') {
+      // Nothing to project to: the artifact is gone from the library, so the
+      // intent is moot and must not wake this object forever.
+      this.ctx.storage.sql.exec(`UPDATE _artifact SET projected_revision = expiration_revision WHERE expiration_revision <= ?`, revision);
+      return true;
+    }
+    if (outcome === 'applied') {
+      // Clear only if this is still the newest intent; a newer one stays pending.
+      this.ctx.storage.sql.exec(`UPDATE _artifact SET projected_revision = ? WHERE expiration_revision = ?`, revision, revision);
+      return true;
+    }
+    // Refused as stale: a newer intent has superseded this one. If that newer
+    // intent is already projected, the two stores agree and nothing is pending.
+    return !this.pending();
+  }
+
+  private pending(): boolean {
+    const row = this.ctx.storage.sql
+      .exec<{ expiration_revision: number; projected_revision: number }>(`SELECT expiration_revision, projected_revision FROM _artifact LIMIT 1`)
+      .toArray()[0];
+    return !!row && row.projected_revision < row.expiration_revision;
+  }
+
+  /** Arm the one alarm at the earliest of the deadline and any retry it owes. */
+  private async scheduleAlarm(): Promise<void> {
+    this.ensureTable();
+    const row = this.ctx.storage.sql
+      .exec<{ expires_at: number | null }>(`SELECT expires_at FROM _artifact LIMIT 1`).toArray()[0];
+    if (!row) { await this.ctx.storage.deleteAlarm(); return; }
+    const times: number[] = [];
+    if (row.expires_at != null) times.push(row.expires_at * 1000);
+    if (this.pending()) times.push(Date.now() + this.retryMs());
+    if (!times.length) await this.ctx.storage.deleteAlarm();
+    else await this.ctx.storage.setAlarm(Math.min(...times));
+  }
+
   async destroy(): Promise<void> {
+    // The table goes with the storage, so a call that arrives afterwards must
+    // build it again and find no row rather than query a missing table.
+    this.tableReady = false;
     await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
   }
 
-  /** Expiry. */
+  /**
+   * Expiry and projected-intent retry share the one alarm. The row is the
+   * truth: an alarm queued before an extension, shortening or clearing only
+   * reschedules, so it can never destroy a still-live artifact, and an alarm
+   * for a repository that is already gone only cancels itself.
+   */
   async alarm(): Promise<void> {
+    // Test-only: hold the alarm before it reads the row, so a request can
+    // arrive after the deadline while the expired row still exists. Unset in
+    // production.
+    const env = this.env as unknown as Record<string, string | undefined>;
+    if (env.TEST_EXPIRATION_ALARM_HOLD_MS) await new Promise(resolve => setTimeout(resolve, Number(env.TEST_EXPIRATION_ALARM_HOLD_MS)));
     this.ensureTable();
-    const id = this.ctx.storage.sql.exec<{ id: string }>(`SELECT id FROM _artifact`).toArray()[0]?.id;
-    await this.destroy();
-    if (id) await this.env.REGISTRY.getByName('registry').remove(id);
+    let row = this.ctx.storage.sql
+      .exec<{ id: string; expires_at: number | null; expiration_revision: number; projected_revision: number }>(
+        `SELECT id, expires_at, expiration_revision, projected_revision FROM _artifact LIMIT 1`,
+      ).toArray()[0];
+    if (!row) { await this.ctx.storage.deleteAlarm(); return; }
+    if (row.projected_revision < row.expiration_revision) {
+      await this.project(row.expiration_revision);
+      row = this.ctx.storage.sql
+        .exec<{ id: string; expires_at: number | null; expiration_revision: number; projected_revision: number }>(
+          `SELECT id, expires_at, expiration_revision, projected_revision FROM _artifact LIMIT 1`,
+        ).toArray()[0];
+      if (!row) { await this.ctx.storage.deleteAlarm(); return; }
+    }
+    const deadline = row.expires_at != null ? row.expires_at * 1000 : null;
+    if (deadline != null && deadline <= Date.now()) {
+      // Remove the library row before this object's storage: the call is
+      // idempotent, and a failure leaves the alarm retryable rather than the
+      // library pointing at an artifact whose repository is gone.
+      await this.env.REGISTRY.getByName('registry').remove(row.id);
+      await this.destroy();
+      return;
+    }
+    // Nothing is due yet: the deadline lies ahead, or there is none and only a
+    // retry it already attempted is still owed.
+    await this.scheduleAlarm();
   }
 }

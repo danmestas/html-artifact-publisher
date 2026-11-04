@@ -34,7 +34,12 @@ export async function parityQA({base,api,owner,browserOwner,member,run,evaluate,
     run('set','viewport','1440','1000');run('open',base+'/?q=Parity+browser&sort=name');wait('.artifact-title');wait('.artifact-preview iframe');run('wait','--load','networkidle');
     assert.deepEqual(evaluate('[...document.querySelectorAll(".artifact-title")].map(e=>e.textContent)'),['Parity browser Alpha','Parity browser Beta']);
     assert.deepEqual(evaluate('[...document.querySelectorAll(".access-badge")].map(e=>e.textContent)'),['Shared by you','Private']);
-    assert.match(evaluate('document.getElementById("result-status").textContent'),/2 of 2/);
+    // The summary line describes the list; the pagination line still carries the exact shown/total count.
+    const counts=JSON.parse(evaluate('JSON.stringify({summary:document.getElementById("result-status").textContent,shown:document.getElementById("shown").textContent,rows:document.querySelectorAll(".artifact-title").length,paginationHidden:document.getElementById("pagination").hidden})'));
+    assert.equal(counts.rows,2,'both matching artifacts are rendered');
+    assert.equal(counts.summary,'2 artifacts · Name A–Z','the summary names the filtered total and the active sort');
+    assert.equal(counts.shown,'2 of 2 shown','the exact count survives the summary line');
+    assert.equal(counts.paginationHidden,true,'two rows need no Show more control');
     assert.equal(evaluate('[...document.querySelectorAll(".artifact-preview iframe")].every(e=>e.getAttribute("sandbox")===""&&getComputedStyle(e).pointerEvents==="none")'),true);
     const {targetInfos}=await send('Target.getTargets');
     const frames=targetInfos.filter(t=>t.type==='iframe' && t.url.startsWith(base+'/p/'));

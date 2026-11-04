@@ -40,7 +40,7 @@ fs.writeFileSync(process.env.DEPLOY_TEST_MARKER,JSON.stringify({args,path,mode:f
     assert.ok(call.args.includes('EMAIL_FROM:artifacts@example.com'));
     assert.ok(call.args.includes('PUBLIC_ORIGIN:https://artifact-pages.test.workers.dev'));
     assert.ok(call.args.includes('TEST_MAIL_TRANSPORT:'));
-    for (const hook of ['TEST_CLEANUP_PAUSE_MS:', 'TEST_CLEANUP_FAULT:', 'TEST_TOMBSTONE_STALE_MS:', 'TEST_UPLOAD_HOLD_MS:']) assert.ok(call.args.includes(hook), `deploy blanks ${hook}`);
+    for (const hook of ['TEST_CLEANUP_PAUSE_MS:', 'TEST_CLEANUP_FAULT:', 'TEST_TOMBSTONE_STALE_MS:', 'TEST_UPLOAD_HOLD_MS:', 'TEST_EXPIRATION_FAULT:', 'TEST_EXPIRATION_RETRY_MS:', 'TEST_EXPIRATION_HOLD_REVISION:', 'TEST_EXPIRATION_HOLD_MS:', 'TEST_EXPIRATION_STATE:', 'TEST_EXPIRATION_SETTLE_MS:', 'TEST_EXPIRATION_ALARM_HOLD_MS:']) assert.ok(call.args.includes(hook), `deploy blanks ${hook}`);
     assert.equal(existsSync(call.path),false,'secret scratch file must be removed');
     assert.match(readFileSync(marker+'.r2','utf8'),/r2 bucket info html-artifact-publisher-blobs/,'the blob bucket is checked before deploying');
     // No wake sink set: none rides the deploy, so wrangler.jsonc's empty values (NOTIFY_* fallback) stand.
@@ -52,4 +52,16 @@ fs.writeFileSync(process.env.DEPLOY_TEST_MARKER,JSON.stringify({args,path,mode:f
     assert.ok(woken.keys.includes('WAKE_SINK_SECRET'),'the wake secret rides the secrets file, never --var');
     assert.ok(!woken.args.some(a=>a.includes('WAKE_SINK_SECRET')));
   } finally {rmSync(dir,{recursive:true,force:true});}
+});
+test('every deploy path blanks the expiration fault hooks: wrangler.jsonc, deploy.sh, and CI via deploy.sh',()=>{
+  // A plain `wrangler deploy` (npm run deploy) reads wrangler.jsonc alone, so
+  // the hooks must be declared blank there too, not only on deploy.sh's argv.
+  const config=readFileSync(join(root,'wrangler.jsonc'),'utf8');
+  for(const hook of ['TEST_EXPIRATION_FAULT','TEST_EXPIRATION_RETRY_MS','TEST_EXPIRATION_HOLD_REVISION','TEST_EXPIRATION_HOLD_MS','TEST_EXPIRATION_STATE','TEST_EXPIRATION_SETTLE_MS','TEST_EXPIRATION_ALARM_HOLD_MS'])
+    assert.match(config,new RegExp(`"${hook}"\\s*:\\s*""`),`wrangler.jsonc declares ${hook} blank`);
+  const script=readFileSync(join(root,'scripts/deploy.sh'),'utf8');
+  for(const hook of ['TEST_EXPIRATION_FAULT','TEST_EXPIRATION_RETRY_MS','TEST_EXPIRATION_HOLD_REVISION','TEST_EXPIRATION_HOLD_MS','TEST_EXPIRATION_STATE','TEST_EXPIRATION_SETTLE_MS','TEST_EXPIRATION_ALARM_HOLD_MS'])
+    assert.ok(script.includes(`--var '${hook}:'`),`deploy.sh blanks ${hook}`);
+  // CI deploys only through deploy.sh, so it inherits those blanks.
+  assert.match(readFileSync(join(root,'.github/workflows/ci.yml'),'utf8'),/sh scripts\/deploy\.sh/,'CI deploys through deploy.sh');
 });

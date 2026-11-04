@@ -259,7 +259,37 @@ function registrySQL(sql, ...args) {
   }
   throw new Error('Test Registry database not found');
 }
+// The artifact's own Repo row, whatever Durable Object storage file holds it.
+function repoRow(id) {
+  const state=join(work,'state');
+  for (const file of readdirSync(state,{recursive:true})) {
+    if (!String(file).endsWith('.sqlite')) continue;
+    const db=new DatabaseSync(join(state,String(file)));
+    try {
+      const row=db.prepare('SELECT expires_at FROM _artifact WHERE id=?').all(id)[0];
+      if (row) return row;
+    } catch { /* another Durable Object's database has no _artifact table */ }
+    finally { db.close(); }
+  }
+  throw new Error('Test Repo database row not found');
+}
 const hash = value => createHash('sha256').update(value).digest('hex');
+
+// The expiration flow alone, so it can run when the navigation matrix cannot.
+if (process.env.ACCOUNTS_BROWSER_QA_EXPIRATION === '1') test('real browser: expiration dialog sets, prefills and clears',async()=>{
+  // Alone, this test starts with no Registry durable object yet; with the whole
+  // file, earlier cases have spent request limits. Reset only when there is a table.
+  try { registrySQL('DELETE FROM rate_limits RETURNING key'); } catch { /* fresh test run */ }
+  // Signing in here rather than reusing ownerAccount keeps the case runnable on
+  // its own, when the earlier fixture-creating tests are filtered out.
+  const owner=await login('owner@example.com');
+  const creator=await invite(owner,'expiration-browser@example.com');
+  const artifact=await create({cookie:creator.cookie},{title:'Expiration browser fixture'});
+  const { browserDriver, expirationQA }=await import('./library-browser.mjs');
+  const output=join(root,'.wrangler/accounts-browser-qa');
+  const { run,evaluate,wait,click }=browserDriver('accounts-expiration-qa');
+  await expirationQA({base,api,run,evaluate,wait,click,output,artifact:{id:artifact.id,cookie:creator.cookie}});
+});
 
 if (process.env.ACCOUNTS_BROWSER_QA === '1') test('real browser: navigation matrix, phone controls and management workflows',async()=>{
   // This browser case has its own lifecycle/fixtures and runs before the later
@@ -378,6 +408,129 @@ test('configured owner email rotation revokes prior owner secrets without changi
   assert.equal(ownerAccount.user.id,'instance-owner');
   assert.equal(ownerAccount.user.email,'owner@example.com');
   assert.equal((await api('/api/credentials',{cookie:ownerAccount.cookie})).json.credentials.length,0);
+});
+
+test('owner selects, extends, shortens and clears expiration without touching content or history',async()=>{
+  // A fresh creator: earlier cases suspend or rotate the shared fixtures.
+  const member=await invite(ownerAccount,'expiration-owner@example.com'), other=await invite(ownerAccount,'expiration-other@example.com');
+  const artifact=await create({cookie:member.cookie},{title:'Expiration fixture'});
+  const id=artifact.id, path=`/api/artifacts/${id}`;
+  const manage=(auth,body)=>api(path+'/manage',{method:'PATCH',...auth,body});
+  const future=seconds=>new Date((Math.floor(Date.now()/1000)+seconds)*1000).toISOString();
+  const current=async auth=>(await api(path,auth)).json.expiresAt;
+  const entry=async()=>(await api('/api/library?view=mine',{cookie:member.cookie})).json.artifacts.find(a=>a.id===id);
+  const before=await api(path,{cookie:member.cookie});
+  const content=await api(path+'/files/index.html',{cookie:member.cookie});
+  assert.equal(before.status,200,before.text);
+  assert.equal(before.json.expiresAt,null);
+
+  const first=future(3600);
+  assert.equal((await manage({cookie:member.cookie},{expiresAt:first})).status,200);
+  let info=await api(path,{cookie:member.cookie});
+  assert.equal(info.json.expiresAt,first);
+  assert.equal(info.json.tip,before.json.tip,'expiration keeps the tip');
+  assert.deepEqual(info.json.timeline,before.json.timeline,'expiration keeps history');
+  assert.equal((await api(path+'/files/index.html',{cookie:member.cookie})).text,content.text,'expiration keeps contents');
+  assert.equal((await entry()).expiresAt,first,'the library agrees with the artifact');
+  assert.equal(repoRow(id).expires_at,Date.parse(first)/1000,'the repository row agrees with the registry');
+
+  // Omitting the field preserves the current expiration; other management still works.
+  assert.equal((await manage({cookie:member.cookie},{title:'Expiration fixture renamed'})).status,200);
+  assert.equal(await current({cookie:member.cookie}),first);
+
+  const later=future(7200);
+  assert.equal((await manage({cookie:member.cookie},{expiresAt:later})).status,200);
+  assert.equal(await current({cookie:member.cookie}),later);
+  const sooner=future(600);
+  assert.equal((await manage({cookie:member.cookie},{expiresAt:sooner})).status,200);
+  assert.equal(await current({cookie:member.cookie}),sooner);
+
+  for (const body of [{expiresAt:'not-a-date'},{expiresAt:123},{expiresAt:'2030-01-01T00:00:00'},{expiresAt:future(-60)},{expiresAt:future(31*86400)},{expiresAt:''},{expiresAt:true},
+    {expiresAt:'2026-02-31T00:00:00Z'},{expiresAt:'2026-04-31T00:00:00Z'},{expiresAt:'2026-06-31T12:00:00Z'},{expiresAt:'2027-02-29T00:00:00Z'},{expiresAt:'2026-01-01T24:00:00Z'},{expiresAt:'2026-01-01T12:60:00Z'}]) {
+    assert.equal((await manage({cookie:member.cookie},body)).status,400,JSON.stringify(body));
+  }
+  assert.equal(await current({cookie:member.cookie}),sooner,'a rejected change leaves the stored expiration alone');
+  assert.equal(repoRow(id).expires_at,Date.parse(sooner)/1000);
+
+  // A named edit grantee is not a manager, and an edit link is not an account.
+  assert.equal((await api(path+'/sharing',{method:'PUT',cookie:member.cookie,body:{userId:other.user.id,permission:'write'}})).status,200);
+  assert.equal((await manage({cookie:other.cookie},{expiresAt:future(3600)})).status,403);
+  const viaLink=await create({bearer:legacy});
+  assert.equal((await api(`/api/artifacts/${viaLink.id}/manage`,{method:'PATCH',token:viaLink.editUrl.split('#')[1],body:{expiresAt:future(3600)}})).status,401);
+  assert.equal(await current({cookie:member.cookie}),sooner);
+  assert.equal(repoRow(viaLink.id).expires_at,null);
+
+  // The instance owner may manage any artifact.
+  const ownerSet=future(900);
+  assert.equal((await manage({cookie:ownerAccount.cookie},{expiresAt:ownerSet})).status,200);
+  assert.equal(await current({cookie:member.cookie}),ownerSet);
+  // Whole seconds survive the round trip exactly, so a prefilled save is a no-op.
+  const withSeconds=new Date((Math.floor(Date.now()/1000)+1200)*1000+37000).toISOString().replace(/\.\d{3}Z$/,'Z');
+  assert.equal((await manage({cookie:ownerAccount.cookie},{expiresAt:withSeconds})).status,200);
+  assert.equal(Date.parse(await current({cookie:member.cookie})),Date.parse(withSeconds));
+  const resealed=await manage({cookie:ownerAccount.cookie},{expiresAt:withSeconds});
+  assert.equal(resealed.status,200);
+  assert.equal(Date.parse(await current({cookie:member.cookie})),Date.parse(withSeconds),'saving the same instant changes nothing');
+  // A combined request audits each change it makes.
+  assert.equal((await manage({cookie:ownerAccount.cookie},{title:'Expiration fixture audited',expiresAt:future(1800)})).status,200);
+  const combined=(await api('/api/admin/activity?kind=artifacts&limit=20',{cookie:ownerAccount.cookie})).json.events.slice(0,20).filter(e=>e.artifactId===id);
+  assert.ok(combined.some(e=>e.action==='rename'),'a combined request still records the rename');
+  assert.ok(combined.some(e=>e.action==='expiration'),'a combined request records the expiration change too');
+  // The expiration audit names the artifact as this request leaves it, not as
+  // it was before the rename in the same request. Rows created in the same
+  // second are ordered by id, so match the event rather than a position.
+  assert.ok(combined.some(e=>e.action==='expiration'&&e.artifactTitle==='Expiration fixture audited'),'the expiration audit carries the requested title');
+  assert.ok(combined.length>=2);
+  assert.equal((await manage({cookie:ownerAccount.cookie},{title:'Expiration fixture',expiresAt:null})).status,200);
+  assert.equal((await manage({cookie:ownerAccount.cookie},{expiresAt:null})).status,200);
+  info=await api(path,{cookie:member.cookie});
+  assert.equal(info.json.expiresAt,null);
+  assert.equal(repoRow(id).expires_at,null);
+  assert.equal((await entry()).expiresAt,null);
+  assert.equal(info.json.tip,before.json.tip);
+  assert.deepEqual(info.json.timeline,before.json.timeline);
+  assert.ok((await api('/api/admin/activity?kind=artifacts',{cookie:ownerAccount.cookie})).json.events.some(e=>e.action==='expiration'&&e.artifactId===id),'changing expiration is audited');
+  await api(path,{method:'DELETE',cookie:member.cookie});
+  await api(`/api/artifacts/${viaLink.id}`,{method:'DELETE',cookie:ownerAccount.cookie});
+});
+
+test('extending or clearing a short expiration cancels its scheduled deletion',async()=>{
+  const auth={cookie:(await invite(ownerAccount,'expiration-creator@example.com')).cookie};
+  const extended=await create(auth,{title:'Extend before alarm',ttlSeconds:8});
+  const cleared=await create(auth,{title:'Clear before alarm',ttlSeconds:8});
+  const set=(a,body)=>api(`/api/artifacts/${a.id}/manage`,{method:'PATCH',...auth,body});
+  assert.equal((await set(extended,{expiresAt:new Date((Math.floor(Date.now()/1000)+3600)*1000).toISOString()})).status,200);
+  assert.equal((await set(cleared,{expiresAt:null})).status,200);
+  await new Promise(r=>setTimeout(r,10000));
+  assert.equal((await api(`/api/artifacts/${extended.id}`,auth)).status,200,'an extended artifact outlives the alarm set at publish');
+  assert.equal((await api(`/api/artifacts/${cleared.id}`,auth)).status,200,'a cleared expiration deletes its alarm');
+  assert.ok((await api('/api/library?view=mine',auth)).json.artifacts.some(a=>a.id===extended.id));
+  await api(`/api/artifacts/${extended.id}`,{method:'DELETE',...auth});
+  await api(`/api/artifacts/${cleared.id}`,{method:'DELETE',...auth});
+});
+
+test('an expiration set through manage actually deletes the artifact when it passes',async()=>{
+  // A positive control proves the alarm fires at all in this environment: an
+  // artifact created with a ttlSeconds deadline must also disappear.
+  const owner=await login('owner@example.com');
+  const auth={cookie:(await invite(owner,'expiration-enforced@example.com')).cookie};
+  const set=(a,body)=>api(`/api/artifacts/${a.id}/manage`,{method:'PATCH',...auth,body});
+  const soon=seconds=>new Date((Math.floor(Date.now()/1000)+seconds)*1000).toISOString();
+  const never=await create(auth,{title:'Never, then expires',ttlSeconds:null});
+  const control=await create(auth,{title:'Created with a ttl',ttlSeconds:6});
+  assert.equal((await api(`/api/artifacts/${never.id}`,auth)).json.expiresAt,null);
+  assert.equal((await set(never,{expiresAt:soon(6)})).status,200);
+  // Poll rather than sleep a fixed time: the alarm fires near the deadline.
+  let live=true, controlLive=true;
+  for (let i=0;i<60 && (live||controlLive);i++) {
+    await new Promise(r=>setTimeout(r,1000));
+    live=(await api(`/api/artifacts/${never.id}`,auth)).status===200;
+    controlLive=(await api(`/api/artifacts/${control.id}`,auth)).status===200;
+  }
+  assert.equal(live,false,'an artifact given an expiration through manage is gone after it');
+  assert.equal(controlLive,false,'the creation-time control is gone too');
+  assert.ok(!(await api('/api/library?view=mine',auth)).json.artifacts.some(a=>a.id===never.id||a.id===control.id),'the library no longer lists either');
+  assert.throws(()=>repoRow(never.id),/Repo database row not found/,'the repository row was destroyed, not just hidden');
 });
 
 test('legacy owner migration, account-filtered old listing, pagination and revocation isolate grants',async()=>{

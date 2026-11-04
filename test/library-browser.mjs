@@ -6,17 +6,101 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-export async function browserQA({base,loginUrl,output,api,owner,browserOwner,member}) {
+// The expiration flow on its own, so it can run without the navigation matrix.
+// `artifact` names the artifact and the session that may manage it.
+export async function expirationQA({base,api,run,evaluate,wait,click,output,artifact}) {
   mkdirSync(output,{recursive:true});
-  const session='accounts-library-qa';
+  run('cookies','set','artifact_session',artifact.cookie.split('=')[1],'--url',base,'--httpOnly','--sameSite','Lax');
+  run('set','viewport','390','844');
+  run('open',base+'/?view=mine');wait('.artifact-title');
+  const item=()=>evaluate(`[...document.querySelectorAll('.artifact-title')].find(e=>new URL(e.href).pathname===${JSON.stringify('/v/'+artifact.id)}).closest('article').querySelector('.artifact-menu').click()`);
+  const expiresAt=async()=>(await api(`/api/artifacts/${artifact.id}`,{cookie:artifact.cookie})).json.expiresAt;
+  item();run('find','role','button','click','--name','Expiration');wait('#expiration-mode');
+  assert.equal(evaluate('document.getElementById("expiration-mode").value'),'never','an artifact that does not expire starts at Never expires');
+  assert.equal(evaluate('document.getElementById("expiration-date-field").hidden'),true,'the whole date field is hidden until a date is chosen');
+  assert.equal(evaluate('[...document.querySelectorAll("#dialog-body label")].some(l=>l.textContent==="Date and time"&&l.getClientRects().length>0)'),false,'Never leaves no orphaned "Date and time" label');
+  // A whole-second instant: the dialog must prefills and resave it unchanged.
+  const future=new Date(Math.floor((Date.now()+3600_000)/1000)*1000+17);
+  const pad=n=>String(n).padStart(2,'0');
+  const localValue=`${future.getFullYear()}-${pad(future.getMonth()+1)}-${pad(future.getDate())}T${pad(future.getHours())}:${pad(future.getMinutes())}:${pad(future.getSeconds())}`;
+  assert.ok(evaluate('document.getElementById("expiration-zone").textContent.includes(Intl.DateTimeFormat().resolvedOptions().timeZone)'),'the dialog names the timezone it uses');
+  // agent-browser's fill cannot write a datetime-local control, so set it the
+  // way a picker does: through the native setter, then fire input and change.
+  const setDate=value=>evaluate(`(()=>{const e=document.getElementById('expiration-date');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(e,${JSON.stringify(value)});e.dispatchEvent(new Event('input',{bubbles:true}));e.dispatchEvent(new Event('change',{bubbles:true}));return e.value})()`);
+  run('select','#expiration-mode','date');wait('#expiration-date-field:not([hidden])');
+  assert.equal(setDate(localValue),localValue,'the date field takes the chosen local time');
+  const capture=name=>{
+    for(const width of [390,320]) for(const theme of ['light','dark']) {
+      run('set','viewport',String(width),'1000');
+      evaluate(`document.documentElement.dataset.theme=${JSON.stringify(theme)}`);
+      run('screenshot',join(output,`expiration-${name}-${theme}-${width}.png`));
+    }
+    run('set','viewport','390','844');
+  };
+  capture('date');
+  run('select','#expiration-mode','never');run('wait','--fn','document.getElementById("expiration-date-field").hidden');
+  assert.equal(evaluate('[...document.querySelectorAll("#dialog-body label")].some(l=>l.textContent==="Date and time"&&l.getClientRects().length>0)'),false,'Never leaves no orphaned "Date and time" label');
+  capture('never');
+  run('select','#expiration-mode','date');wait('#expiration-date-field:not([hidden])');
+  setDate(localValue);
+  click('#dialog-body button[type=submit]');run('wait','--fn','!document.getElementById("dialog").open');run('wait','[aria-busy="false"]');
+  assert.equal(Date.parse(await expiresAt()),new Date(localValue).getTime(),'the saved expiration is the chosen local instant, in UTC');
+  item();run('find','role','button','click','--name','Expiration');wait('#expiration-mode');
+  assert.equal(evaluate('document.getElementById("expiration-date").value'),localValue,'the dialog prefills the stored expiration');
+  assert.equal(evaluate('document.getElementById("expiration-mode").value'),'date');
+  assert.equal(evaluate('document.getElementById("expiration-date").step'),'1','the field accepts whole seconds');
+  capture('prefilled');
+  const stored=await expiresAt();
+  click('#dialog-body button[type=submit]');run('wait','--fn','!document.getElementById("dialog").open');run('wait','[aria-busy="false"]');
+  assert.equal(await expiresAt(),stored,'saving a prefilled value unchanged keeps the exact instant');
+  item();run('find','role','button','click','--name','Expiration');wait('#expiration-mode');
+  run('select','#expiration-mode','never');click('#dialog-body button[type=submit]');run('wait','--fn','!document.getElementById("dialog").open');run('wait','[aria-busy="false"]');
+  assert.equal(await expiresAt(),null,'Never expires clears the expiration');
+  item();run('find','role','button','click','--name','Expiration');wait('#expiration-mode');
+  run('select','#expiration-mode','date');wait('#expiration-date-field:not([hidden])');
+  setDate('2000-01-01T00:00');click('#dialog-body button[type=submit]');wait('#dialog-error:not([hidden])');
+  assert.ok(evaluate('document.getElementById("dialog-error").textContent.includes("future")'),'a past date says what is wrong');
+  assert.equal(evaluate('document.getElementById("dialog").open'),true,'a rejected date keeps the dialog open for correction');
+  run('press','Escape');
+  // A 202 from this PATCH means the deadline is durable but the library has not
+  // caught up. Intercepted locally: the real request never leaves the browser.
+  item();run('find','role','button','click','--name','Expiration');wait('#expiration-mode');
+  const pendingText=await evaluate(`(()=>{
+    const real=window.fetch;
+    window.__realFetch=real;
+    window.fetch=(url,opts)=>String(url).endsWith('/manage')&&opts?.method==='PATCH'
+      ? Promise.resolve(new Response(JSON.stringify({ok:true,expirationPending:true}),{status:202,headers:{'Content-Type':'application/json'}}))
+      : real(url,opts);
+    return true;
+  })()`);
+  assert.equal(pendingText,true,'the pending-response interceptor installed');
+  run('select','#expiration-mode','date');wait('#expiration-date-field:not([hidden])');
+  setDate(localValue);click('#dialog-body button[type=submit]');
+  run('wait','--fn','!document.getElementById("dialog").open');
+  const toast=()=>evaluate('document.getElementById("toast").textContent');
+  assert.match(toast(),/still updating/,'a pending update is not reported as saved');
+  assert.ok(!/Expiration (saved|cleared)/.test(toast()),'no confirmed message appears while the projection is pending');
+  assert.equal(await expiresAt(),null,'the intercepted request changed nothing in the library');
+  evaluate('window.fetch=window.__realFetch||window.fetch');
+  run('open',base+'/?view=mine');wait('.artifact-title');
+}
+
+
+// The agent-browser primitives, usable without the full matrix so a single flow
+// (expiration) can run on its own.
+export function browserDriver(session='accounts-library-qa') {
   const run=(...args)=>execFileSync('agent-browser',['--session',session,...args],{encoding:'utf8',timeout:45000,env:{...process.env,AGENT_BROWSER_IDLE_TIMEOUT_MS:'60000'}});
   const evaluate=source=> {
     const result=JSON.parse(run('--json','eval',source));
     assert.equal(result.success,true,JSON.stringify(result));
     return result.data.result;
   };
-  const wait=selector=>run('wait',selector);
-  const click=selector=>run('click',selector);
+  return {run,evaluate,wait:selector=>run('wait',selector),click:selector=>run('click',selector)};
+}
+
+export async function browserQA({base,loginUrl,output,api,owner,browserOwner,member}) {
+  mkdirSync(output,{recursive:true});
+  const {run,evaluate,wait,click}=browserDriver();
   const evidence=[],fixtures=[];
   let failure;
   const selectQA=()=>{
@@ -208,6 +292,7 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
     run('open',base+'/?view=shared');wait('.artifact-title');
     assert.equal(evaluate('[...document.querySelectorAll("[data-owner-only]")].every(e=>e.hidden)'),true);
     item();assert.equal(evaluate('[...document.querySelectorAll("#dialog-body button")].some(e=>e.textContent==="Manage access")'),false);
+    assert.equal(evaluate('[...document.querySelectorAll("#dialog-body button")].some(e=>e.textContent==="Expiration")'),false,'a named editor cannot change expiration');
     click('#dialog-close');run('open',base+href);wait('#bar:not([hidden])');
     assert.equal(evaluate('document.getElementById("deleteBtn").hidden'),true);
     assert.equal(evaluate('document.getElementById("role").textContent'),'Can edit');
@@ -238,7 +323,7 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
     assert.match(evaluate('document.querySelector(".secret").textContent'),/^[a-f0-9]{64}$/);
     assert.ok(evaluate('document.querySelector("#dialog-body .cli-guide code").textContent.includes("<your-personal-credential>")'));
     assert.equal(evaluate('document.querySelector("#dialog-body .cli-guide code").textContent.includes(document.querySelector(".secret").textContent)'),false,'setup example never embeds the credential');
-    click('#dialog-close');assert.equal(evaluate('document.querySelector(".secret")'),null);
+    assert.equal(evaluate(`(()=>{document.getElementById('dialog-close').click();return document.querySelector('.secret')===null})()`),true,'closing immediately removes the one-time credential');
     run('wait','[aria-busy="false"]');
     evaluate('[...document.querySelectorAll(".record")].find(e=>e.textContent.includes("Browser credential")).querySelector("button").click()');
     wait('#dialog[open]');click('#dialog-body button[type=submit]');run('wait','--fn','!document.getElementById("dialog").open');run('wait','[aria-busy="false"]');
@@ -260,11 +345,22 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
     run('open',base+'/?view=archived');wait('.artifact-title');item();run('find','role','button','click','--name','Restore to library');
     click('#dialog-body button[type=submit]');run('wait','--fn','!document.getElementById("dialog").open');run('wait','[aria-busy="false"]');
     assert.ok((await api('/api/library?view=mine',{cookie:member.cookie})).json.artifacts.some(a=>a.id===id),'member restores without instance administration');
+    await expirationQA({base,api,run,evaluate,wait,click,output,artifact:{id,cookie:member.cookie}});
     run('cookies','set','artifact_session',browserOwner.cookie.split('=')[1],'--url',base,'--httpOnly','--sameSite','Lax');
     run('open',base+'/?view=admin');wait('.artifact-title');item();run('find','role','button','click','--name','Manage access');wait('#share-person');
     assert.equal(evaluate('[...document.querySelectorAll("#share-person option")].some(e=>e.value==="instance-owner")'),false,'instance owner has fixed administrative access');
-    run('screenshot',join(output,'member-artifact-access-phone.png'));click('#dialog-close');
-    item();run('find','role','button','click','--name','Delete artifact…');wait('#delete-confirm');
+    run('screenshot',join(output,'member-artifact-access-phone.png'));
+    // Closing and immediately reopening must not let the old queued close event
+    // erase the new dialog. Wait for that event, not an arbitrary frame delay.
+    assert.equal(evaluate(`(async()=>{
+      const dialog=document.getElementById('dialog');
+      const closed=new Promise(resolve=>dialog.addEventListener('close',resolve,{once:true}));
+      dialog.close();
+      [...document.querySelectorAll('.artifact-title')].find(e=>new URL(e.href).pathname===${JSON.stringify('/v/'+id)}).closest('article').querySelector('.artifact-menu').click();
+      await closed;
+      return dialog.open&&[...dialog.querySelectorAll('button')].some(e=>e.textContent==='Delete artifact…');
+    })()`),true,'a queued close event preserves a newly reopened management dialog');
+    run('find','role','button','click','--name','Delete artifact…');wait('#delete-confirm');
     run('fill','#delete-confirm','DELETE');click('#dialog-body button[type=submit]');run('wait','--fn','!document.getElementById("dialog").open');run('wait','[aria-busy="false"]');
     assert.equal((await api(`/api/artifacts/${id}`,{cookie:owner.cookie})).status,404);
     run('open',base+'/?view=people');wait('#page-action');click('#page-action');wait('#invite-email');
@@ -290,7 +386,10 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
     assert.equal(evaluate('document.getElementById("login-submit").textContent'),'Email me a new link');
     assert.equal(evaluate('document.activeElement.id'),'login-email','the email field takes focus');
     run('screenshot',join(output,'invalid-login-phone.png'));
-    click('#different-email');wait('#login-email');run('fill','#login-email','unknown-browser@example.com');click('#login-form button[type=submit]');wait('#sent-panel:not([hidden])');
+    // An expired link shows the request form itself, so there is no separate escape to click.
+    assert.equal(evaluate('document.getElementById("login-form").hidden'),false,'the expired link offers the form directly');
+    assert.equal(evaluate('document.activeElement.id'),'login-email','the form is ready to type in');
+    run('fill','#login-email','unknown-browser@example.com');click('#login-form button[type=submit]');wait('#sent-panel:not([hidden])');
     assert.ok(evaluate('document.getElementById("sent-text").textContent.includes("invited account")'));
     assert.equal(evaluate('document.getElementById("login-form").hidden'),true,'the sent state replaces the form');
     assert.ok(evaluate('document.getElementById("resend-link").disabled'),'resend waits before it can be used again');

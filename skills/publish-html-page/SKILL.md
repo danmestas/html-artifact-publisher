@@ -29,7 +29,63 @@ the viewer blocks all network requests, so external URLs will not load. To
 revise an artifact you already published, update it instead of publishing a
 new one.
 
+## Checkout and working directory
+
+This skill's commands run from the retained html-artifact-publisher checkout, not
+from the skill directory. How to find that checkout depends on how the skill was
+installed, and the difference matters:
+
+- **Symlinked install** (preferred): the skill directory points back into the
+  checkout. Resolve it, require the expected `/skills/publish-html-page` suffix, and
+  verify the candidate really holds the CLI and assets before using it.
+- **Copied install**: the skill folder contains only `SKILL.md` and its references.
+  Its location says nothing about where the checkout is, so never infer one from it.
+  Ask the user for the retained checkout path, or read it from
+  `HTML_PUBLISHER_CHECKOUT`.
+
+```bash
+set -e
+install_dir="$HOME/.claude/skills/publish-html-page"
+resolved="$(readlink -f "$install_dir" 2>/dev/null || true)"
+candidate=""
+case "$resolved" in
+  */skills/publish-html-page) candidate="${resolved%/skills/publish-html-page}" ;;
+esac
+valid_checkout() {
+  [ -n "$1" ] && [ -f "$1/scripts/publish-html.mjs" ] && [ -d "$1/public" ] && [ -d "$1/skills/publish-html-page" ]
+}
+CHECKOUT=""
+if valid_checkout "$candidate"; then CHECKOUT="$candidate"; fi
+if [ -z "$CHECKOUT" ] && valid_checkout "${HTML_PUBLISHER_CHECKOUT:-}"; then CHECKOUT="$HTML_PUBLISHER_CHECKOUT"; fi
+if [ -z "$CHECKOUT" ]; then
+  echo "Cannot determine the html-artifact-publisher checkout." >&2
+  echo "Install the skill as a symlink to the retained checkout, or set HTML_PUBLISHER_CHECKOUT to it." >&2
+  exit 1
+fi
+node "$CHECKOUT/scripts/publish-html.mjs" --help   # confirm it starts
+```
+
+The CLI resolves Pikchr and shared assets relative to that checkout, so keep the
+checkout and always name it. Two equivalent forms, both safe from any working
+directory:
+
+```bash
+# Absolute CLI path; artifact inputs are absolute too.
+node "$CHECKOUT/scripts/publish-html.mjs" /absolute/path/page.html --title "Report"
+
+# Or change into the checkout and still pass absolute artifact paths.
+cd "$CHECKOUT" && node scripts/publish-html.mjs /absolute/path/page.html --title "Report"
+```
+
+Do not copy only the skill folder and drop the checkout: the scripts import
+`public/` and `scripts/` from the repository. A relative `node scripts/publish-html.mjs`
+from an unrelated directory will fail.
+
 ## CLI reference
+
+Commands below are written `node scripts/publish-html.mjs …` assuming the working
+directory is the checkout (or the script is reached by an absolute path); artifact
+inputs should be absolute paths.
 
 ```bash
 node scripts/publish-html.mjs [publish] [options] <file.html | dir>

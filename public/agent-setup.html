@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en" data-system-appearance>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="referrer" content="no-referrer">
+  <title>Set up an agent · Artifacts</title>
+  <script src="/appearance.js"></script>
+  <link rel="icon" href="/brand.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/library.css">
+  <link rel="stylesheet" href="/agent-setup.css">
+  <script type="module" src="/agent-setup.js"></script>
+</head>
+<body class="setup-page">
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="setup-top">
+    <a class="brand" href="/"><span class="mark" aria-hidden="true"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="4" y="5" width="16" height="3.2" rx="1.6" fill="currentColor"/><rect x="4" y="10.4" width="12" height="3.2" rx="1.6" fill="currentColor" opacity=".75"/><rect x="4" y="15.8" width="8" height="3.2" rx="1.6" fill="currentColor" opacity=".5"/></svg></span> Artifacts</a>
+    <nav aria-label="Setup links"><a href="/">Library</a><a href="/llms.txt">llms.txt</a></nav>
+  </header>
+
+  <main id="main" class="setup-main" tabindex="-1">
+    <p class="setup-eyebrow">For agents and the people running them</p>
+    <h1>Set up an agent to publish here</h1>
+    <p class="setup-lede">Give your agent the publishing skills and CLI once. Afterwards it can publish pages to this instance and revise them, without you copying URLs by hand.</p>
+
+    <section class="setup-section" aria-labelledby="prompt-title">
+      <h2 id="prompt-title">Copy the setup prompt</h2>
+      <p class="muted">Paste this into your agent. It names this instance, tells the agent to read <a href="/llms.txt">/llms.txt</a> first, and asks before installing anything.</p>
+      <label class="sr-only" for="install-prompt">Agent install prompt</label>
+      <textarea id="install-prompt" class="setup-prompt" readonly rows="18" spellcheck="false"></textarea>
+      <div class="setup-actions">
+        <button type="button" class="primary" data-copy="install-prompt">Copy prompt</button>
+        <span id="copy-status" class="tiny" role="status" aria-live="polite"></span>
+      </div>
+      <p class="tiny">The prompt is built from this page's address, so it always points at this instance. If copying is blocked, the text is selected for you to copy with your keyboard.</p>
+    </section>
+
+    <section class="setup-section" aria-labelledby="download-title">
+      <h2 id="download-title">Download the skills and CLI</h2>
+      <p>The download contains the repository's source. It includes the skills in <code>skills/</code>, the CLI in <code>scripts/publish-html.mjs</code>, and the shared assets in <code>public/</code> that those scripts import.</p>
+      <div class="setup-actions">
+        <a class="setup-button primary" href="https://github.com/danmestas/html-artifact-publisher/archive/refs/heads/main.zip" rel="noopener noreferrer">Download skills + CLI (.zip)</a>
+        <a class="setup-button" href="https://github.com/danmestas/html-artifact-publisher" rel="noopener noreferrer">View the source on GitHub</a>
+      </div>
+      <p class="muted setup-note">This is a source bundle, not an installer. Unpack it into a tools directory, then point your agent at the skills inside <code>skills/</code>. Node.js 22 or newer is enough to publish; Go, TinyGo and a server deployment are not needed.</p>
+    </section>
+
+    <section class="setup-section" aria-labelledby="clone-title">
+      <h2 id="clone-title">Or clone it</h2>
+      <p>Cloning keeps the checkout easy to update later. The CLI and its assets live in that checkout, so keep it — and have the commands you run name it, as explained below.</p>
+      <pre class="setup-code" id="clone-commands">set -e
+checkout="$HOME/tools/html-artifact-publisher"
+expected_origin="https://github.com/danmestas/html-artifact-publisher.git"
+if [ -e "$checkout" ] || [ -L "$checkout" ]; then
+  if [ ! -d "$checkout/.git" ]; then
+    echo "Error: $checkout exists but is not a git checkout. Move it aside and rerun; nothing was changed." >&2
+    exit 1
+  fi
+  origin="$(git -C "$checkout" remote get-url origin 2>/dev/null || true)"
+  if [ "$origin" != "$expected_origin" ]; then
+    echo "Error: $checkout is a git checkout of ${origin:-&lt;no origin&gt;}, not $expected_origin. Move it aside and rerun; nothing was changed." >&2
+    exit 1
+  fi
+  for required in scripts/publish-html.mjs public skills/publish-html-page; do
+    if [ ! -e "$checkout/$required" ]; then
+      echo "Error: $checkout is missing $required; it is not a usable checkout. Move it aside and rerun; nothing was changed." >&2
+      exit 1
+    fi
+  done
+  echo "Using existing checkout at $checkout."
+else
+  git clone "$expected_origin" "$checkout"
+fi
+mkdir -p "$HOME/.claude/skills"
+for skill in publish-html-page artifact-design artifact-runtime artifact-diagrams artifact-dataviz pikchr; do
+  target="$HOME/.claude/skills/$skill"
+  if [ -e "$target" ] || [ -L "$target" ]; then
+    echo "Skipped $skill: $target already exists; left unchanged."
+    continue
+  fi
+  ln -s "$checkout/skills/$skill" "$target"
+  echo "Linked $skill -> $checkout/skills/$skill"
+done</pre>
+      <div class="setup-actions">
+        <button type="button" data-copy="clone-commands">Copy commands</button>
+        <span class="tiny" role="status" aria-live="polite"></span>
+      </div>
+      <p class="tiny">These commands are safe to run twice. An existing destination is reused only when it is a git checkout whose origin is this repository and it still holds the CLI, <code>public/</code> and <code>skills/publish-html-page</code>; it is never pulled or replaced. An unrelated repository, an empty directory or an incomplete checkout stops with an error and is left untouched. Anything already at a skill destination — a skill, an empty directory, or a dangling symlink — is skipped and reported, never overwritten. The destination <code>~/.claude/skills/</code> is Claude Code's user skills directory; other agents use their own equivalent, and your agent can tell you where it loads skills from.</p>
+      <h3>Finding the checkout from an installed skill</h3>
+      <p class="tiny">A symlinked skill points back into the checkout, so the checkout can be resolved from it and checked. A copied skill contains no <code>scripts/</code> or <code>public/</code>: nothing is inferred from its location, and the retained checkout must be given explicitly in <code>HTML_PUBLISHER_CHECKOUT</code>. If neither produces a valid checkout, stop and ask; do not guess.</p>
+      <pre class="setup-code" id="checkout-resolver">set -e
+install_dir="$HOME/.claude/skills/publish-html-page"
+resolved="$(readlink -f "$install_dir" 2>/dev/null || true)"
+candidate=""
+case "$resolved" in
+  */skills/publish-html-page) candidate="${resolved%/skills/publish-html-page}" ;;
+esac
+valid_checkout() {
+  [ -n "$1" ] && [ -f "$1/scripts/publish-html.mjs" ] && [ -d "$1/public" ] && [ -d "$1/skills/publish-html-page" ]
+}
+CHECKOUT=""
+if valid_checkout "$candidate"; then CHECKOUT="$candidate"; fi
+if [ -z "$CHECKOUT" ] && valid_checkout "${HTML_PUBLISHER_CHECKOUT:-}"; then CHECKOUT="$HTML_PUBLISHER_CHECKOUT"; fi
+if [ -z "$CHECKOUT" ]; then
+  echo "Cannot determine the html-artifact-publisher checkout." >&2
+  echo "Install the skill as a symlink to the retained checkout, or set HTML_PUBLISHER_CHECKOUT to it." >&2
+  echo "A copied skill does not contain scripts/ or public/ and cannot infer the checkout." >&2
+  exit 1
+fi
+echo "$CHECKOUT"</pre>
+      <div class="setup-actions">
+        <button type="button" data-copy="checkout-resolver">Copy resolver</button>
+        <span class="tiny" role="status" aria-live="polite"></span>
+      </div>
+      <p class="tiny">Then invoke the CLI by absolute path (or <code>cd "$CHECKOUT"</code> first) and pass absolute artifact paths: <code>node "$CHECKOUT/scripts/publish-html.mjs" /absolute/path/page.html</code>. Keeping the checkout is necessary but not sufficient: the command has to name it.</p>
+    </section>
+
+    <section class="setup-section" aria-labelledby="credential-title">
+      <h2 id="credential-title">Connect this instance</h2>
+      <p>Publishing needs two environment variables:</p>
+      <pre class="setup-code" id="env-example">export HTML_PUBLISHER_URL="https://this-instance.example"
+export HTML_PUBLISHER_TOKEN="replace-with-your-personal-credential"</pre>
+      <p>Create a named credential on <a href="/?view=credentials">API credentials</a>, then load the secret from your environment or secret manager. Never put it in a URL, page content, browser storage or agent output.</p>
+      <div class="setup-actions">
+        <button type="button" data-copy="env-example">Copy variables</button>
+        <a class="setup-button" href="/?view=credentials">Open API credentials</a>
+        <span class="tiny" role="status" aria-live="polite"></span>
+      </div>
+    </section>
+
+    <section class="setup-section" aria-labelledby="what-title">
+      <h2 id="what-title">What the agent gets</h2>
+      <dl class="setup-list">
+        <dt><code>publish-html-page</code></dt><dd>Publishes a self-contained page, returns the read link, and updates the same page instead of creating duplicates.</dd>
+        <dt><code>artifact-design</code></dt><dd>Page contract: light and dark themes, no network access, phone widths.</dd>
+        <dt><code>artifact-runtime</code></dt><dd><code>window.artifact</code> for pages that save state, edit themselves or keep a history.</dd>
+        <dt><code>artifact-diagrams</code>, <code>pikchr</code></dt><dd>When a diagram earns its place, and how to draw it.</dd>
+        <dt><code>artifact-dataviz</code></dt><dd>Charts that work in both themes.</dd>
+        <dt><code>self-host-publisher</code></dt><dd>Optional. Only for running a separate copy of this publisher on another Cloudflare account.</dd>
+      </dl>
+      <p class="muted">The same facts are available to any agent in <a href="/llms.txt">/llms.txt</a>, without a sign-in.</p>
+    </section>
+
+    <p class="setup-foot"><a href="/agent-setup.html">Setup page</a> · <a href="/llms.txt">llms.txt</a> · <a href="https://github.com/danmestas/html-artifact-publisher">Source</a></p>
+  </main>
+</body>
+</html>

@@ -132,7 +132,7 @@ async function api(path, { method = 'GET', body } = {}) {
   if (!response.ok) {
     if (response.status === 401 && user) {
       user = null;
-      $('dialog').close();
+      closeDialog();
       loginState = 'form';
       rememberLoginReturn();
       showLogin();
@@ -263,7 +263,7 @@ $('logout').addEventListener('click', async () => {
     publicationCleanupResult = '';
     ++loadSequence;
     $('content').replaceChildren();
-    $('dialog').close();
+    closeDialog();
     history.replaceState(null, '', '/login');
     loginState = 'form';
     showLogin();
@@ -916,14 +916,23 @@ function openDialog(title, ...children) {
   else $('dialog-close').focus();
   return dialogSequence;
 }
-$('dialog-close').addEventListener('click', () => $('dialog').close());
-$('dialog').addEventListener('close', () => {
+function finishDialogClose() {
+  // Native close events are queued. Never clear a reopened dialog or clean twice.
+  if ($('dialog').open || dialogFocus === null) return;
   ++dialogSequence;
   $('dialog-body').replaceChildren(); // Includes any one-time credential.
   message('dialog-error');
-  if (dialogFocus?.isConnected) dialogFocus.focus();
+  const focus = dialogFocus;
+  dialogFocus = null;
+  if (focus.isConnected) focus.focus();
   else $('main').focus();
-});
+}
+function closeDialog() {
+  $('dialog').close();
+  finishDialogClose(); // Explicit closes remove secrets synchronously.
+}
+$('dialog-close').addEventListener('click', closeDialog);
+$('dialog').addEventListener('close', finishDialogClose);
 async function dialogTask(action, { close = true, reload = true } = {}) {
   const seq = dialogSequence;
   const controls = [...$('dialog-body').querySelectorAll('button,input,select')];
@@ -933,7 +942,7 @@ async function dialogTask(action, { close = true, reload = true } = {}) {
   message('dialog-error');
   try {
     await action();
-    if (seq === dialogSequence && close) $('dialog').close();
+    if (seq === dialogSequence && close) closeDialog();
     if (reload && user) await loadPage();
   } catch (err) { if (seq === dialogSequence && $('dialog').open) message('dialog-error', err.message); }
   finally {
@@ -954,7 +963,7 @@ function submit(form, text, action, danger = false) {
 function confirmAction(title, text, actionName, action, danger = false) {
   const form = node('form');
   form.append(node('p', { textContent: text }));
-  const cancel = button('Cancel', () => $('dialog').close());
+  const cancel = button('Cancel', () => closeDialog());
   const actions = node('div', { className: 'actions' }, cancel);
   const confirm = node('button', { type: 'submit', className: danger ? 'danger' : 'primary', textContent: actionName });
   actions.append(confirm); form.append(actions);
@@ -1113,7 +1122,7 @@ function openDelete(item) {
   const form = node('form');
   form.append(node('p', { textContent: `Permanently delete “${item.title}” and its entire history? Private source links will stop working. Independent public copies remain published; unpublish them from Published links. This cannot be undone.` }));
   const input = formField(form, 'Type DELETE to confirm', node('input', { id: 'delete-confirm', required: true, autocomplete: 'off', pattern: 'DELETE' }));
-  const cancel = button('Cancel', () => $('dialog').close());
+  const cancel = button('Cancel', () => closeDialog());
   const confirm = submit(form, 'Permanently delete artifact', async () => {
     if (input.value !== 'DELETE') throw new Error('Type DELETE to confirm.');
     await api(`/api/artifacts/${encodeURIComponent(item.id)}`, { method: 'DELETE' });
@@ -1209,7 +1218,7 @@ function openCreateCredential() {
         catch { message('dialog-error', 'Clipboard unavailable. Select and copy the credential above.'); }
       });
       openDialog('Save your credential now', node('p', { className: 'notice', textContent: 'This is the only time this credential will be shown. Save it in your secret manager before closing.' }),
-        secret, node('div', { className: 'actions' }, copy, button('I’ve saved it', () => $('dialog').close())),
+        secret, node('div', { className: 'actions' }, copy, button('I’ve saved it', () => closeDialog())),
         node('p', { className: 'explain', textContent: 'Never include your credential in HTML, URLs, screenshots, or shared files.' }), cliSetupGuide());
     }, { close: false, reload: true });
   });

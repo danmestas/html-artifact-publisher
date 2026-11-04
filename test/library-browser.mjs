@@ -323,7 +323,7 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
     assert.match(evaluate('document.querySelector(".secret").textContent'),/^[a-f0-9]{64}$/);
     assert.ok(evaluate('document.querySelector("#dialog-body .cli-guide code").textContent.includes("<your-personal-credential>")'));
     assert.equal(evaluate('document.querySelector("#dialog-body .cli-guide code").textContent.includes(document.querySelector(".secret").textContent)'),false,'setup example never embeds the credential');
-    click('#dialog-close');assert.equal(evaluate('document.querySelector(".secret")'),null);
+    assert.equal(evaluate(`(()=>{document.getElementById('dialog-close').click();return document.querySelector('.secret')===null})()`),true,'closing immediately removes the one-time credential');
     run('wait','[aria-busy="false"]');
     evaluate('[...document.querySelectorAll(".record")].find(e=>e.textContent.includes("Browser credential")).querySelector("button").click()');
     wait('#dialog[open]');click('#dialog-body button[type=submit]');run('wait','--fn','!document.getElementById("dialog").open');run('wait','[aria-busy="false"]');
@@ -349,8 +349,18 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
     run('cookies','set','artifact_session',browserOwner.cookie.split('=')[1],'--url',base,'--httpOnly','--sameSite','Lax');
     run('open',base+'/?view=admin');wait('.artifact-title');item();run('find','role','button','click','--name','Manage access');wait('#share-person');
     assert.equal(evaluate('[...document.querySelectorAll("#share-person option")].some(e=>e.value==="instance-owner")'),false,'instance owner has fixed administrative access');
-    run('screenshot',join(output,'member-artifact-access-phone.png'));click('#dialog-close');
-    item();run('find','role','button','click','--name','Delete artifact…');wait('#delete-confirm');
+    run('screenshot',join(output,'member-artifact-access-phone.png'));
+    // Closing and immediately reopening must not let the old queued close event
+    // erase the new dialog. Wait for that event, not an arbitrary frame delay.
+    assert.equal(evaluate(`(async()=>{
+      const dialog=document.getElementById('dialog');
+      const closed=new Promise(resolve=>dialog.addEventListener('close',resolve,{once:true}));
+      dialog.close();
+      [...document.querySelectorAll('.artifact-title')].find(e=>new URL(e.href).pathname===${JSON.stringify('/v/'+id)}).closest('article').querySelector('.artifact-menu').click();
+      await closed;
+      return dialog.open&&[...dialog.querySelectorAll('button')].some(e=>e.textContent==='Delete artifact…');
+    })()`),true,'a queued close event preserves a newly reopened management dialog');
+    run('find','role','button','click','--name','Delete artifact…');wait('#delete-confirm');
     run('fill','#delete-confirm','DELETE');click('#dialog-body button[type=submit]');run('wait','--fn','!document.getElementById("dialog").open');run('wait','[aria-busy="false"]');
     assert.equal((await api(`/api/artifacts/${id}`,{cookie:owner.cookie})).status,404);
     run('open',base+'/?view=people');wait('#page-action');click('#page-action');wait('#invite-email');

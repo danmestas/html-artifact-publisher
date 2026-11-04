@@ -332,7 +332,21 @@ test('suspension consumes pending invitations and reactivation does not restore 
   assert.deepEqual((await api('/api/auth/request',{method:'POST',body:{email:target.email}})).json,{ok:true});
   assert.equal((await change('active')).status,200);
   assert.equal((await api('/api/auth/verify',{method:'POST',body:{token}})).status,401);
-  assert.equal((await api('/api/invitations',{method:'POST',cookie:ownerAccount.cookie,body:{email:target.email}})).status,409);
+  // Never signed in, so reactivation puts the account back under Invitations and it can be re-invited.
+  const reactivated=(await api('/api/people',{cookie:ownerAccount.cookie})).json.users.find(u=>u.id===target.id);
+  assert.equal(reactivated.status,'invited');
+  assert.ok('resendAfter' in reactivated && 'inviteExpiresAt' in reactivated,'an invitation says when it can be resent and when its link expires');
+  const again=await api('/api/invitations',{method:'POST',cookie:ownerAccount.cookie,body:{email:target.email}});
+  assert.ok([200,429].includes(again.status),`re-inviting a reactivated invitee is allowed or rate limited, not refused: ${again.status}`);
+  if(again.status===429) assert.ok(Number.isInteger(again.json.retryAfter)&&again.json.retryAfter>0,'a resend refusal says how long to wait');
+  // Withdrawing removes the account and its pending link; an accepted account cannot be withdrawn.
+  assert.equal((await api(`/api/people/${target.id}`,{method:'DELETE',cookie:ownerAccount.cookie})).status,200);
+  assert.ok(!(await api('/api/people',{cookie:ownerAccount.cookie})).json.users.some(u=>u.id===target.id),'withdrawn invitation is gone');
+  assert.equal((await api(`/api/people/${ownerAccount.user.id}`,{method:'DELETE',cookie:ownerAccount.cookie})).status,409);
+  const withdrawn=(await api('/api/admin/activity?kind=people',{cookie:ownerAccount.cookie})).json;
+  assert.ok(withdrawn.events.some(e=>e.action==='invite_withdrawn'&&e.target===target.email),'withdrawal is audited with its target');
+  assert.ok(withdrawn.events.every(e=>['invite','invite_withdrawn','account_disabled','account_active'].includes(e.action)),'the activity kind filter runs on the server');
+  assert.equal((await api('/api/admin/activity?kind=nonsense',{cookie:ownerAccount.cookie})).status,400);
 });
 
 test('all browser mutation routes reject missing and cross-site origins, credential clients remain explicit',async()=>{

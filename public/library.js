@@ -3,6 +3,9 @@ import { isBlob } from './blobs.js';
 import { iconSvg } from './icons.js';
 
 const $ = id => document.getElementById(id);
+const BATCH = 12;          // artifacts and publications load this many at a time: divides evenly at 4, 3 and 2 columns
+const EVENT_BATCH = 25;
+const LOGIN_MINUTES = 60;  // how long a sign-in link works; the server's LOGIN_TTL says the same
 const LIBRARY_VIEWS = ['all', 'mine', 'shared', 'starred', 'archived'];
 const ADMIN_VIEWS = ['admin', 'people', 'activity'];
 const VIEWS = {
@@ -22,28 +25,33 @@ let people = [];
 let loadSequence = 0;
 let dialogSequence = 0;
 let dialogFocus = null;
-let nextCursor = null;
-let previousCursors = [];
-let page = 1;
+let nextCursor = null;   // where the next batch of the current list starts, or null at the end
+let shownCount = 0;
 let toastTimer;
 let searchTimer;
 let loginToken = '';
-let loginState = 'form'; // 'form' | 'sent'; a captured link shows the verify step instead
+let loginState = 'form'; // 'form' | 'sent' | 'expired'; a captured link shows the verify step instead
 let sentEmail = '';
 let resendTimer;
 let activityEvents = [];
 let activityFilter = 'all';
+let activityCursor = null;
 let publicationCleanupResult = '';
 let preferences = {};
 try { preferences = JSON.parse(localStorage.getItem('artifact-library-preferences') || '{}') || {}; } catch { /* Optional per-browser preferences. */ }
 let layout = preferences.layout === 'list' ? 'list' : 'grid';
-const params = new URLSearchParams(location.search);
-let state = {
-  view: Object.hasOwn(VIEWS, params.get('view')) ? params.get('view') : 'all',
-  q: params.get('q') || '', ownerId: params.get('ownerId') || '',
-  status: ['all', 'active', 'archived'].includes(params.get('status')) ? params.get('status') : 'all',
-  cursor: params.get('cursor') || '', sort: params.get('sort') === 'name' ? 'name' : 'recent',
-};
+// The URL is the whole list state: view, search, filters, sort, and how many rows are shown (n).
+function readState() {
+  const p = new URLSearchParams(location.search);
+  const n = Number.parseInt(p.get('n') || '', 10);
+  return {
+    view: Object.hasOwn(VIEWS, p.get('view')) ? p.get('view') : 'all',
+    q: p.get('q') || '', ownerId: p.get('ownerId') || '',
+    status: ['all', 'active', 'archived'].includes(p.get('status')) ? p.get('status') : 'all',
+    n: Number.isSafeInteger(n) && n > BATCH ? Math.min(n, 480) : BATCH, sort: p.get('sort') === 'name' ? 'name' : 'recent',
+  };
+}
+let state = readState();
 
 // A mail scanner must never consume a link. Keep its token only in this page's
 // memory and remove the fragment before making any network request.
@@ -112,12 +120,26 @@ async function api(path, { method = 'GET', body } = {}) {
       user = null;
       $('dialog').close();
       loginState = 'form';
+      rememberLoginReturn();
       showLogin();
       message('login-feedback', 'Your session has ended. Sign in again to continue.');
     }
-    throw new Error(data?.error || `Request failed (HTTP ${response.status}). Try again.`);
+    const err = new Error(data?.error || `Request failed (HTTP ${response.status}). Try again.`);
+    err.status = response.status; err.body = data;
+    throw err;
   }
   return data;
+}
+// Where to go after signing in: the library page sign-in interrupted, if any.
+function rememberLoginReturn() {
+  try { if (location.search) sessionStorage.setItem('artifact-login-return', location.search); } catch { /* optional */ }
+}
+function takeLoginReturn() {
+  try {
+    const back = sessionStorage.getItem('artifact-login-return') || '';
+    sessionStorage.removeItem('artifact-login-return');
+    return /^\?[^#]*$/.test(back) && back.length <= 2048 ? back : '';
+  } catch { return ''; }
 }
 function showLogin() {
   document.documentElement.setAttribute('data-system-appearance', '');
@@ -127,20 +149,27 @@ function showLogin() {
   $('app').hidden = true;
   $('login').hidden = false;
   const step = loginToken ? 'verify' : loginState;
-  $('login-form').hidden = step !== 'form';
+  const form = step === 'form' || step === 'expired';
+  $('login-form').hidden = !form;
   $('sent-panel').hidden = step !== 'sent';
   $('verify-panel').hidden = step !== 'verify';
-  $('login-explain').hidden = step !== 'form';
-  $('login-title').textContent = step === 'verify' ? 'Finish signing in' : step === 'sent' ? 'Check your inbox' : 'Sign in to Artifacts';
-  $('login-description').textContent = step === 'verify' ? `You opened a one-time sign-in link for ${location.host}.` : 'We’ll email you a one-time link. No password.';
+  $('login-explain').hidden = !form;
+  $('login-title').textContent = step === 'verify' ? 'Finish signing in' : step === 'sent' ? 'Check your inbox' : step === 'expired' ? 'This link has expired' : 'Sign in to Artifacts';
+  $('login-description').textContent = step === 'verify' ? `You opened a one-time sign-in link for ${location.host}.`
+    : step === 'expired' ? `Sign-in links work once and for ${LOGIN_MINUTES} minutes. Ask for a new one below.` : 'We’ll email you a one-time link. No password.';
   $('login-description').hidden = step === 'sent';
+  $('login-submit').textContent = step === 'expired' ? 'Email me a new link' : 'Email me a sign-in link';
+  if (step === 'expired' && !$('login-email').value) { try { $('login-email').value = sessionStorage.getItem('artifact-login-email') || ''; } catch { /* optional */ } }
+  if (form) $('login-email').focus();
+  else if (step === 'verify') $('verify-button').focus();
 }
 // The wording never says whether the address belongs to an account.
 async function requestLink(email) {
   await api('/api/auth/request', { method: 'POST', body: { email } });
   sentEmail = email;
   loginState = 'sent';
-  $('sent-text').replaceChildren('If ', node('strong', { textContent: email }), ' belongs to an invited account, a sign-in link is on its way. It expires in 15 minutes.');
+  try { sessionStorage.setItem('artifact-login-email', email); } catch { /* optional */ }
+  $('sent-text').replaceChildren('If ', node('strong', { textContent: email }), ` belongs to an invited account, a sign-in link is on its way. It works once, for ${LOGIN_MINUTES} minutes.`);
   startResendCountdown();
   showLogin();
 }
@@ -186,9 +215,14 @@ $('verify-button').addEventListener('click', async () => {
     const data = await api('/api/auth/verify', { method: 'POST', body: { token: loginToken } });
     loginToken = '';
     user = data.user;
-    history.replaceState(null, '', '/');
+    history.replaceState(null, '', '/' + takeLoginReturn());
+    state = readState();
     await showApp();
-  } catch (err) { message('login-feedback', `${err.message} You can request a fresh sign-in link using your email.`, 'error'); }
+  } catch (err) {
+    // The link was used, expired, or never valid: offer a new one rather than a dead end.
+    if (err.status === 401) { loginToken = ''; loginState = 'expired'; showLogin(); }
+    else message('login-feedback', err.message, 'error');
+  }
   finally { $('verify-button').disabled = false; }
 });
 $('different-email').addEventListener('click', backToForm);
@@ -231,9 +265,9 @@ function writeUrl(replace = false) {
     if (state.ownerId) p.set('ownerId', state.ownerId);
     if (state.status !== 'all') p.set('status', state.status);
   }
-  if (state.cursor) p.set('cursor', state.cursor);
+  if (state.n > BATCH) p.set('n', String(state.n));
   if (state.sort === 'name') p.set('sort', state.sort);
-  history[replace ? 'replaceState' : 'pushState']({ previousCursors, page }, '', '/' + (p.size ? '?' + p : ''));
+  history[replace ? 'replaceState' : 'pushState'](null, '', '/' + (p.size ? '?' + p : ''));
 }
 function closeNavigation() {
   document.querySelector('.sidebar').classList.remove('expanded');
@@ -244,10 +278,10 @@ $('nav-toggle').addEventListener('click', () => {
   const expanded = document.querySelector('.sidebar').classList.toggle('expanded');
   $('nav-toggle').setAttribute('aria-expanded', String(expanded));
 });
-function resetPagination() { state.cursor = ''; previousCursors = []; page = 1; }
+function resetPagination() { state.n = BATCH; nextCursor = null; shownCount = 0; }
 function navigate(view) {
   clearTimeout(searchTimer);
-  state = { view, q: '', ownerId: '', status: 'all', cursor: '', sort: state.sort };
+  state = { view, q: '', ownerId: '', status: 'all', n: BATCH, sort: state.sort };
   resetPagination();
   writeUrl();
   closeNavigation();
@@ -255,15 +289,8 @@ function navigate(view) {
   $('main').focus();
 }
 document.querySelectorAll('[data-view]').forEach(b => b.addEventListener('click', () => navigate(b.dataset.view)));
-window.addEventListener('popstate', e => {
-  const p = new URLSearchParams(location.search);
-  state = {
-    view: Object.hasOwn(VIEWS, p.get('view')) ? p.get('view') : 'all',
-    q: p.get('q') || '', ownerId: p.get('ownerId') || '', sort: p.get('sort') === 'name' ? 'name' : 'recent',
-    status: ['all', 'active', 'archived'].includes(p.get('status')) ? p.get('status') : 'all', cursor: p.get('cursor') || '',
-  };
-  previousCursors = e.state?.previousCursors || [];
-  page = e.state?.page || 1;
+window.addEventListener('popstate', () => {
+  state = readState();
   if (user) loadPage();
 });
 function search() {
@@ -299,15 +326,48 @@ document.querySelectorAll('[data-layout]').forEach(b => b.addEventListener('clic
   savePreferences();
   loadPage();
 }));
-$('next').addEventListener('click', () => {
-  if (!nextCursor) return;
-  previousCursors.push(state.cursor); state.cursor = nextCursor; ++page; writeUrl(); loadPage();
-  $('main').focus();
+// "Show more" appends the next batch to the list already on the page.
+$('more').addEventListener('click', async () => {
+  if (!nextCursor || !user) return;
+  const seq = loadSequence;
+  const view = state.view;
+  const first = $('content').querySelectorAll('[role="listitem"]').length;
+  $('more').disabled = true;
+  try {
+    if (view === 'activity') {
+      const data = await api(`/api/admin/activity?${new URLSearchParams({ limit: String(EVENT_BATCH), cursor: nextCursor, ...(activityFilter === 'all' ? {} : { kind: activityFilter }) })}`);
+      if (seq !== loadSequence) return;
+      activityEvents.push(...data.events); nextCursor = data.nextCursor;
+      renderActivity();
+    } else if (view === 'publications') {
+      const data = await api('/api/publications?' + new URLSearchParams({ cursor: nextCursor }));
+      if (seq !== loadSequence) return;
+      renderPublications(data.publications, true);
+      shownCount += data.publications.length; nextCursor = data.nextCursor;
+      moreStatus(shownCount, null, 'published link');
+    } else {
+      const inventory = view === 'admin';
+      const p = new URLSearchParams({ q: state.q, limit: String(BATCH), sort: state.sort, cursor: nextCursor });
+      if (inventory) { p.set('status', state.status); if (state.ownerId) p.set('ownerId', state.ownerId); } else p.set('view', view);
+      const data = await api(`${inventory ? '/api/admin/artifacts' : '/api/library'}?${p}`);
+      if (seq !== loadSequence) return;
+      renderArtifacts(data.artifacts, inventory, true);
+      shownCount += data.artifacts.length; nextCursor = data.nextCursor;
+      state.n = shownCount; writeUrl(true);
+      moreStatus(shownCount, data.total, 'artifact');
+    }
+    $('content').querySelectorAll('[role="listitem"]')[first]?.querySelector('a, button')?.focus({ preventScroll: true });
+  } catch (err) { notify(err.message); }
+  finally { $('more').disabled = false; }
 });
-$('previous').addEventListener('click', () => {
-  state.cursor = previousCursors.pop() || ''; page = Math.max(1, page - 1); writeUrl(); loadPage();
-  $('main').focus();
-});
+/** The line under the list: what is shown of what, and whether more can be loaded. */
+function moreStatus(shown, total, noun) {
+  const more = !!nextCursor;
+  $('pagination').hidden = !more && !(total !== null && shown >= total && shown > BATCH);
+  $('more').hidden = !more;
+  $('more').textContent = `Show ${BATCH} more`;
+  $('shown').textContent = total === null ? `${shown} ${noun}${shown === 1 ? '' : 's'} shown` : `${shown} of ${total} shown`;
+}
 
 async function showApp() {
   if (!user) return showLogin();
@@ -375,46 +435,41 @@ async function loadPage() {
       if (inventory) {
         const users = await loadPeople();
         if (seq !== loadSequence) return;
-        setOptions($('owner-filter'), users, 'Every owner');
+        // Invited accounts own nothing yet; suspended ones may, so they stay, marked.
+        setOptions($('owner-filter'), users.filter(u => u.status !== 'invited').map(u => (u.status === 'disabled' ? { ...u, name: `${u.name || u.email} (suspended)` } : u)), 'Every owner');
         $('owner-filter').value = state.ownerId;
       }
-      const p = new URLSearchParams({ q: state.q, limit: '25', sort: state.sort });
-      if (state.cursor) p.set('cursor', state.cursor);
-      if (inventory) {
-        p.set('status', state.status);
-        if (state.ownerId) p.set('ownerId', state.ownerId);
-      } else p.set('view', view);
-      const data = await api(`${inventory ? '/api/admin/artifacts' : '/api/library'}?${p}`);
-      if (seq !== loadSequence) return;
-      renderArtifacts(data.artifacts, inventory);
-      if (inventory) renderStatusCounts(data.counts);
-      nextCursor = data.nextCursor;
-      $('previous').disabled = !state.cursor;
-      $('next').disabled = !nextCursor;
-      $('pagination').hidden = !state.cursor && !nextCursor;
-      $('page-number').textContent = `Page ${page}${state.cursor && !previousCursors.length ? ' (linked page)' : ''}`;
-      $('result-status').textContent = `${data.artifacts.length} of ${data.total} artifacts · ${state.sort === 'name' ? 'Name A–Z' : 'Recently updated first'}`;
+      // A linked or returned-to URL says how many rows were shown: load that many, in requests of up to 100.
+      const items = []; let total = 0; let counts = null; let cursor = '';
+      do {
+        const p = new URLSearchParams({ q: state.q, limit: String(Math.min(100, state.n - items.length)), sort: state.sort });
+        if (cursor) p.set('cursor', cursor);
+        if (inventory) { p.set('status', state.status); if (state.ownerId) p.set('ownerId', state.ownerId); } else p.set('view', view);
+        const data = await api(`${inventory ? '/api/admin/artifacts' : '/api/library'}?${p}`);
+        if (seq !== loadSequence) return;
+        items.push(...data.artifacts); total = data.total; counts = data.counts ?? counts; cursor = data.nextCursor;
+      } while (cursor && items.length < state.n);
+      renderArtifacts(items, inventory);
+      if (inventory) renderStatusCounts(counts);
+      nextCursor = cursor; shownCount = items.length; state.n = Math.max(BATCH, items.length);
+      moreStatus(shownCount, total, 'artifact');
+      $('result-status').textContent = `${total} artifact${total === 1 ? '' : 's'} · ${state.sort === 'name' ? 'Name A–Z' : 'Recently updated first'}`;
     } else if (view === 'publications') {
-      const p = new URLSearchParams();
-      if (state.cursor) p.set('cursor', state.cursor);
-      const data = await api('/api/publications' + (p.size ? `?${p}` : ''));
+      const data = await api('/api/publications');
       if (seq !== loadSequence) return;
       renderPublications(data.publications);
-      nextCursor = data.nextCursor;
-      $('previous').disabled = !state.cursor;
-      $('next').disabled = !nextCursor;
-      $('pagination').hidden = !state.cursor && !nextCursor;
-      $('page-number').textContent = `Page ${page}${state.cursor && !previousCursors.length ? ' (linked page)' : ''}`;
-      $('result-status').textContent = `${data.publications.length} published link${data.publications.length === 1 ? '' : 's'} on this page · ${user.role === 'owner' ? 'Every account' : 'Created by you'}`;
+      nextCursor = data.nextCursor; shownCount = data.publications.length;
+      moreStatus(shownCount, null, 'published link');
+      $('result-status').textContent = `Published links · ${user.role === 'owner' ? 'Every account' : 'Created by you'}`;
     } else if (view === 'people') {
       const users = await loadPeople();
       if (seq !== loadSequence) return;
       renderPeople(users);
       $('result-status').textContent = `${users.length} account${users.length === 1 ? '' : 's'}`;
     } else if (view === 'activity') {
-      const data = await api('/api/admin/activity?limit=25');
+      const data = await api(`/api/admin/activity?${new URLSearchParams({ limit: String(EVENT_BATCH), ...(activityFilter === 'all' ? {} : { kind: activityFilter }) })}`);
       if (seq !== loadSequence) return;
-      activityEvents = data.events;
+      activityEvents = data.events; nextCursor = data.nextCursor;
       renderActivity();
     } else {
       const data = await api('/api/credentials');
@@ -448,8 +503,7 @@ function rememberLibraryNavigation() {
   if (!user) return;
   try {
     sessionStorage.setItem('artifact-library-navigation', JSON.stringify({
-      userId: user.id, url: location.pathname + location.search,
-      page, previousCursors, scrollY: window.scrollY,
+      userId: user.id, url: location.pathname + location.search, scrollY: window.scrollY,
     }));
   } catch { /* Browsing context is an optional per-tab convenience. */ }
 }
@@ -457,8 +511,6 @@ function restoreLibraryNavigation() {
   try {
     const saved = JSON.parse(sessionStorage.getItem('artifact-library-navigation') || 'null');
     if (saved?.userId !== user.id || saved.url !== location.pathname + location.search) return;
-    if (Number.isSafeInteger(saved.page) && saved.page > 0) page = saved.page;
-    if (Array.isArray(saved.previousCursors) && saved.previousCursors.every(c => typeof c === 'string')) previousCursors = saved.previousCursors;
     if (Number.isFinite(saved.scrollY) && saved.scrollY >= 0) restoreScroll = saved.scrollY;
   } catch { /* The URL still restores filters when storage is unavailable. */ }
 }
@@ -492,7 +544,9 @@ function starButton(item, className) {
   });
   return b;
 }
-const desktopPreviews = matchMedia('(min-width: 761px)');
+// Previews are sandboxed static documents, loaded as a card comes within two
+// screens of the viewport and unloaded again once it is further away, so a
+// long list holds only the frames near the reader, on phones too.
 let previewObserver;
 function clearPreviews() {
   previewObserver?.disconnect();
@@ -500,27 +554,30 @@ function clearPreviews() {
   document.querySelectorAll('.artifact-preview iframe').forEach(frame => frame.remove());
 }
 function loadPreviews() {
-  clearPreviews();
-  if (!desktopPreviews.matches || $('app').hidden) return;
-  previewObserver = new IntersectionObserver((entries, observer) => {
-    if (observer !== previewObserver || !desktopPreviews.matches || $('app').hidden) return;
+  if ($('app').hidden) return;
+  if (!previewObserver) previewObserver = new IntersectionObserver((entries, observer) => {
+    if (observer !== previewObserver || $('app').hidden) return;
     for (const { target, isIntersecting } of entries) {
-      if (!isIntersecting || !target.isConnected) continue;
-      observer.unobserve(target);
-      const frame = node('iframe', { title: 'Static artifact preview', tabIndex: -1, loading: 'lazy' });
-      frame.setAttribute('sandbox', '');
-      frame.setAttribute('aria-hidden', 'true');
-      frame.referrerPolicy = 'no-referrer';
-      frame.src = `/p/${encodeURIComponent(target.dataset.id)}`;
-      target.prepend(frame);
+      const frame = target.querySelector('iframe');
+      if (!isIntersecting) { frame?.remove(); continue; }
+      if (frame || !target.isConnected) continue;
+      const next = node('iframe', { title: 'Static artifact preview', tabIndex: -1, loading: 'lazy' });
+      next.setAttribute('sandbox', '');
+      next.setAttribute('aria-hidden', 'true');
+      next.referrerPolicy = 'no-referrer';
+      next.src = `/p/${encodeURIComponent(target.dataset.id)}`;
+      target.prepend(next);
     }
-  }, { rootMargin: '100px' });
+  }, { rootMargin: '200% 0px' });
   document.querySelectorAll('.artifact-preview').forEach(el => previewObserver.observe(el));
 }
-desktopPreviews.addEventListener('change', loadPreviews);
 window.addEventListener('pagehide', clearPreviews);
 window.addEventListener('pageshow', e => { if (e.persisted) loadPreviews(); });
-function renderArtifacts(items, inventory) {
+function renderArtifacts(items, inventory, append = false) {
+  if (append) {
+    const list = $('content').querySelector('.artifact-grid, .artifact-list');
+    if (list) { list.append(...artifactEntries(items, inventory, list.classList.contains('artifact-grid'))); loadPreviews(); return; }
+  }
   if (!items.length && state.view === 'archived' && !state.q) {
     $('content').replaceChildren(empty('Nothing archived', 'Archived artifacts you own or can access will appear here. Creators can restore them from the artifact menu.'));
     return;
@@ -531,7 +588,14 @@ function renderArtifacts(items, inventory) {
     return;
   }
   const grid = !inventory && layout === 'grid';
-  const list = node('div', { className: grid ? 'artifact-grid' : 'artifact-list', role: 'list' });
+  const list = node('div', { className: grid ? 'artifact-grid' : 'artifact-list', role: 'list' }, ...artifactEntries(items, inventory, grid));
+  const headings = node('div', { className: `inventory-head${inventory ? ' inventory' : ''}`, ariaHidden: 'true' },
+    ...(inventory ? ['Artifact', 'Owner', 'Visibility', 'Status', 'Updated', ''] : ['Artifact', 'Owner', 'Updated', '', '']).map(textContent => node('span', { textContent })));
+  $('content').replaceChildren(...(grid ? [list] : [headings, list]));
+  loadPreviews();
+}
+function artifactEntries(items, inventory, grid) {
+  const out = [];
   const cell = (label, className, ...content) => node('span', { className: `cell ${className}` }, node('span', { className: 'sr-only', textContent: label }), ...content);
   const chip = (text, kind) => node('span', { className: `chip ${kind}`, textContent: text });
   for (const item of items) {
@@ -560,12 +624,9 @@ function renderArtifacts(items, inventory) {
       if (!inventory) entry.append(starButton(item, 'row-star'));
       entry.append(menu);
     }
-    list.append(entry);
+    out.push(entry);
   }
-  const headings = node('div', { className: `inventory-head${inventory ? ' inventory' : ''}`, ariaHidden: 'true' },
-    ...(inventory ? ['Artifact', 'Owner', 'Visibility', 'Status', 'Updated', ''] : ['Artifact', 'Owner', 'Updated', '', '']).map(textContent => node('span', { textContent })));
-  $('content').replaceChildren(...(grid ? [list] : [headings, list]));
-  loadPreviews();
+  return out;
 }
 function publicationUrl(value) {
   try {
@@ -579,14 +640,38 @@ function publicationSize(bytes) {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
-function renderPublications(publications) {
+// What an exporter error means for the person, and what to do. The raw reason stays as detail.
+const PUBLISH_HELP = 'https://github.com/danmestas/html-artifact-publisher#public-snapshots';
+function publicationAdvice(error) {
+  const e = String(error || '');
+  if (/non-local .* resource/.test(e)) return 'The page loads something from another site: a script, style, image or font. Public pages cannot reach other sites. Bundle that file in the version and use a relative path.';
+  if (/bare module import/.test(e)) return 'The page imports a module by bare name. Bundle the module and import it by a relative path.';
+  if (/root-relative/.test(e)) return 'The page loads a file by a root-relative path starting with “/”. Use a document-relative path instead.';
+  if (/private artifact runtime/.test(e)) return 'The page uses window.artifact, which public copies do not have. Remove that dependency, or keep the artifact private.';
+  if (/frame or object/.test(e)) return 'The page embeds another page in a frame. Public pages cannot; include that content directly.';
+  if (/missing (script|stylesheet|files)|Source blob is missing/.test(e)) return 'A file the page references is not in this version. Add it and publish again.';
+  if (/no HTML document/.test(e)) return 'This version has no HTML page to publish.';
+  if (/diagram/.test(e)) return 'A diagram on the page could not be rendered. Fix the diagram source and publish again.';
+  if (/exceeds/.test(e)) return 'The prepared copy is over the 250 MiB limit. Remove or shrink large files and publish again.';
+  if (/cancelled|timed out/.test(e)) return 'Publishing was interrupted before it finished. Publish again.';
+  return 'Publishing failed. The reason is below.';
+}
+function openPublication(item) {
+  const version = String(item.checkin || '');
+  const actions = node('div', { className: 'manage-actions' },
+    node('a', { className: 'button-link', href: `${viewerUrl({ id: item.artifactId })}#@${encodeURIComponent(version)}`, textContent: 'View source version' }));
+  if (item.status !== 'deleted') actions.append(button(item.status === 'live' ? 'Unpublish…' : 'Remove publication…', () => openUnpublish(item), 'danger'));
+  openDialog(item.title || 'Untitled artifact', actions);
+}
+function renderPublications(publications, append = false) {
   const notice = node('p', { className: 'notice', textContent: 'Public files are independent copies. Deleting or expiring a private source does not unpublish them. Use this screen to unpublish a link and delete its copied files; the original artifact and its history stay untouched.' });
   const feedback = node('p', { className: 'notice', role: 'status', textContent: publicationCleanupResult, hidden: !publicationCleanupResult });
-  if (!publications.length) {
-    $('content').replaceChildren(notice, feedback, empty('No published links on this page', state.cursor ? 'Go back to an earlier page to find published links.' : 'Public copies published from an artifact’s viewer will appear here.'));
+  if (!publications.length && !append) {
+    $('content').replaceChildren(notice, feedback, empty('No published links yet', 'Public copies published from an artifact’s viewer will appear here.'));
     return;
   }
-  const list = node('div', { className: 'record-list publication-list', role: 'list' });
+  const list = append ? $('content').querySelector('.publication-list') : node('div', { className: 'record-list publication-list', role: 'list' });
+  if (!list) return;
   for (const item of publications) {
     const title = item.title || 'Untitled artifact';
     const version = String(item.checkin || '');
@@ -598,9 +683,9 @@ function renderPublications(publications) {
         node('span', { textContent: `${item.files} file${item.files === 1 ? '' : 's'} · ${publicationSize(item.bytes)}` }),
         node('time', { dateTime: item.createdAt, textContent: `Published ${dateText(item.createdAt)}`, title: item.createdAt })),
       user.role === 'owner' ? node('p', { className: 'publication-owner', textContent: `Owner: ${item.ownerName || item.ownerId}` }) : null);
-    const actions = node('div', { className: 'record-actions' }, node('a', {
-      className: 'button-link', href: `${viewerUrl({ id: item.artifactId })}#@${encodeURIComponent(version)}`, textContent: 'View source version',
-    }));
+    const more = button('⋯', () => openPublication(item), 'icon-button artifact-menu');
+    more.setAttribute('aria-label', `Actions for ${title}`);
+    const actions = node('div', { className: 'record-actions' }, more);
     const url = item.status === 'live' ? publicationUrl(item.url) : null;
     if (url) {
       details.append(node('a', { className: 'publication-url', href: url, target: '_blank', rel: 'noopener noreferrer', textContent: url, ariaLabel: `Open public link for ${title}` }));
@@ -614,10 +699,14 @@ function renderPublications(publications) {
     } else {
       details.append(node('p', { className: 'publication-hint', textContent: item.status === 'building' ? 'Preparing copied files. Refresh to check progress.' : item.status === 'failed' ? 'Publishing failed. No public link is available.' : item.status === 'deleted' ? 'This public link has been unpublished.' : 'No public link is available.' }));
     }
-    if (item.status === 'failed' && item.error) details.append(node('p', { className: 'error', textContent: item.error }));
-    if (item.status !== 'deleted') actions.append(button(item.status === 'live' ? 'Unpublish…' : 'Remove publication…', () => openUnpublish(item), 'danger'));
+    if (item.status === 'failed' && item.error) {
+      details.append(node('div', { className: 'error' }, node('p', { textContent: publicationAdvice(item.error) }),
+        node('details', {}, node('summary', { textContent: 'What the exporter said' }), node('code', { textContent: item.error })),
+        node('a', { href: PUBLISH_HELP, target: '_blank', rel: 'noopener noreferrer', textContent: 'How public copies work' })));
+    }
     list.append(node('article', { className: 'record publication-record', role: 'listitem' }, details, actions));
   }
+  if (append) return;
   const refresh = button('Refresh published links', loadPage);
   $('content').replaceChildren(notice, feedback, list, node('div', { className: 'actions' }, refresh));
 }
@@ -649,17 +738,28 @@ function renderPeople(users) {
     node('div', { className: 'record-list' }, ...list.map(personRow)))));
 }
 function personName(p) { return p.name && p.name !== p.email ? p.name : ''; }
+function minutesLeft(seconds) { return `${Math.max(1, Math.ceil(seconds / 60))} min`; }
+function inviteLinkState(p) {
+  if (!p.inviteExpiresAt) return 'link expired';
+  const left = (new Date(p.inviteExpiresAt).getTime() - Date.now()) / 1000;
+  return left > 0 ? `link expires in ${minutesLeft(left)}` : 'link expired';
+}
 function personRow(p) {
   const owner = p.role === 'owner', invited = p.status === 'invited', suspended = p.status === 'disabled';
   const name = personName(p);
-  const detail = [name ? p.email : '', invited ? (p.createdAt ? `Invitation sent ${dateText(p.createdAt)}` : 'Invitation pending') : ''].filter(Boolean).join(' · ');
+  const detail = [name ? p.email : '', invited ? `${p.createdAt ? `Invitation sent ${dateText(p.createdAt)}` : 'Invitation pending'} · ${inviteLinkState(p)}` : ''].filter(Boolean).join(' · ');
   const row = node('div', { className: `record person${suspended ? ' is-suspended' : ''}` },
     node('span', { className: 'avatar', ariaHidden: 'true', textContent: initials(name || p.email) }),
     node('div', { className: 'identity' }, node('strong', { textContent: name || p.email }), detail ? node('small', { textContent: detail }) : null),
     node('span', { className: `state ${owner ? 'owner' : invited ? 'invited' : suspended ? 'disabled' : 'active'}`, textContent: owner ? 'Instance owner' : invited ? 'Invited · not yet signed in' : suspended ? 'Suspended' : 'Active' }));
   if (!owner) {
     const actions = node('div', { className: 'record-actions' });
-    if (invited) actions.append(button('Resend', () => resendInvitation(p), 'linkish'));
+    if (invited) {
+      const resend = button(p.resendAfter > 0 ? `Resend in ${minutesLeft(p.resendAfter)}` : 'Resend', () => resendInvitation(p), 'linkish');
+      resend.disabled = p.resendAfter > 0;
+      if (p.resendAfter > 0) resend.title = 'A link was sent recently. Wait before sending another.';
+      actions.append(resend, button('Withdraw', () => withdrawInvitation(p), 'linkish'));
+    }
     const more = button('⋯', () => openPerson(p), 'icon-button');
     more.setAttribute('aria-label', `Actions for ${name || p.email}`);
     actions.append(more);
@@ -668,10 +768,17 @@ function personRow(p) {
   return row;
 }
 function resendInvitation(p) {
+  if (p.resendAfter > 0) return notify(`A link went to ${p.email} recently. Resend in ${minutesLeft(p.resendAfter)}.`);
   confirmAction('Resend invitation?', `Send a fresh invitation to ${p.email}?`, 'Send invitation', async () => {
     await api('/api/invitations', { method: 'POST', body: { email: p.email, name: personName(p) } });
     notify('Invitation sent.');
   });
+}
+function withdrawInvitation(p) {
+  confirmAction('Withdraw invitation?', `${p.email} will be removed and their sign-in link will stop working. You can invite them again later.`, 'Withdraw invitation', async () => {
+    await api(`/api/people/${encodeURIComponent(p.id)}`, { method: 'DELETE' });
+    notify('Invitation withdrawn.');
+  }, true);
 }
 function openPerson(p) {
   const invited = p.status === 'invited', suspended = p.status === 'disabled';
@@ -680,18 +787,18 @@ function openPerson(p) {
     details.append(node('dt', { textContent: label }), node('dd', { textContent: value }));
   }
   const actions = node('div', { className: 'manage-actions' });
-  if (invited) actions.append(button('Resend invitation', () => resendInvitation(p)));
+  if (invited) actions.append(button('Resend invitation', () => resendInvitation(p)), button('Withdraw invitation', () => withdrawInvitation(p)));
   actions.append(button(suspended ? 'Reactivate account' : 'Suspend account', () => openSuspend(p), suspended ? '' : 'danger'));
   openDialog(personName(p) || p.email, details, actions);
 }
 // Each audit row as a sentence. The audit keeps the actor; artifact and account targets when recorded.
-const EVENT_KIND = { archive: 'artifacts', restore: 'artifacts', rename: 'artifacts', transfer: 'artifacts', sharing_change: 'artifacts', invite: 'people', account_disabled: 'people', account_active: 'people', credential_create: 'credentials', credential_revoke: 'credentials', sign_in: 'sign-ins' };
+const EVENT_KIND = { archive: 'artifacts', restore: 'artifacts', rename: 'artifacts', transfer: 'artifacts', sharing_change: 'artifacts', invite: 'people', invite_withdrawn: 'people', account_disabled: 'people', account_active: 'people', credential_create: 'credentials', credential_revoke: 'credentials', sign_in: 'sign-ins' };
 const EVENT_GLYPH = { artifacts: '▤', people: '✉', credentials: '⚿', 'sign-ins': '→', account_disabled: '⊘', account_active: '✓' };
 function eventSentence(e) {
   const artifact = e.artifactId ? node('a', { href: viewerUrl({ id: e.artifactId }), textContent: e.artifactTitle || 'an artifact' }) : (e.artifactTitle || 'an artifact');
   const target = e.target || '';
   const verbs = {
-    invite: ['invited ', target || 'someone'], archive: ['archived ', artifact], restore: ['restored ', artifact], rename: ['renamed ', artifact],
+    invite: ['invited ', target || 'someone'], invite_withdrawn: ['withdrew the invitation to ', target || 'someone'], archive: ['archived ', artifact], restore: ['restored ', artifact], rename: ['renamed ', artifact],
     transfer: ['transferred ', artifact], sharing_change: ['changed who can open ', artifact], sign_in: ['signed in'],
     account_disabled: ['suspended ', target || 'an account'], account_active: ['reactivated ', target || 'an account'],
     credential_create: ['created an API credential'], credential_revoke: ['revoked an API credential'],
@@ -704,19 +811,24 @@ function dayLabel(value) {
   const days = Math.floor((new Date(today.getFullYear(), today.getMonth(), today.getDate()) - new Date(d.getFullYear(), d.getMonth(), d.getDate())) / 86400000);
   return days === 0 ? 'Today' : days === 1 ? 'Yesterday' : d.toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' });
 }
+const KIND_LABELS = { all: 'Everything', artifacts: 'Artifacts', people: 'People', credentials: 'Credentials', 'sign-ins': 'Sign-ins' };
 function renderActivity() {
   const events = activityEvents;
-  if (!events.length) {
-    $('result-status').textContent = 'No events';
-    return $('content').replaceChildren(empty('No activity yet', 'Administrative changes will appear here.'));
-  }
-  const kinds = [['all', 'Everything'], ['artifacts', 'Artifacts'], ['people', 'People'], ['credentials', 'Credentials'], ['sign-ins', 'Sign-ins']];
-  const filter = node('div', { className: 'event-filter', role: 'group', ariaLabel: 'Show' }, ...kinds.map(([kind, label]) => {
-    const b = button(label, () => { activityFilter = kind; renderActivity(); });
+  const filter = node('div', { className: 'event-filter', role: 'group', ariaLabel: 'Show' }, ...Object.entries(KIND_LABELS).map(([kind, label]) => {
+    const b = button(label, () => { if (activityFilter === kind) return; activityFilter = kind; loadPage(); });
     b.setAttribute('aria-pressed', String(activityFilter === kind));
     return b;
   }));
-  const shown = events.filter(e => activityFilter === 'all' || EVENT_KIND[e.action] === activityFilter);
+  const noun = activityFilter === 'all' ? 'event' : `${KIND_LABELS[activityFilter].toLowerCase().replace(/s$/, '')} event`;
+  $('pagination').hidden = !nextCursor;
+  $('more').hidden = !nextCursor;
+  $('more').textContent = 'Show older events';
+  $('shown').textContent = `${events.length} ${noun}${events.length === 1 ? '' : 's'} shown`;
+  if (!events.length) {
+    $('result-status').textContent = 'No events';
+    return $('content').replaceChildren(filter, empty(activityFilter === 'all' ? 'No activity yet' : 'Nothing of that kind', activityFilter === 'all' ? 'Administrative changes will appear here.' : 'No events of this kind have been recorded.'));
+  }
+  const shown = events;
   const out = [filter];
   let day = '', list = null;
   for (const e of shown) {
@@ -733,9 +845,8 @@ function renderActivity() {
       node('span', {}, node('strong', { textContent: e.actorName || 'Account' }), ' ', ...eventSentence(e)),
       node('time', { dateTime: e.createdAt, textContent: relativeDate(e.createdAt), title: new Date(e.createdAt).toLocaleString() })));
   }
-  if (!shown.length) out.push(empty('Nothing of that kind', 'No recent events match this filter.'));
   $('content').replaceChildren(...out);
-  $('result-status').textContent = activityFilter === 'all' ? `Newest ${events.length} event${events.length === 1 ? '' : 's'}` : `${shown.length} of the newest ${events.length} events`;
+  $('result-status').textContent = `${events.length}${nextCursor ? '+' : ''} ${noun}${events.length === 1 && !nextCursor ? '' : 's'} · newest first`;
 }
 function cliSetupGuide() {
   const commands = [
@@ -827,8 +938,9 @@ function confirmAction(title, text, actionName, action, danger = false) {
 function openManage(item) {
   const details = node('dl', { className: 'details-grid' });
   for (const [label, value] of [
-    ['Owner', item.ownerName || 'Instance owner'], ['Visibility', item.visibility || 'private'],
-    ['Access', item.permission === 'write' ? 'Can edit' : 'Can view'], ['Status', item.archived ? 'Archived' : 'Active'],
+    ['Owner', mine(item) ? 'You' : item.ownerName || 'Instance owner'], ['Visibility', item.visibility === 'shared' ? 'Shared' : 'Private'],
+    // Your own access is only news when the artifact is someone else's.
+    ...(item.canManage ? [] : [['Access', item.permission === 'write' ? 'Can edit' : 'Can view']]), ['Status', item.archived ? 'Archived' : 'Active'],
     ['Updated', dateText(item.updatedAt)], ['Created', dateText(item.createdAt)],
     ['Expires', item.expiresAt ? dateText(item.expiresAt) : 'Does not expire'],
   ]) details.append(node('dt', { textContent: label }), node('dd', { textContent: value }));
@@ -901,8 +1013,8 @@ async function openSharing(item) {
         await api(`/api/artifacts/${encodeURIComponent(item.id)}/sharing`, { method: 'PUT', body: { userId: person.value, permission: permission.value } });
         notify('Access granted.');
       });
-      body.append(form);
-    } else body.append(node('p', { className: 'explain', textContent: 'No other active members are available to add. The instance owner can invite more people.' }));
+      body.append(form, node('p', { className: 'explain', textContent: 'Only active members are listed. Someone who is invited but has not signed in, or is suspended, cannot be added yet.' }));
+    } else body.append(node('p', { className: 'explain', textContent: 'No other active members are available to add. Invited people appear here once they sign in; the instance owner can invite more.' }));
   } catch (err) { if (seq === dialogSequence) message('dialog-error', err.message); }
 }
 async function openTransfer(item) {
@@ -918,6 +1030,7 @@ async function openTransfer(item) {
     setOptions(target, eligible);
     const check = node('input', { type: 'checkbox', id: 'transfer-confirm', required: true });
     form.append(node('label', { className: 'check-label', htmlFor: check.id }, check, 'I understand named sharing will be cleared.'));
+    form.append(node('p', { className: 'explain', textContent: 'Only active members can take ownership. Invited and suspended accounts are not listed.' }));
     submit(form, 'Transfer ownership', async () => {
       await api(`/api/artifacts/${encodeURIComponent(item.id)}/manage`, { method: 'PATCH', body: { ownerId: target.value } });
       notify('Ownership transferred. Named sharing cleared.');
@@ -1040,7 +1153,7 @@ async function main() {
     if (loginToken) return showLogin();
     const session = await api('/api/session');
     user = session.user;
-    if (!user) return showLogin();
+    if (!user) { rememberLoginReturn(); return showLogin(); }
     if (location.pathname === '/login') history.replaceState(null, '', '/');
     await showApp();
   } catch (err) {

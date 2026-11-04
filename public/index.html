@@ -22,7 +22,7 @@
       <form id="login-form">
         <label for="login-email">Email address</label>
         <input id="login-email" type="email" autocomplete="email" placeholder="you@example.com" maxlength="254" required>
-        <button class="primary full" type="submit">Email me a sign-in link</button>
+        <button id="login-submit" class="primary full" type="submit">Email me a sign-in link</button>
       </form>
       <div id="sent-panel" class="sent" hidden>
         <div class="env" aria-hidden="true"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg></div>
@@ -88,7 +88,7 @@
       <p id="result-status" class="tiny" role="status" aria-live="polite"></p>
       <div id="page-error" class="error" role="alert" hidden></div>
       <div id="content"></div>
-      <div id="pagination" class="pagination" hidden><button id="previous">Previous</button><span id="page-number" class="tiny"></span><button id="next">Next page</button></div>
+      <div id="pagination" class="more" hidden><button id="more" type="button">Show more</button><span id="shown" class="tiny" aria-live="polite"></span></div>
       <p id="privacy-note" class="bottom-note">Private artifacts are hidden from other members, not from the instance owner. Archiving hides work from the library; it does not revoke access through existing links.</p>
     </main>
   </div>

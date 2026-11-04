@@ -1,0 +1,195 @@
+# HTML Artifact Publisher
+
+A signed-in web app that publishes self-contained HTML pages to private, versioned
+links, with a library for accounts and sharing. Agents publish with a CLI. This file
+is the agent-facing summary; the full instructions live in the repository.
+
+## Setup
+
+- Human setup page: /agent-setup.html
+- Source repository: https://github.com/danmestas/html-artifact-publisher
+- Downloadable source bundle (skills, CLI, shared assets — not an installer):
+  https://github.com/danmestas/html-artifact-publisher/archive/refs/heads/main.zip
+- Read this file from the instance you publish to; do not assume a fixed hostname.
+  The install commands below use `$HOME/tools/html-artifact-publisher`; substitute
+  your own dedicated tools directory if you prefer.
+
+## Install the skills
+
+The repository's `skills/` directory holds one folder per skill. Inspect the
+instructions and scripts before running them. These commands are safe to run more
+than once. They clone only when the destination is absent. They reuse an existing
+checkout only when it is a git checkout whose origin is this repository and it still
+holds the CLI, `public/` and `skills/publish-html-page`; they never pull or replace
+it. An unrelated repository, an empty directory or an incomplete checkout stops with
+an error and is left untouched. Each skill is linked into the agent's skill directory
+without forcing: existing files, directories and dangling symlinks are skipped and
+reported.
+
+```bash
+set -e
+checkout="$HOME/tools/html-artifact-publisher"
+expected_origin="https://github.com/danmestas/html-artifact-publisher.git"
+if [ -e "$checkout" ] || [ -L "$checkout" ]; then
+  if [ ! -d "$checkout/.git" ]; then
+    echo "Error: $checkout exists but is not a git checkout. Move it aside and rerun; nothing was changed." >&2
+    exit 1
+  fi
+  origin="$(git -C "$checkout" remote get-url origin 2>/dev/null || true)"
+  if [ "$origin" != "$expected_origin" ]; then
+    echo "Error: $checkout is a git checkout of ${origin:-<no origin>}, not $expected_origin. Move it aside and rerun; nothing was changed." >&2
+    exit 1
+  fi
+  for required in scripts/publish-html.mjs public skills/publish-html-page; do
+    if [ ! -e "$checkout/$required" ]; then
+      echo "Error: $checkout is missing $required; it is not a usable checkout. Move it aside and rerun; nothing was changed." >&2
+      exit 1
+    fi
+  done
+  echo "Using existing checkout at $checkout."
+else
+  git clone "$expected_origin" "$checkout"
+fi
+mkdir -p "$HOME/.claude/skills"
+for skill in publish-html-page artifact-design artifact-runtime artifact-diagrams artifact-dataviz pikchr; do
+  target="$HOME/.claude/skills/$skill"
+  if [ -e "$target" ] || [ -L "$target" ]; then
+    echo "Skipped $skill: $target already exists; left unchanged."
+    continue
+  fi
+  ln -s "$checkout/skills/$skill" "$target"
+  echo "Linked $skill -> $checkout/skills/$skill"
+done
+```
+
+`~/.claude/skills` is Claude Code's user skills directory; other agents use their
+equivalent. Add `self-host-publisher` only when setting up a new instance.
+
+Installed skills run from the checkout, not from the skill folder. Resolve it with a
+validated suffix, not a bare `readlink` guess: a symlinked skill resolves to
+`<checkout>/skills/publish-html-page`, and the result counts only when the CLI,
+`public/` and the skill are actually there. A copied skill contains neither, so
+nothing is inferred from its location — the retained checkout must be given
+explicitly. If neither yields a valid checkout, stop and ask instead of guessing.
+
+```bash
+set -e
+install_dir="$HOME/.claude/skills/publish-html-page"
+resolved="$(readlink -f "$install_dir" 2>/dev/null || true)"
+candidate=""
+case "$resolved" in
+  */skills/publish-html-page) candidate="${resolved%/skills/publish-html-page}" ;;
+esac
+valid_checkout() {
+  [ -n "$1" ] && [ -f "$1/scripts/publish-html.mjs" ] && [ -d "$1/public" ] && [ -d "$1/skills/publish-html-page" ]
+}
+CHECKOUT=""
+if valid_checkout "$candidate"; then CHECKOUT="$candidate"; fi
+if [ -z "$CHECKOUT" ] && valid_checkout "${HTML_PUBLISHER_CHECKOUT:-}"; then CHECKOUT="$HTML_PUBLISHER_CHECKOUT"; fi
+if [ -z "$CHECKOUT" ]; then
+  echo "Cannot determine the html-artifact-publisher checkout." >&2
+  echo "Install the skill as a symlink to the retained checkout, or set HTML_PUBLISHER_CHECKOUT to it." >&2
+  echo "A copied skill does not contain scripts/ or public/ and cannot infer the checkout." >&2
+  exit 1
+fi
+echo "$CHECKOUT"
+```
+
+Then invoke the CLI by absolute path, or change into the checkout first, and pass
+absolute artifact paths. Keeping the checkout is necessary but not sufficient: the
+command has to name it.
+
+| Skill | Use it for |
+|---|---|
+| `skills/publish-html-page` | Required. Publish and update pages, link handling. |
+| `skills/artifact-design` | Page contract: themes, no network, layout, phones. |
+| `skills/artifact-runtime` | `window.artifact`: saved data, self-editing pages, history. |
+| `skills/artifact-diagrams` | When a diagram helps, and what it should show. |
+| `skills/artifact-dataviz` | Charts, palette, contrast checks. |
+| `skills/pikchr` | Draw diagrams in Pikchr; `render.mjs`. |
+| `skills/self-host-publisher` | Optional: run a separate copy on another Cloudflare account. |
+
+Node.js 22 or newer (CI uses 24) is enough to publish. Go, TinyGo, Wrangler and a server
+deployment are not needed for CLI publishing.
+
+## Environment
+
+`publish` and `list` read two variables:
+
+```bash
+export HTML_PUBLISHER_URL="https://this-instance.example"
+export HTML_PUBLISHER_TOKEN="replace-with-your-personal-credential"
+```
+
+Replace the URL with this instance's origin and the token with the credential you
+created. Create a personal credential on /?view=credentials. Load the token from an
+environment variable or secret manager. Never put it in a URL, a page, localStorage,
+a log, or your output, and never print an edit link, clone URL or token where others
+can see it.
+
+## Create versus update
+
+Run the CLI by absolute path from the checkout (`$HOME/tools/html-artifact-publisher`
+below). Pass absolute paths for input files; the CLI resolves its own assets relative
+to that checkout, not to the current directory.
+
+```bash
+node "$HOME/tools/html-artifact-publisher/scripts/publish-html.mjs" /absolute/path/page.html --title "Report"
+node "$HOME/tools/html-artifact-publisher/scripts/publish-html.mjs" update "$EDIT_URL" /absolute/path/page.html --message "Revise report"
+node "$HOME/tools/html-artifact-publisher/scripts/publish-html.mjs" read "$READ_OR_EDIT_URL" --out "$OUT_DIR"
+node "$HOME/tools/html-artifact-publisher/scripts/publish-html.mjs" history "$URL"
+node "$HOME/tools/html-artifact-publisher/scripts/publish-html.mjs" list
+node "$HOME/tools/html-artifact-publisher/scripts/publish-html.mjs" delete "$EDIT_URL"
+```
+
+Set `EDIT_URL` to the edit link, `READ_OR_EDIT_URL` to a read or edit link, `URL` to
+the artifact link, and `OUT_DIR` to a directory path before running these; quoting
+keeps tokens and spaces intact. `--out` is optional: without it `read` prints the
+page's HTML to stdout instead of writing files.
+
+Alternatively `cd "$HOME/tools/html-artifact-publisher"` and use
+`node scripts/publish-html.mjs …` with absolute artifact paths.
+
+Publish once, then `update` that same artifact. Do not publish a new artifact for every
+revision. `update` exits 3 if someone published after you read the tip: nothing was
+saved; `read` the newer version and build on it. An update whose files already match the
+tip exits 1 with "nothing changed". Use the URL and history the instance returns; do not
+construct links by hand.
+
+The default TTL is 7d (7 days); `--ttl never` keeps the artifact until it is deleted.
+
+## Links
+
+- Read link `…/v/<id>#<readToken>`: the shareable link. Post it after every publish and
+  update. It can read and comment.
+- Comment link `…/v/<id>#<commentToken>`: read and comment, not edit.
+- Edit link `…/v/<id>#<writeToken>`: update and delete. Keep it private.
+- Clone URL `https://editor:<writeToken>@<host>/r/<id>`: for Fossil. Keep it private.
+
+A read link cannot update.
+
+## What a published page can do
+
+- The viewer sandbox blocks external network requests. Pages must be self-contained:
+  inline CSS and scripts, and reference attachments by relative paths in the same
+  published directory. Small text files travel with the page; images, video, fonts, and
+  files over 256 KB are stored separately and uploaded automatically (up to 100 MB each).
+- Pages follow light and dark appearance. Ship complete light and dark palettes and do
+  not pin a theme in the root element.
+- When the viewer injects `window.artifact`, a page can read its files and history, save
+  new versions (`publish`), and keep small shared values (`data.get/set/list`). Saving
+  requires the edit link. See `skills/artifact-runtime`.
+- Each publish or update is a check-in, so history and rollback are available with
+  `read`, `history`, and Fossil itself.
+
+## Self-hosting
+
+`skills/self-host-publisher` covers running your own copy on a Cloudflare account; its
+full procedure is `docs/self-hosting.md` in the repository. This is separate from using
+an existing instance with the CLI.
+
+## More
+
+- Setup page: /agent-setup.html
+- Publishing skill: https://github.com/danmestas/html-artifact-publisher/blob/main/skills/publish-html-page/SKILL.md
+- Repository README: https://github.com/danmestas/html-artifact-publisher/blob/main/README.md

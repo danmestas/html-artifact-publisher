@@ -33,6 +33,13 @@ const FIXTURES = {
     html: 'background: #fbfaf8; color: #1d1c1a; color-scheme: light;',
     extra: '@media (prefers-color-scheme: dark) { :root { background: #141517; color: #e8e6e2; color-scheme: dark; } }',
   }),
+  // A translucent canvas is not a canvas: it lets the viewer ground through, so
+  // mirroring it behind the page would composite the same layer twice.
+  partialHtml: page({ html: 'background: rgba(255, 0, 0, 0.5); color-scheme: dark;' }),
+  partialBody: page({ body: 'background: rgba(255, 0, 0, 0.5);', extra: ':root { color-scheme: dark; }' }),
+  // A document that styles nothing keeps the browser's own canvas, which carries
+  // the default text colour with it. The viewer fallback must not paint over it.
+  unstyled: '<!doctype html><html><body><h1>Unstyled report</h1><p>Ordinary body text.</p></body></html>',
 };
 
 export async function backdropQA({ base, owner, api, output }) {
@@ -93,6 +100,30 @@ export async function backdropQA({ base, owner, api, output }) {
     run('screenshot', join(output, 'transparent-explicit-dark.png'));
     await open(artifacts.transparent, 'light', 'light');
     assert.equal((await frame()).bg, VIEWER_GROUND.light, 'a transparent page is backed by the light viewer ground');
+
+    // A translucent canvas lets the viewer ground show through the page. If the
+    // frame mirrored it, the same layer would composite twice and the visible
+    // red would be darker than the page's own.
+    for (const [name, label] of [['partialHtml', 'an html canvas at 50% alpha'], ['partialBody', 'a body canvas at 50% alpha']]) {
+      await open(artifacts[name], 'dark', 'dark');
+      assert.equal((await frame()).bg, VIEWER_GROUND.dark, `${label} keeps the viewer ground behind the page`);
+      run('screenshot', join(output, `partial-${name}.png`));
+    }
+
+    // An unstyled document keeps the browser's own canvas and its matching
+    // default text colour. The viewer must not paint a canvas into the page, so
+    // the text stays black on the browser's white and remains readable.
+    await open(artifacts.unstyled, 'dark', 'dark');
+    assert.equal((await frame()).bg, VIEWER_GROUND.dark, 'an unstyled document leaves the frame on the viewer ground');
+    const unstyled = await frameEval(run('get', 'cdp-url').trim());
+    try {
+      const doc = await unstyled.eval(`({ bg: getComputedStyle(document.documentElement).backgroundColor, text: getComputedStyle(document.body).color })`);
+      assert.equal(doc.bg, 'rgba(0, 0, 0, 0)', 'the viewer paints no canvas into an unstyled document');
+      assert.equal(doc.text, 'rgb(0, 0, 0)', 'the unstyled document keeps default black text');
+    } finally {
+      await unstyled.close();
+    }
+    run('screenshot', join(output, 'unstyled-explicit-dark.png'));
 
     // A page that switches theme at runtime moves its backdrop with it.
     await open(artifacts.runtimeTheme, 'system', 'dark');

@@ -19,15 +19,23 @@ export function backdropColor(value) {
 }
 
 /**
- * The page's canvas: the html layer, then the body — the propagation browsers
- * use — and the first that paints. Each layer is `{ color, paints }`, where
- * `paints` measures its alpha; a page with neither is transparent. Injected
- * into pages as source, so it takes its `backdropColor` validator as an
- * argument rather than closing over this module.
+ * The page's canvas colour, or null when the page has no opaque canvas.
+ *
+ * Only an opaque canvas can be mirrored behind the page. A translucent colour
+ * lets whatever is behind the page show through, so painting it behind as well
+ * would composite the same layer twice and change how the page looks. A page
+ * with a translucent canvas keeps the viewer's ground behind it.
+ *
+ * Propagation matches the browser's: the root's background is the canvas, and
+ * the body's is propagated only when the root sets no background at all. A
+ * translucent root still stops there — the body's background then covers the
+ * body box only, not the canvas. Each layer is `{ color, paints, opaque }`.
+ * Injected into pages as source, so it takes its `backdropColor` validator as
+ * an argument rather than closing over this module.
  */
 export function chooseCanvas(html, body, backdropColor) {
-  const layer = [html, body].find(candidate => candidate?.paints && backdropColor(candidate.color));
-  return backdropColor(layer?.color);
+  if (!html?.paints) return backdropColor(body?.opaque ? body.color : null);
+  return html.opaque ? backdropColor(html.color) : null;
 }
 
 /**
@@ -42,22 +50,27 @@ export function pageBackdrop(chooseCanvas, backdropColor) {
     try {
       const html = getComputedStyle(document.documentElement);
       const body = document.body ? getComputedStyle(document.body) : null;
-      // Alpha decides whether a layer paints. A 1x1 canvas resolves it for every
-      // colour syntax without parsing colour spaces by hand.
+      // A 1x1 canvas resolves a colour's alpha for every syntax without
+      // parsing colour spaces by hand. `paints` means any alpha; `opaque` means
+      // full alpha, the only canvas safe to mirror behind the page.
       const canvas = document.createElement('canvas');
       canvas.width = canvas.height = 1;
       const ctx = canvas.getContext('2d');
-      function paints(color) {
-        if (!color) return false;
-        if (!ctx) return !/^(?:transparent|rgba\(\s*0\s*,\s*0\s*,\s*0\s*,\s*0\s*\))$/i.test(color);
+      function alpha(color) {
+        if (!color) return 0;
+        if (!ctx) return /^(?:transparent|rgba\(\s*0\s*,\s*0\s*,\s*0\s*,\s*0\s*\))$/i.test(color) ? 0 : 255;
         ctx.clearRect(0, 0, 1, 1);
         ctx.fillStyle = color; // an invalid value leaves the canvas clear
         ctx.fillRect(0, 0, 1, 1);
-        return ctx.getImageData(0, 0, 1, 1).data[3] > 0;
+        return ctx.getImageData(0, 0, 1, 1).data[3];
       }
+      const layer = color => {
+        const a = alpha(color);
+        return { color, paints: a > 0, opaque: a === 255 };
+      };
       const color = chooseCanvas(
-        { color: html.backgroundColor, paints: paints(html.backgroundColor) },
-        body && { color: body.backgroundColor, paints: paints(body.backgroundColor) },
+        layer(html.backgroundColor),
+        body && layer(body.backgroundColor),
         backdropColor,
       );
       if (color === last) return;

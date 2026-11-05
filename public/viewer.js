@@ -13,6 +13,7 @@ import { preparePublication } from './export.js';
 import { anchorFor, arrange, attachmentDisplay, controls, decodePointAnchor, encodePointAnchor, findQuotes, responderNote, responderProgress, thread } from './comments.js';
 import { typeOf } from './blobs.js';
 import { pagePins } from './page-pins.js';
+import { backdropColor, pageBackdrop, chooseCanvas } from './backdrop.js';
 
 const $ = id => document.getElementById(id);
 const NONCE = document.querySelector('meta[name="artifact-nonce"]')?.content ?? '';
@@ -118,7 +119,8 @@ const RUNTIME = `(function(){
     t.scrollIntoView({ block: 'start' });
   }, true);
 })();
-(${pagePins})(${findQuotes}, ${anchorFor}, ${encodePointAnchor}, ${decodePointAnchor});`;
+(${pagePins})(${findQuotes}, ${anchorFor}, ${encodePointAnchor}, ${decodePointAnchor});
+(${pageBackdrop})(${chooseCanvas}, ${backdropColor});`;
 
 // The page renders in a sandboxed iframe with an opaque origin, which cannot
 // load this page's blob: URLs. So the other files of the check-in are inlined:
@@ -193,6 +195,8 @@ async function render() {
   closePanel();
   setPlacement(false);
   frameReady = false;
+  pageCanvas = null; // the new page reports its own canvas once it loads
+  paintBackdrop();
   frame.onload = () => {
     $('shell').style.display = 'none';
     frame.style.display = 'block';
@@ -538,6 +542,31 @@ function post(message) {
   const page = $('frame').contentWindow;
   if (frameReady && page) page.postMessage({ __artifactPins: 1, ...message }, '*');
 }
+
+// ─── Backdrop: what shows behind and beyond the page ───────────────────────
+
+// The page's canvas as it last reported it (backdrop.js), or null. #frame is
+// painted with it: that is what shows wherever the page's own canvas does not
+// reach, such as a transparent document and the strip a rubber-band scroll
+// reveals. With no canvas, #frame keeps the viewer's ground (viewer.css), and
+// the page itself follows the viewer's scheme, so a transparent page is never a
+// light slab in a dark viewer or the reverse.
+let pageCanvas = null;
+
+function paintBackdrop() {
+  const frame = $('frame');
+  if (pageCanvas) frame.style.backgroundColor = pageCanvas;
+  else frame.style.removeProperty('background-color');
+}
+
+addEventListener('message', e => {
+  const d = e.data;
+  if (e.source !== $('frame').contentWindow || !d || d.__artifactBackdrop !== 1) return;
+  // Only a computed colour crosses the boundary; a page cannot set a
+  // declaration, a URL or markup here.
+  pageCanvas = backdropColor(d.color);
+  paintBackdrop();
+});
 
 function trackAnchor(anchor) {
   trackedAnchor = anchor;

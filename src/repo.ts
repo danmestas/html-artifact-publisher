@@ -428,15 +428,15 @@ export class Repo extends DurableObject<Env> {
     if (env.TEST_EXPIRATION_ALARM_HOLD_MS) await new Promise(resolve => setTimeout(resolve, Number(env.TEST_EXPIRATION_ALARM_HOLD_MS)));
     this.ensureTable();
     let row = this.ctx.storage.sql
-      .exec<{ id: string; expires_at: number | null; expiration_revision: number; projected_revision: number }>(
-        `SELECT id, expires_at, expiration_revision, projected_revision FROM _artifact LIMIT 1`,
+      .exec<{ id: string; title: string; expires_at: number | null; expiration_revision: number; projected_revision: number }>(
+        `SELECT id, title, expires_at, expiration_revision, projected_revision FROM _artifact LIMIT 1`,
       ).toArray()[0];
     if (!row) { await this.ctx.storage.deleteAlarm(); return; }
     if (row.projected_revision < row.expiration_revision) {
       await this.project(row.expiration_revision);
       row = this.ctx.storage.sql
-        .exec<{ id: string; expires_at: number | null; expiration_revision: number; projected_revision: number }>(
-          `SELECT id, expires_at, expiration_revision, projected_revision FROM _artifact LIMIT 1`,
+        .exec<{ id: string; title: string; expires_at: number | null; expiration_revision: number; projected_revision: number }>(
+          `SELECT id, title, expires_at, expiration_revision, projected_revision FROM _artifact LIMIT 1`,
         ).toArray()[0];
       if (!row) { await this.ctx.storage.deleteAlarm(); return; }
     }
@@ -444,8 +444,10 @@ export class Repo extends DurableObject<Env> {
     if (deadline != null && deadline <= Date.now()) {
       // Remove the library row before this object's storage: the call is
       // idempotent, and a failure leaves the alarm retryable rather than the
-      // library pointing at an artifact whose repository is gone.
-      await this.env.REGISTRY.getByName('registry').remove(row.id);
+      // library pointing at an artifact whose repository is gone. The removal
+      // records the expiry itself, in the same transaction and only while the
+      // row is still there, so a retried alarm adds no second event.
+      await this.env.REGISTRY.getByName('registry').remove(row.id, { reason: 'expired', expiresAt: row.expires_at, title: row.title });
       await this.destroy();
       return;
     }

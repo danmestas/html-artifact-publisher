@@ -75,21 +75,24 @@
     <main id="main" class="main" tabindex="-1">
       <header class="page-header"><div><h1 id="page-title">Your artifacts</h1><p id="page-description" class="muted"></p></div><button id="page-action" class="primary" hidden></button></header>
       <form id="filters" class="toolbar" role="search">
-        <div class="search"><label class="sr-only" for="search">Search artifacts</label><input id="search" type="search" placeholder="Search artifacts…" maxlength="200" autocomplete="off"></div>
+        <div class="search"><label id="search-label" class="sr-only" for="search">Search artifacts</label><input id="search" type="search" placeholder="Search artifacts…" maxlength="300" autocomplete="off"></div>
         <select id="owner-filter" aria-label="Filter by owner" hidden><option value="">Every owner</option></select>
         <div id="status-filter" class="tabs" role="group" aria-label="Filter by status" hidden>
           <button type="button" data-status="all" aria-pressed="true">All<small></small></button>
           <button type="button" data-status="active" aria-pressed="false">Active<small></small></button>
           <button type="button" data-status="archived" aria-pressed="false">Archived<small></small></button>
         </div>
+        <select id="expiry-filter" aria-label="Filter by expiration" hidden><option value="all">Any expiration</option><option value="soon">Expiring in 7 days</option></select>
         <span class="spacer" aria-hidden="true"></span>
-        <select id="sort" aria-label="Sort artifacts"><option value="recent">Recently updated</option><option value="name">Name A–Z</option></select>
+        <select id="sort" aria-label="Sort artifacts"><option value="recent">Recently updated</option><option value="name">Name A–Z</option><option value="expiry" hidden>Expires soonest</option></select>
+        <button id="clear-filters" type="button" hidden>Clear filters</button>
         <div id="layout-switch" class="segmented" role="group" aria-label="Library layout"><button type="button" data-layout="grid" aria-pressed="true">Grid</button><button type="button" data-layout="list" aria-pressed="false">List</button></div>
       </form>
       <p id="result-status" class="tiny" role="status" aria-live="polite"></p>
       <div id="page-error" class="error" role="alert" hidden></div>
       <div id="content"></div>
       <div id="pagination" class="more" hidden><button id="more" type="button">Show more</button><span id="shown" class="tiny" aria-live="polite"></span></div>
+      <p id="inventory-note" class="bottom-note" hidden></p>
       <p id="privacy-note" class="bottom-note">Private artifacts are hidden from other members, not from the instance owner. Archiving hides work from the library; it does not revoke access through existing links.</p>
       <p class="bottom-note"><a href="/agent-setup.html">Set up an agent to publish</a></p>
     </main>

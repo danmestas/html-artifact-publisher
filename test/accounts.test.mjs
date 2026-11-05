@@ -19,7 +19,7 @@ let ownerAccount, memberA, memberB;
 async function api(path, { method='GET', cookie, bearer, token, body, origin=base } = {}) {
   const headers = origin === null ? {} : { Origin:origin };
   // Synchronous browser commands block Node from retiring idle pooled sockets.
-  if (process.env.ACCOUNTS_BROWSER_QA === '1') headers.Connection='close';
+  if (['ACCOUNTS_BROWSER_QA','ACCOUNTS_BROWSER_QA_ADMIN','ACCOUNTS_BROWSER_QA_EXPIRATION'].some(key=>process.env[key]==='1')) headers.Connection='close';
   if (cookie) headers.Cookie=cookie;
   if (bearer) headers.Authorization=`Bearer ${bearer}`;
   if (token) headers.Authorization=`Token ${token}`;
@@ -289,6 +289,13 @@ if (process.env.ACCOUNTS_BROWSER_QA_EXPIRATION === '1') test('real browser: expi
   const output=join(root,'.wrangler/accounts-browser-qa');
   const { run,evaluate,wait,click }=browserDriver('accounts-expiration-qa');
   await expirationQA({base,api,run,evaluate,wait,click,output,artifact:{id:artifact.id,cookie:creator.cookie}});
+});
+
+if (process.env.ACCOUNTS_BROWSER_QA === '1' || process.env.ACCOUNTS_BROWSER_QA_ADMIN === '1') test('real browser: admin workspace workflows',async()=>{
+  try { registrySQL('DELETE FROM rate_limits RETURNING key'); } catch { /* standalone run */ }
+  const owner=await login('owner@example.com');
+  const { adminWorkspaceQA }=await import('./admin-workspace-browser.mjs');
+  await adminWorkspaceQA({base,output:join(root,'.wrangler/admin-workspace-qa'),owner,api});
 });
 
 if (process.env.ACCOUNTS_BROWSER_QA === '1') test('real browser: navigation matrix, phone controls and management workflows',async()=>{

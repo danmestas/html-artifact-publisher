@@ -16,10 +16,11 @@ const VIEWS = {
   archived: ['Archived artifacts', 'Find archived work. Creators and the instance owner can restore it from the artifact menu.'],
   admin: ['Every artifact', 'The complete inventory across every account, including private and archived work.'],
   people: ['People & invitations', 'Invite people to create their own library. Membership allows sign-in, not access to anyone’s artifacts.'],
-  activity: ['Activity', 'Recent administrative changes in this instance.'],
+  activity: ['Activity', 'Who changed artifacts, access and accounts, including automatic expiration.'],
   credentials: ['API credentials', 'Publish from the CLI using a credential tied to your account.'],
   publications: ['Published links', 'Manage public copies of exact artifact versions, separately from your private library.'],
 };
+const KIND_LABELS = { all: 'Everything', artifacts: 'Artifacts', people: 'People', credentials: 'Credentials', 'sign-ins': 'Sign-ins' };
 let user = null;
 let people = [];
 let loadSequence = 0;
@@ -34,8 +35,6 @@ let loginState = 'form'; // 'form' | 'sent' | 'expired'; a captured link shows t
 let sentEmail = '';
 let resendTimer;
 let activityEvents = [];
-let activityFilter = 'all';
-let activityCursor = null;
 let publicationCleanupResult = '';
 let preferences = {};
 try { preferences = JSON.parse(localStorage.getItem('artifact-library-preferences') || '{}') || {}; } catch { /* Optional per-browser preferences. */ }
@@ -44,11 +43,15 @@ let layout = preferences.layout === 'list' ? 'list' : 'grid';
 function readState() {
   const p = new URLSearchParams(location.search);
   const n = Number.parseInt(p.get('n') || '', 10);
+  const view = Object.hasOwn(VIEWS, p.get('view')) ? p.get('view') : 'all';
+  const batch = view === 'activity' ? EVENT_BATCH : BATCH;
   return {
-    view: Object.hasOwn(VIEWS, p.get('view')) ? p.get('view') : 'all',
-    q: p.get('q') || '', ownerId: p.get('ownerId') || '',
-    status: ['all', 'active', 'archived'].includes(p.get('status')) ? p.get('status') : 'all',
-    n: Number.isSafeInteger(n) && n > BATCH ? Math.min(n, 480) : BATCH, sort: p.get('sort') === 'name' ? 'name' : 'recent',
+    view, q: (p.get('q') || '').slice(0, 300), ownerId: view === 'admin' ? p.get('ownerId') || '' : '',
+    status: view === 'admin' && ['all', 'active', 'archived'].includes(p.get('status')) ? p.get('status') : 'all',
+    expiry: view === 'admin' && p.get('expiry') === 'soon' ? 'soon' : 'all',
+    kind: view === 'activity' && Object.hasOwn(KIND_LABELS, p.get('kind')) ? p.get('kind') : 'all',
+    n: Number.isSafeInteger(n) && n > batch ? Math.min(n, 480) : batch,
+    sort: p.get('sort') === 'name' ? 'name' : view === 'admin' && p.get('sort') === 'expiry' ? 'expiry' : 'recent',
   };
 }
 let state = readState();
@@ -278,9 +281,11 @@ function writeUrl(replace = false) {
   if (state.view === 'admin') {
     if (state.ownerId) p.set('ownerId', state.ownerId);
     if (state.status !== 'all') p.set('status', state.status);
+    if (state.expiry === 'soon') p.set('expiry', state.expiry);
   }
-  if (state.n > BATCH) p.set('n', String(state.n));
-  if (state.sort === 'name') p.set('sort', state.sort);
+  if (state.view === 'activity' && state.kind !== 'all') p.set('kind', state.kind);
+  if (state.n > (state.view === 'activity' ? EVENT_BATCH : BATCH)) p.set('n', String(state.n));
+  if (state.sort === 'name' || (state.view === 'admin' && state.sort === 'expiry')) p.set('sort', state.sort);
   history[replace ? 'replaceState' : 'pushState'](null, '', '/' + (p.size ? '?' + p : ''));
   refreshViewerLinks();
 }
@@ -293,10 +298,10 @@ $('nav-toggle').addEventListener('click', () => {
   const expanded = document.querySelector('.sidebar').classList.toggle('expanded');
   $('nav-toggle').setAttribute('aria-expanded', String(expanded));
 });
-function resetPagination() { state.n = BATCH; nextCursor = null; shownCount = 0; }
+function resetPagination() { state.n = state.view === 'activity' ? EVENT_BATCH : BATCH; nextCursor = null; shownCount = 0; }
 function navigate(view) {
   clearTimeout(searchTimer);
-  state = { view, q: '', ownerId: '', status: 'all', n: BATCH, sort: state.sort };
+  state = { view, q: '', ownerId: '', status: 'all', expiry: 'all', kind: 'all', n: BATCH, sort: view !== 'admin' && state.sort === 'expiry' ? 'recent' : state.sort };
   resetPagination();
   writeUrl();
   closeNavigation();
@@ -322,6 +327,15 @@ $('sort').addEventListener('change', () => {
 });
 $('owner-filter').addEventListener('change', () => {
   state.ownerId = $('owner-filter').value;
+  resetPagination(); writeUrl(); loadPage();
+});
+$('expiry-filter').addEventListener('change', () => {
+  state.expiry = $('expiry-filter').value;
+  resetPagination(); writeUrl(); loadPage();
+});
+$('clear-filters').addEventListener('click', () => {
+  clearTimeout(searchTimer);
+  state.q = ''; state.ownerId = ''; state.status = 'all'; state.expiry = 'all'; state.kind = 'all';
   resetPagination(); writeUrl(); loadPage();
 });
 document.querySelectorAll('#status-filter [data-status]').forEach(b => b.addEventListener('click', () => {
@@ -350,9 +364,10 @@ $('more').addEventListener('click', async () => {
   $('more').disabled = true;
   try {
     if (view === 'activity') {
-      const data = await api(`/api/admin/activity?${new URLSearchParams({ limit: String(EVENT_BATCH), cursor: nextCursor, ...(activityFilter === 'all' ? {} : { kind: activityFilter }) })}`);
+      const data = await api(`/api/admin/activity?${new URLSearchParams({ limit: String(EVENT_BATCH), cursor: nextCursor, q: state.q, ...(state.kind === 'all' ? {} : { kind: state.kind }) })}`);
       if (seq !== loadSequence) return;
       activityEvents.push(...data.events); nextCursor = data.nextCursor;
+      state.n = activityEvents.length; writeUrl(true);
       renderActivity();
     } else if (view === 'publications') {
       const data = await api('/api/publications?' + new URLSearchParams({ cursor: nextCursor }));
@@ -363,7 +378,7 @@ $('more').addEventListener('click', async () => {
     } else {
       const inventory = view === 'admin';
       const p = new URLSearchParams({ q: state.q, limit: String(BATCH), sort: state.sort, cursor: nextCursor });
-      if (inventory) { p.set('status', state.status); if (state.ownerId) p.set('ownerId', state.ownerId); } else p.set('view', view);
+      if (inventory) { p.set('status', state.status); if (state.ownerId) p.set('ownerId', state.ownerId); if (state.expiry === 'soon') p.set('expiry', 'soon'); } else p.set('view', view);
       const data = await api(`${inventory ? '/api/admin/artifacts' : '/api/library'}?${p}`);
       if (seq !== loadSequence) return;
       renderArtifacts(data.artifacts, inventory, true);
@@ -414,7 +429,10 @@ function setOptions(select, entries, first) {
 }
 async function loadPage() {
   if (!user) return;
-  if (ADMIN_VIEWS.includes(state.view) && user.role !== 'owner') { state.view = 'all'; resetPagination(); writeUrl(true); }
+  if (ADMIN_VIEWS.includes(state.view) && user.role !== 'owner') {
+    state = { ...state, view: 'all', ownerId: '', status: 'all', expiry: 'all', kind: 'all', sort: state.sort === 'expiry' ? 'recent' : state.sort };
+    resetPagination(); writeUrl(true);
+  }
   const seq = ++loadSequence;
   const view = state.view;
   const library = LIBRARY_VIEWS.includes(view);
@@ -426,11 +444,24 @@ async function loadPage() {
     if (b.dataset.view === view) b.setAttribute('aria-current', 'page');
     else b.removeAttribute('aria-current');
   });
-  $('filters').hidden = !library && !inventory;
+  $('filters').hidden = !library && !inventory && view !== 'people' && view !== 'activity';
+  $('sort').hidden = !library && !inventory;
+  const searchLabel = view === 'people' ? 'Search people' : view === 'activity' ? 'Search activity' : 'Search artifacts';
+  $('search-label').textContent = searchLabel;
+  $('search-label').className = library ? 'sr-only' : 'search-label';
+  $('search').placeholder = view === 'people' ? 'Name or email…' : view === 'activity' ? 'Person, artifact or ID…' : 'Search artifacts…';
   $('layout-switch').hidden = !library;
   $('owner-filter').hidden = !inventory;
   $('status-filter').hidden = !inventory;
-  $('privacy-note').hidden = view === 'publications';
+  $('expiry-filter').hidden = !inventory;
+  $('sort').querySelector('[value="expiry"]').hidden = !inventory;
+  $('sort').querySelector('[value="expiry"]').disabled = !inventory;
+  $('expiry-filter').value = state.expiry;
+  const filtered = state.q || (inventory && (state.ownerId || state.status !== 'all' || state.expiry === 'soon')) || (view === 'activity' && state.kind !== 'all');
+  $('clear-filters').hidden = !filtered;
+  $('inventory-note').hidden = !inventory;
+  $('inventory-note').textContent = `Expiration permanently deletes private content and history. Public copies remain until unpublished. Times shown in ${timeZoneName()}.`;
+  $('privacy-note').hidden = !library && !inventory;
   clearPreviews();
   $('sort').value = state.sort;
   $('search').value = state.q;
@@ -444,7 +475,7 @@ async function loadPage() {
   $('result-status').textContent = 'Loading…';
   message('page-error');
   $('content').setAttribute('aria-busy', 'true');
-  $('content').replaceChildren(node('div', { className: 'loading', textContent: 'Loading your work…' }));
+  $('content').replaceChildren(node('div', { className: 'loading', textContent: `Loading ${inventory ? 'the instance inventory' : view === 'people' ? 'people and invitations' : view === 'activity' ? 'activity' : view === 'credentials' ? 'credentials' : view === 'publications' ? 'published links' : 'your work'}…` }));
   try {
     if (library || inventory) {
       if (inventory) {
@@ -459,7 +490,7 @@ async function loadPage() {
       do {
         const p = new URLSearchParams({ q: state.q, limit: String(Math.min(100, state.n - items.length)), sort: state.sort });
         if (cursor) p.set('cursor', cursor);
-        if (inventory) { p.set('status', state.status); if (state.ownerId) p.set('ownerId', state.ownerId); } else p.set('view', view);
+        if (inventory) { p.set('status', state.status); if (state.ownerId) p.set('ownerId', state.ownerId); if (state.expiry === 'soon') p.set('expiry', 'soon'); } else p.set('view', view);
         const data = await api(`${inventory ? '/api/admin/artifacts' : '/api/library'}?${p}`);
         if (seq !== loadSequence) return;
         items.push(...data.artifacts); total = data.total; counts = data.counts ?? counts; cursor = data.nextCursor;
@@ -468,7 +499,7 @@ async function loadPage() {
       if (inventory) renderStatusCounts(counts);
       nextCursor = cursor; shownCount = items.length; state.n = Math.max(BATCH, items.length);
       moreStatus(shownCount, total, 'artifact');
-      $('result-status').textContent = `${total} artifact${total === 1 ? '' : 's'} · ${state.sort === 'name' ? 'Name A–Z' : 'Recently updated first'}`;
+      $('result-status').textContent = `${total} artifact${total === 1 ? '' : 's'} · ${state.sort === 'expiry' ? 'Expires soonest · never last' : state.sort === 'name' ? 'Name A–Z' : 'Recently updated first'}`;
     } else if (view === 'publications') {
       const data = await api('/api/publications');
       if (seq !== loadSequence) return;
@@ -479,12 +510,19 @@ async function loadPage() {
     } else if (view === 'people') {
       const users = await loadPeople();
       if (seq !== loadSequence) return;
-      renderPeople(users);
-      $('result-status').textContent = `${users.length} account${users.length === 1 ? '' : 's'}`;
+      const q = state.q.trim().toLocaleLowerCase();
+      const matching = q ? users.filter(p => `${p.name || ''} ${p.email}`.toLocaleLowerCase().includes(q)) : users;
+      renderPeople(matching);
+      $('result-status').textContent = `${matching.length}${q ? ` of ${users.length}` : ''} account${matching.length === 1 && !q ? '' : 's'}`;
     } else if (view === 'activity') {
-      const data = await api(`/api/admin/activity?${new URLSearchParams({ limit: String(EVENT_BATCH), ...(activityFilter === 'all' ? {} : { kind: activityFilter }) })}`);
-      if (seq !== loadSequence) return;
-      activityEvents = data.events; nextCursor = data.nextCursor;
+      const events = []; let cursor = '';
+      do {
+        const data = await api(`/api/admin/activity?${new URLSearchParams({ limit: String(Math.min(EVENT_BATCH, state.n - events.length)), q: state.q, ...(cursor ? { cursor } : {}), ...(state.kind === 'all' ? {} : { kind: state.kind }) })}`);
+        if (seq !== loadSequence) return;
+        events.push(...data.events); cursor = data.nextCursor;
+      } while (cursor && events.length < state.n);
+      activityEvents = events; nextCursor = cursor;
+      state.n = Math.max(EVENT_BATCH, events.length);
       renderActivity();
     } else {
       const data = await api('/api/credentials');
@@ -610,16 +648,22 @@ function renderArtifacts(items, inventory, append = false) {
     return;
   }
   if (!items.length) {
-    $('content').replaceChildren(empty(state.q || state.ownerId || state.status !== 'all' ? 'No matching artifacts' : state.view === 'starred' ? 'Keep your favorites close' : 'Your shelf is ready',
-      state.q || state.ownerId || state.status !== 'all' ? 'Try a different search or clear your filters.' : state.view === 'starred' ? 'Open an artifact’s menu and choose Star artifact.' : 'Publish an HTML page and the files it uses, or find work shared with you here.'));
+    const filtered = state.q || state.ownerId || state.status !== 'all' || state.expiry === 'soon';
+    $('content').replaceChildren(empty(filtered ? 'No matching artifacts' : inventory ? 'No artifacts in this instance' : state.view === 'starred' ? 'Keep your favorites close' : 'Your shelf is ready',
+      filtered ? 'Try a different search or clear your filters.' : inventory ? 'Artifacts published by members appear here, including private and archived work. Expired content is permanently deleted.' : state.view === 'starred' ? 'Open an artifact’s menu and choose Star artifact.' : 'Publish an HTML page and the files it uses, or find work shared with you here.'));
     return;
   }
   const grid = !inventory && layout === 'grid';
   const list = node('div', { className: grid ? 'artifact-grid' : 'artifact-list', role: 'list' }, ...artifactEntries(items, inventory, grid));
   const headings = node('div', { className: `inventory-head${inventory ? ' inventory' : ''}`, ariaHidden: 'true' },
-    ...(inventory ? ['Artifact', 'Owner', 'Visibility', 'Status', 'Updated', ''] : ['Artifact', 'Owner', 'Updated', '', '']).map(textContent => node('span', { textContent })));
+    ...(inventory ? ['Artifact', 'Owner', 'Visibility', 'Status', 'Updated', 'Expires', ''] : ['Artifact', 'Owner', 'Updated', '', '']).map(textContent => node('span', { textContent })));
   $('content').replaceChildren(...(grid ? [list] : [headings, list]));
   loadPreviews();
+}
+function expirationSummary(item, prefix = true) {
+  if (!item.expiresAt) return 'Never expires';
+  if (new Date(item.expiresAt).getTime() <= Date.now()) return 'Expired — refresh to update';
+  return `${prefix ? 'Expires ' : ''}${dateTimeText(item.expiresAt)}`;
 }
 function artifactEntries(items, inventory, grid) {
   const out = [];
@@ -634,6 +678,9 @@ function artifactEntries(items, inventory, grid) {
     // The inventory is about everyone's work; the reader's own access is beside the point there.
     const summary = node('div', {}, title, node('div', { className: 'shelf-meta' }, inventory ? null : badge,
       node('span', { className: 'artifact-meta', title: meta(item), textContent: meta(item) })));
+    if (inventory) summary.append(node('div', { className: 'inventory-mobile' },
+      node('span', { textContent: `${mine(item) ? 'You' : item.ownerName || 'Instance owner'} · ${item.visibility === 'shared' ? 'Shared' : 'Private'} · ${item.archived ? 'Archived' : 'Active'}` }),
+      node('span', { className: 'inventory-expiration', textContent: expirationSummary(item) })));
     const menu = button('⋯', () => openManage(item), 'icon-button artifact-menu');
     menu.setAttribute('aria-label', `${item.canManage ? 'Manage' : 'Details for'} ${item.title || 'artifact'}`);
     const entry = node('article', { className: grid ? 'artifact-card' : `artifact-row${inventory ? ' inventory-row' : ''}${item.archived ? ' is-archived' : ''}`, role: 'listitem' });
@@ -648,6 +695,9 @@ function artifactEntries(items, inventory, grid) {
           cell('Status: ', 'status-cell', chip(item.archived ? 'Archived' : 'Active', item.archived ? 'archived' : 'active')));
       }
       entry.append(cell('Updated: ', 'time-cell', relativeDate(item.updatedAt)));
+      if (inventory) entry.append(cell('Expires: ', 'expiry-cell', item.expiresAt
+        ? node('time', { dateTime: item.expiresAt, title: `${dateTimeText(item.expiresAt)} (${timeZoneName()})`, textContent: expirationSummary(item, false) })
+        : 'Never expires'));
       if (!inventory) entry.append(starButton(item, 'row-star'));
       entry.append(menu);
     }
@@ -756,6 +806,7 @@ function openPublicationCleanup() {
   });
 }
 function renderPeople(users) {
+  if (!users.length) return $('content').replaceChildren(empty('No matching people', 'Try a different name or email, or clear your search.'));
   const members = users.filter(p => p.role === 'owner' || p.status === 'active');
   const invited = users.filter(p => p.role !== 'owner' && p.status === 'invited');
   const suspended = users.filter(p => p.role !== 'owner' && p.status === 'disabled');
@@ -771,6 +822,13 @@ function inviteLinkState(p) {
   const left = (new Date(p.inviteExpiresAt).getTime() - Date.now()) / 1000;
   return left > 0 ? `link expires in ${minutesLeft(left)}` : 'link expired';
 }
+function personArtifacts(p) {
+  const count = p.artifactCount;
+  return node('a', { className: 'person-artifacts',
+    href: '/?' + new URLSearchParams({ view: 'admin', ownerId: p.id }),
+    textContent: Number.isFinite(count) ? `View ${count} artifact${count === 1 ? '' : 's'}` : 'View artifacts',
+    ariaLabel: `View artifacts owned by ${personName(p) || p.email}` });
+}
 function personRow(p) {
   const owner = p.role === 'owner', invited = p.status === 'invited', suspended = p.status === 'disabled';
   const name = personName(p);
@@ -779,8 +837,11 @@ function personRow(p) {
     node('span', { className: 'avatar', ariaHidden: 'true', textContent: initials(name || p.email) }),
     node('div', { className: 'identity' }, node('strong', { textContent: name || p.email }), detail ? node('small', { textContent: detail }) : null),
     node('span', { className: `state ${owner ? 'owner' : invited ? 'invited' : suspended ? 'disabled' : 'active'}`, textContent: owner ? 'Instance owner' : invited ? 'Invited · not yet signed in' : suspended ? 'Suspended' : 'Active' }));
+  row.dataset.personId = p.id;
+  if (!invited) row.querySelector('.identity').append(node('small', { className: 'person-signin', textContent: p.lastSignInAt ? `Last sign-in ${dateTimeText(p.lastSignInAt)}` : 'No recorded sign-in' }));
+  const actions = node('div', { className: 'record-actions' });
+  if (!invited) actions.append(personArtifacts(p));
   if (!owner) {
-    const actions = node('div', { className: 'record-actions' });
     if (invited) {
       const resend = button(p.resendAfter > 0 ? `Resend in ${minutesLeft(p.resendAfter)}` : 'Resend', () => resendInvitation(p), 'linkish');
       resend.disabled = p.resendAfter > 0;
@@ -790,8 +851,8 @@ function personRow(p) {
     const more = button('⋯', () => openPerson(p), 'icon-button');
     more.setAttribute('aria-label', `Actions for ${name || p.email}`);
     actions.append(more);
-    row.append(actions);
   }
+  if (actions.childElementCount) row.append(actions);
   return row;
 }
 function resendInvitation(p) {
@@ -810,21 +871,33 @@ function withdrawInvitation(p) {
 function openPerson(p) {
   const invited = p.status === 'invited', suspended = p.status === 'disabled';
   const details = node('dl', { className: 'details-grid' });
-  for (const [label, value] of [['Email', p.email], ['Status', invited ? 'Invited, not yet signed in' : suspended ? 'Suspended' : 'Active member']]) {
+  for (const [label, value] of [['Email', p.email], ['Status', invited ? 'Invited, not yet signed in' : suspended ? 'Suspended' : 'Active member'],
+    ['Artifacts', Number.isFinite(p.artifactCount) ? `${p.artifactCount} current, including archived` : 'See inventory'],
+    ['Last sign-in', p.lastSignInAt ? dateTimeText(p.lastSignInAt) : 'No recorded sign-in']]) {
     details.append(node('dt', { textContent: label }), node('dd', { textContent: value }));
   }
   const actions = node('div', { className: 'manage-actions' });
+  if (!invited) actions.append(personArtifacts(p));
   if (invited) actions.append(button('Resend invitation', () => resendInvitation(p)), button('Withdraw invitation', () => withdrawInvitation(p)));
   actions.append(button(suspended ? 'Reactivate account' : 'Suspend account', () => openSuspend(p), suspended ? '' : 'danger'));
   openDialog(personName(p) || p.email, details, actions);
 }
 // Each audit row as a sentence. The audit keeps the actor; artifact and account targets when recorded.
-const EVENT_KIND = { archive: 'artifacts', restore: 'artifacts', rename: 'artifacts', transfer: 'artifacts', sharing_change: 'artifacts', expiration: 'artifacts', invite: 'people', invite_withdrawn: 'people', account_disabled: 'people', account_active: 'people', credential_create: 'credentials', credential_revoke: 'credentials', sign_in: 'sign-ins' };
+const EVENT_KIND = { publish: 'artifacts', delete: 'artifacts', expired: 'artifacts', 'rotate-comment-link': 'artifacts', archive: 'artifacts', restore: 'artifacts', rename: 'artifacts', transfer: 'artifacts', sharing_change: 'artifacts', expiration: 'artifacts', invite: 'people', invite_withdrawn: 'people', account_disabled: 'people', account_active: 'people', credential_create: 'credentials', credential_revoke: 'credentials', sign_in: 'sign-ins' };
 const EVENT_GLYPH = { artifacts: '▤', people: '✉', credentials: '⚿', 'sign-ins': '→', account_disabled: '⊘', account_active: '✓' };
 function eventSentence(e) {
-  const artifact = e.artifactId ? node('a', { href: viewerUrl({ id: e.artifactId }), textContent: e.artifactTitle || 'an artifact' }) : (e.artifactTitle || 'an artifact');
+  const artifact = e.artifactId && !['delete','expired'].includes(e.action) ? node('a', { href: viewerUrl({ id: e.artifactId }), textContent: e.artifactTitle || 'an artifact' }) : (e.artifactTitle || 'an artifact');
   const target = e.target || '';
+  if (e.action === 'expiration') {
+    if (e.details && Object.hasOwn(e.details, 'expiresAt')) {
+      if (e.details.expiresAt === null) return ['removed the expiration of ', artifact];
+      if (!Number.isNaN(new Date(e.details.expiresAt).getTime())) return ['set the expiration of ', artifact, ' to ', dateTimeText(e.details.expiresAt)];
+    }
+    return ['changed the expiration of ', artifact, ' (deadline not recorded)'];
+  }
   const verbs = {
+    publish: ['published ', artifact], delete: ['deleted ', artifact], expired: ['expired ', artifact, ' and permanently deleted its private content and history'],
+    'rotate-comment-link': ['rotated the comment link for ', artifact],
     invite: ['invited ', target || 'someone'], invite_withdrawn: ['withdrew the invitation to ', target || 'someone'], archive: ['archived ', artifact], restore: ['restored ', artifact], rename: ['renamed ', artifact],
     transfer: ['transferred ', artifact], sharing_change: ['changed who can open ', artifact], expiration: ['changed the expiration of ', artifact], sign_in: ['signed in'],
     account_disabled: ['suspended ', target || 'an account'], account_active: ['reactivated ', target || 'an account'],
@@ -838,22 +911,22 @@ function dayLabel(value) {
   const days = Math.floor((new Date(today.getFullYear(), today.getMonth(), today.getDate()) - new Date(d.getFullYear(), d.getMonth(), d.getDate())) / 86400000);
   return days === 0 ? 'Today' : days === 1 ? 'Yesterday' : d.toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' });
 }
-const KIND_LABELS = { all: 'Everything', artifacts: 'Artifacts', people: 'People', credentials: 'Credentials', 'sign-ins': 'Sign-ins' };
 function renderActivity() {
   const events = activityEvents;
   const filter = node('div', { className: 'event-filter', role: 'group', ariaLabel: 'Show' }, ...Object.entries(KIND_LABELS).map(([kind, label]) => {
-    const b = button(label, () => { if (activityFilter === kind) return; activityFilter = kind; loadPage(); });
-    b.setAttribute('aria-pressed', String(activityFilter === kind));
+    const b = button(label, () => { if (state.kind === kind) return; state.kind = kind; resetPagination(); writeUrl(); loadPage(); });
+    b.setAttribute('aria-pressed', String(state.kind === kind));
     return b;
   }));
-  const noun = activityFilter === 'all' ? 'event' : `${KIND_LABELS[activityFilter].toLowerCase().replace(/s$/, '')} event`;
+  const noun = state.kind === 'all' ? 'event' : `${KIND_LABELS[state.kind].toLowerCase().replace(/s$/, '')} event`;
   $('pagination').hidden = !nextCursor;
   $('more').hidden = !nextCursor;
   $('more').textContent = 'Show older events';
   $('shown').textContent = `${events.length} ${noun}${events.length === 1 ? '' : 's'} shown`;
   if (!events.length) {
     $('result-status').textContent = 'No events';
-    return $('content').replaceChildren(filter, empty(activityFilter === 'all' ? 'No activity yet' : 'Nothing of that kind', activityFilter === 'all' ? 'Administrative changes will appear here.' : 'No events of this kind have been recorded.'));
+    const searching = state.q || state.kind !== 'all';
+    return $('content').replaceChildren(filter, empty(searching ? 'No matching activity' : 'No activity yet', searching ? 'Try a different person or artifact, change the event kind, or clear your filters.' : 'Artifact changes, invitations, account changes and sign-ins will appear here.'));
   }
   const shown = events;
   const out = [filter];
@@ -863,14 +936,16 @@ function renderActivity() {
     if (label !== day) {
       day = label;
       out.push(node('h2', { className: 'day-head', textContent: label }));
-      list = node('div', { className: 'record-list' });
+      list = node('div', { className: 'record-list', role: 'list' });
       out.push(list);
     }
     const kind = EVENT_KIND[e.action] || 'artifacts';
-    list.append(node('div', { className: `event${kind === 'sign-ins' ? ' quiet' : ''}` },
+    const entry = node('div', { className: `event${kind === 'sign-ins' ? ' quiet' : ''}`, role: 'listitem' },
       node('span', { className: 'ico', ariaHidden: 'true', textContent: EVENT_GLYPH[e.action] || EVENT_GLYPH[kind] }),
-      node('span', {}, node('strong', { textContent: e.actorName || 'Account' }), ' ', ...eventSentence(e)),
-      node('time', { dateTime: e.createdAt, textContent: relativeDate(e.createdAt), title: new Date(e.createdAt).toLocaleString() })));
+      node('span', {}, node('strong', { textContent: e.actorName || (e.action === 'expired' ? 'System' : 'Account') }), ' ', ...eventSentence(e)),
+      node('time', { dateTime: e.createdAt, textContent: relativeDate(e.createdAt), title: new Date(e.createdAt).toLocaleString() }));
+    entry.dataset.action = e.action;
+    list.append(entry);
   }
   $('content').replaceChildren(...out);
   $('result-status').textContent = `${events.length}${nextCursor ? '+' : ''} ${noun}${events.length === 1 && !nextCursor ? '' : 's'} · newest first`;
@@ -1137,7 +1212,7 @@ function openSuspend(person) {
   const suspended = person.status === 'disabled';
   confirmAction(suspended ? 'Reactivate account?' : 'Suspend account?', suspended
     ? `${person.email} can sign in again. Previously revoked API credentials remain revoked.`
-    : `${person.email} will be signed out everywhere and all their API credentials revoked. Their artifacts will remain in the instance.`,
+    : `${person.email} will be signed out everywhere and all their API credentials revoked. Their artifacts will remain in the instance. Previously issued artifact capability links still work; suspension does not revoke those links.`,
   suspended ? 'Reactivate account' : 'Suspend account', async () => {
     await api(`/api/people/${encodeURIComponent(person.id)}`, { method: 'PATCH', body: { status: suspended ? 'active' : 'disabled' } });
     notify(suspended ? 'Account reactivated.' : 'Account suspended.');

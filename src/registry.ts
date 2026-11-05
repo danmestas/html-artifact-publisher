@@ -1,5 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
-import { genId } from './util';
+import { genId, isoOrNull } from './util';
 import { deletePublicationFiles, publicationManifest, publicationPrefix } from './publication-files';
 
 export type Publication = {
@@ -53,7 +53,7 @@ export class Registry extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS credentials (id TEXT PRIMARY KEY, hash TEXT UNIQUE NOT NULL, user_id TEXT NOT NULL, name TEXT NOT NULL, created_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS grants (artifact_id TEXT NOT NULL, user_id TEXT NOT NULL, permission TEXT NOT NULL, PRIMARY KEY(artifact_id,user_id));
       CREATE TABLE IF NOT EXISTS stars (artifact_id TEXT NOT NULL, user_id TEXT NOT NULL, PRIMARY KEY(artifact_id,user_id));
-      CREATE TABLE IF NOT EXISTS activity (id TEXT PRIMARY KEY, actor_id TEXT NOT NULL, action TEXT NOT NULL, artifact_id TEXT, artifact_title TEXT, created_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS activity (id TEXT PRIMARY KEY, actor_id TEXT NOT NULL, action TEXT NOT NULL, artifact_id TEXT, artifact_title TEXT, created_at INTEGER NOT NULL, details TEXT);
       CREATE TABLE IF NOT EXISTS rate_limits (key TEXT PRIMARY KEY, count INTEGER NOT NULL, expires INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS blob_refs (sha TEXT NOT NULL, artifact_id TEXT NOT NULL, PRIMARY KEY(sha,artifact_id));
       CREATE INDEX IF NOT EXISTS blob_refs_artifact ON blob_refs(artifact_id,sha);
@@ -83,6 +83,10 @@ export class Registry extends DurableObject<Env> {
       sql.exec("UPDATE accounts SET signed_in_at = COALESCE(created_at, 0) WHERE status != 'invited'");
     }
     if (!sql.exec<{ name: string }>('PRAGMA table_info(activity)').toArray().some(c => c.name === 'target')) sql.exec('ALTER TABLE activity ADD COLUMN target TEXT');
+    // Structured metadata for an event (an expiration's deadline, for one).
+    // Rows written before this column have none: their date is unknown, which
+    // stays distinct from a structured "never expires" ({\"expiresAt\":null}).
+    if (!sql.exec<{ name: string }>('PRAGMA table_info(activity)').toArray().some(c => c.name === 'details')) sql.exec('ALTER TABLE activity ADD COLUMN details TEXT');
     if (!cols.some(c => c.name === 'archived')) sql.exec('ALTER TABLE artifacts ADD COLUMN archived INTEGER NOT NULL DEFAULT 0');
     if (!cols.some(c => c.name === 'icon')) sql.exec("ALTER TABLE artifacts ADD COLUMN icon TEXT NOT NULL DEFAULT 'document'");
     // The newest expiration revision the Repo has projected here. A repeated
@@ -194,10 +198,23 @@ export class Registry extends DurableObject<Env> {
   /**
    * Delete an artifact's listing, and the R2 objects no other artifact points
    * at: check-in blobs under b/ and attachments under attachments/.
+   *
+   * `context.reason === 'expired'` records the automatic expiry in the same
+   * transaction as the removal, and only when the row is still there: a retry
+   * after a lost acknowledgement finds nothing and adds no second event. The
+   * event keeps the title and the reason after the listing row is gone.
    */
-  async remove(id: string): Promise<void> {
+  async remove(id: string, context?: { reason?: 'expired'; expiresAt?: number | null; title?: string | null }): Promise<void> {
     const orphans = this.ctx.storage.transactionSync(() => {
       const sql = this.ctx.storage.sql;
+      if (context?.reason === 'expired') {
+        const row = sql.exec<{ title: string; expires_at: number | null }>('SELECT title, expires_at FROM artifacts WHERE id = ?',id).toArray()[0];
+        if (row) {
+          sql.exec('INSERT INTO activity (id,actor_id,action,artifact_id,artifact_title,created_at,target,details) VALUES (?,?,?,?,?,?,?,?)',
+            genId(),'system','expired',id,context.title ?? row.title,now(),null,
+            JSON.stringify({ reason:'expired', expiresAt: isoOrNull(context.expiresAt !== undefined ? context.expiresAt : row.expires_at) }));
+        }
+      }
       for (const table of ['grants','stars']) sql.exec(`DELETE FROM ${table} WHERE artifact_id = ?`,id);
       sql.exec('DELETE FROM artifacts WHERE id = ?',id);
       const shasOf = (q: string) => sql.exec<{ sha: string }>(q,id).toArray().map(r => r.sha);
@@ -463,7 +480,26 @@ export class Registry extends DurableObject<Env> {
   }
   async account(id: string): Promise<Account | null> { return this.ctx.storage.sql.exec<Account>('SELECT * FROM accounts WHERE id = ?',id).toArray()[0] ?? null; }
   async byEmail(email: string): Promise<Account | null> { return this.ctx.storage.sql.exec<Account>('SELECT * FROM accounts WHERE email = ?',email).toArray()[0] ?? null; }
-  async people(): Promise<Account[]> { return this.ctx.storage.sql.exec<Account>('SELECT * FROM accounts ORDER BY email LIMIT 1000').toArray(); }
+  async people(): Promise<(Account & { last_sign_in_at: number | null })[]> {
+    // signed_in_at also holds legacy activation markers. Only audited sign-ins
+    // are evidence for the admin display; aggregate once, not per account.
+    return this.ctx.storage.sql.exec<Account & { last_sign_in_at: number | null }>(`
+      SELECT a.*,s.last_sign_in_at FROM accounts a LEFT JOIN (
+        SELECT actor_id,MAX(created_at) AS last_sign_in_at FROM activity
+        WHERE action='sign_in' GROUP BY actor_id
+      ) s ON s.actor_id=a.id ORDER BY a.email LIMIT 1000`).toArray();
+  }
+  /**
+   * How many live artifacts each owner holds, count(*) in one pass: archived
+   * ones count, expired ones do not, and a row with no owner_id (an artifact
+   * from before accounts) counts as the instance owner's.
+   */
+  async artifactCounts(): Promise<Record<string, number>> {
+    const rows = this.ctx.storage.sql.exec<{ ownerId: string; n: number }>(
+      `SELECT COALESCE(owner_id,'instance-owner') AS ownerId, count(*) AS n FROM artifacts
+       WHERE expires_at IS NULL OR expires_at > ? GROUP BY COALESCE(owner_id,'instance-owner')`,now()).toArray();
+    return Object.fromEntries(rows.map(r => [r.ownerId,r.n]));
+  }
   async invite(email: string, name: string): Promise<Account> {
     this.ctx.storage.sql.exec(`INSERT OR IGNORE INTO accounts (id,email,name,role,status,created_at) VALUES (?, ?, ?, 'member', 'invited', ?)`,genId(),email,name,now());
     return (await this.byEmail(email))!;
@@ -600,8 +636,10 @@ export class Registry extends DurableObject<Env> {
       sql.exec('UPDATE artifacts SET expires_at=?, expiration_revision=? WHERE id=?',input.expiresAt,input.revision,input.id);
       // Clearing an expiration also cancels any old deadline the library still
       // filters on; the row write above does that, and the audit says so once.
-      if (input.actor) sql.exec('INSERT INTO activity (id,actor_id,action,artifact_id,artifact_title,created_at,target) VALUES (?,?,?,?,?,?,?)',
-        genId(),input.actor,'expiration',input.id,input.title,now(),null);
+      // The structured deadline tells null (never expires) apart from an entry
+      // written before metadata existed, whose date is unknown.
+      if (input.actor) sql.exec('INSERT INTO activity (id,actor_id,action,artifact_id,artifact_title,created_at,target,details) VALUES (?,?,?,?,?,?,?,?)',
+        genId(),input.actor,'expiration',input.id,input.title,now(),null,JSON.stringify({ expiresAt: isoOrNull(input.expiresAt) }));
       return 'applied';
     });
     if (dropAck) throw new Error('injected lost projection acknowledgement');
@@ -610,7 +648,7 @@ export class Registry extends DurableObject<Env> {
   async star(id: string, userId: string, starred: boolean): Promise<void> {
     this.ctx.storage.sql.exec(starred ? 'INSERT OR IGNORE INTO stars VALUES (?,?)' : 'DELETE FROM stars WHERE artifact_id=? AND user_id=?',id,userId);
   }
-  async library(user: Account, opts: { admin: boolean; view: string; q: string; ownerId: string; status: string; cursor: string; limit: number; sort?: 'recent' | 'name' }) {
+  async library(user: Account, opts: { admin: boolean; view: string; q: string; ownerId: string; status: string; cursor: string; limit: number; sort?: 'recent' | 'name' | 'expiry'; expiry?: 'all' | 'soon' }) {
     const clauses = [`${LIVE.replaceAll('expires_at','a.expires_at')}`];
     const args: (string | number)[] = [user.id,user.id,now()];
     if (!opts.admin) {
@@ -623,6 +661,9 @@ export class Registry extends DurableObject<Env> {
       if (opts.ownerId) { clauses.push("COALESCE(a.owner_id,'instance-owner')=?"); args.push(opts.ownerId); }
     }
     if (opts.q) { clauses.push("instr(lower(a.title),lower(?)) > 0"); args.push(opts.q); }
+    // Deadlines due within the next seven days, inclusive, among live rows
+    // only: the LIVE clause already excludes anything past its deadline.
+    if (opts.expiry === 'soon') { clauses.push('a.expires_at IS NOT NULL AND a.expires_at <= ?'); args.push(now() + 7 * 86400); }
     const joins = "FROM artifacts a LEFT JOIN accounts u ON u.id=COALESCE(a.owner_id,'instance-owner') LEFT JOIN grants g ON g.artifact_id=a.id AND g.user_id=? LEFT JOIN stars s ON s.artifact_id=a.id AND s.user_id=?";
     // The inventory's status tabs show how many are active and archived under the other filters.
     let counts: { all: number; active: number; archived: number } | undefined;
@@ -636,44 +677,74 @@ export class Registry extends DurableObject<Env> {
     // SQLite NOCASE folds ASCII only, not locale-specific Unicode ordering.
     // Keep the same collation and ID tie-breaker in the seek and ORDER BY.
     const byName = opts.sort === 'name';
+    const byExpiry = opts.sort === 'expiry';
     if (opts.cursor) {
       const values = JSON.parse(opts.cursor);
       if (byName) {
         const [,title,id] = values;
         clauses.push('(a.title COLLATE NOCASE > ? OR (a.title COLLATE NOCASE = ? AND a.id > ?))'); args.push(title,title,id);
+      } else if (byExpiry) {
+        // Finite deadlines first, earliest to latest, then never-expiring rows,
+        // each ordered by id. A null cursor value seeks within the null block.
+        const [,deadline,id] = values;
+        if (deadline === null) { clauses.push('(a.expires_at IS NULL AND a.id > ?)'); args.push(id); }
+        else { clauses.push('(a.expires_at IS NULL OR a.expires_at > ? OR (a.expires_at = ? AND a.id > ?))'); args.push(deadline,deadline,id); }
       } else {
         const [time,id] = values;
         clauses.push('(a.updated_at < ? OR (a.updated_at=? AND a.id < ?))'); args.push(time,time,id);
       }
     }
-    const rows = this.ctx.storage.sql.exec<Row & { ownerName: string; starred: number; permission: 'read' | 'write'; shared: number }>(`SELECT a.*,u.name AS ownerName,s.user_id IS NOT NULL AS starred, g.permission, EXISTS(SELECT 1 FROM grants x WHERE x.artifact_id=a.id) AS shared ${joins} WHERE ${clauses.join(' AND ')} ORDER BY ${byName ? 'a.title COLLATE NOCASE ASC,a.id ASC' : 'a.updated_at DESC,a.id DESC'} LIMIT ?`,...args,opts.limit+1).toArray();
+    const rows = this.ctx.storage.sql.exec<Row & { ownerName: string; starred: number; permission: 'read' | 'write'; shared: number }>(`SELECT a.*,u.name AS ownerName,s.user_id IS NOT NULL AS starred, g.permission, EXISTS(SELECT 1 FROM grants x WHERE x.artifact_id=a.id) AS shared ${joins} WHERE ${clauses.join(' AND ')} ORDER BY ${byName ? 'a.title COLLATE NOCASE ASC,a.id ASC' : byExpiry ? '(a.expires_at IS NULL) ASC,a.expires_at ASC,a.id ASC' : 'a.updated_at DESC,a.id DESC'} LIMIT ?`,...args,opts.limit+1).toArray();
     const more = rows.length > opts.limit; rows.splice(opts.limit);
     const last = rows.at(-1);
-    return { artifacts: rows.map(r => ({ ...toEntry(r), ownerName: r.ownerName ?? 'Instance owner', accessLabel: (r.owner_id ?? 'instance-owner') === user.id ? (r.shared ? 'Shared by you' : 'Private') : (user.role === 'owner' || r.permission === 'write' ? 'Can edit' : 'Can view'), starred: !!r.starred, permission: user.role === 'owner' || (r.owner_id ?? 'instance-owner') === user.id ? 'write' as const : r.permission, canManage: user.role === 'owner' || (r.owner_id ?? 'instance-owner') === user.id, visibility: r.shared ? 'shared' : 'private' })), total, ...(counts ? { counts } : {}), nextCursor: more && last ? JSON.stringify(byName ? ['name',last.title,last.id] : [last.updated_at,last.id]) : null };
+    return { artifacts: rows.map(r => ({ ...toEntry(r), ownerName: r.ownerName ?? 'Instance owner', accessLabel: (r.owner_id ?? 'instance-owner') === user.id ? (r.shared ? 'Shared by you' : 'Private') : (user.role === 'owner' || r.permission === 'write' ? 'Can edit' : 'Can view'), starred: !!r.starred, permission: user.role === 'owner' || (r.owner_id ?? 'instance-owner') === user.id ? 'write' as const : r.permission, canManage: user.role === 'owner' || (r.owner_id ?? 'instance-owner') === user.id, visibility: r.shared ? 'shared' : 'private' })), total, ...(counts ? { counts } : {}), nextCursor: more && last ? JSON.stringify(byName ? ['name',last.title,last.id] : byExpiry ? ['expiry',last.expires_at,last.id] : [last.updated_at,last.id]) : null };
   }
-  async audit(userId: string, action: string, id: string | null = null, title: string | null = null, target: string | null = null): Promise<void> {
-    this.ctx.storage.sql.exec('INSERT INTO activity (id,actor_id,action,artifact_id,artifact_title,created_at,target) VALUES (?,?,?,?,?,?,?)',genId(),userId,action,id,title,now(),target);
+  async audit(userId: string, action: string, id: string | null = null, title: string | null = null, target: string | null = null, details: Record<string, unknown> | null = null): Promise<void> {
+    this.ctx.storage.sql.exec('INSERT INTO activity (id,actor_id,action,artifact_id,artifact_title,created_at,target,details) VALUES (?,?,?,?,?,?,?,?)',genId(),userId,action,id,title,now(),target,details ? JSON.stringify(details) : null);
   }
-  /** The newest audit events, optionally of one kind, after a cursor of [createdAt, id]. */
-  async activity(limit: number, kind = '', cursor = '') {
+  /**
+   * The newest audit events, optionally of one kind and matching a case-
+   * insensitive search of the actor's name or email, the artifact title or id,
+   * and the event's target. Search is applied before the limit and the cursor,
+   * so a page is drawn from every matching event. Cursor is [createdAt, id].
+   */
+  async activity(limit: number, kind = '', cursor = '', q = '') {
     const clauses: string[] = []; const args: (string | number)[] = [];
     const actions = ACTIVITY_KINDS[kind];
     if (actions) { clauses.push(`e.action IN (${actions.map(() => '?').join(',')})`); args.push(...actions); }
+    const search = q.slice(0, 300).trim();
+    if (search) {
+      // lower() folds ASCII only; the same fold is used on both sides. The
+      // actor name matches the same synthesized "System" the select shows.
+      const like = `%${search.replace(/[\\%_]/g, c => `\\${c}`)}%`;
+      clauses.push(`(lower(COALESCE(a.name,CASE WHEN e.actor_id='system' THEN 'System' END)) LIKE ? ESCAPE '\\' OR lower(COALESCE(a.email,'')) LIKE ? ESCAPE '\\'
+        OR lower(COALESCE(e.artifact_title,'')) LIKE ? ESCAPE '\\' OR lower(COALESCE(e.artifact_id,'')) LIKE ? ESCAPE '\\'
+        OR lower(COALESCE(e.target,'')) LIKE ? ESCAPE '\\')`);
+      args.push(like,like,like,like,like);
+    }
     if (cursor) {
       try {
         const [time,id] = JSON.parse(cursor) as [number, string];
         if (Number.isFinite(time) && typeof id === 'string') { clauses.push('(e.created_at < ? OR (e.created_at = ? AND e.id < ?))'); args.push(time,time,id); }
       } catch { /* an unreadable cursor starts from the newest */ }
     }
-    const rows = this.ctx.storage.sql.exec<{ id: string; actorName: string; action: string; artifactId: string | null; artifactTitle: string | null; target: string | null; createdAt: number }>(`SELECT e.id,a.name AS actorName,e.action,e.artifact_id AS artifactId,e.artifact_title AS artifactTitle,e.target,e.created_at AS createdAt FROM activity e LEFT JOIN accounts a ON a.id=e.actor_id${clauses.length ? ' WHERE ' + clauses.join(' AND ') : ''} ORDER BY e.created_at DESC,e.id DESC LIMIT ?`,...args,limit+1).toArray();
+    const rows = this.ctx.storage.sql.exec<{ id: string; actorName: string | null; action: string; artifactId: string | null; artifactTitle: string | null; target: string | null; createdAt: number; details: string | null }>(`SELECT e.id,COALESCE(a.name,CASE WHEN e.actor_id='system' THEN 'System' END) AS actorName,e.action,e.artifact_id AS artifactId,e.artifact_title AS artifactTitle,e.target,e.created_at AS createdAt,e.details FROM activity e LEFT JOIN accounts a ON a.id=e.actor_id${clauses.length ? ' WHERE ' + clauses.join(' AND ') : ''} ORDER BY e.created_at DESC,e.id DESC LIMIT ?`,...args,limit+1).toArray();
     const more = rows.length > limit; rows.splice(limit);
     const last = rows.at(-1);
-    return { events: rows, nextCursor: more && last ? JSON.stringify([last.createdAt,last.id]) : null };
+    return { events: rows.map(r => {
+      // details is structured metadata when this build wrote the event; an
+      // event from before the column has none at all (not even null).
+      const { details, ...event } = r;
+      let parsed: unknown;
+      try { parsed = details ? JSON.parse(details) : undefined; } catch { parsed = undefined; }
+      return parsed !== undefined && parsed !== null && typeof parsed === 'object'
+        ? { ...event, details: parsed as Record<string, unknown> } : event;
+    }), nextCursor: more && last ? JSON.stringify([last.createdAt,last.id]) : null };
   }
 }
 /** The audit actions each Activity filter shows. */
 export const ACTIVITY_KINDS: Record<string, string[]> = {
-  artifacts: ['archive','restore','rename','transfer','sharing_change','expiration'],
+  artifacts: ['publish','delete','rotate-comment-link','expired','archive','restore','rename','transfer','sharing_change','expiration'],
   people: ['invite','invite_withdrawn','account_disabled','account_active'],
   credentials: ['credential_create','credential_revoke'],
   'sign-ins': ['sign_in'],

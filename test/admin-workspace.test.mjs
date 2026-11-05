@@ -277,6 +277,26 @@ test('expiry=soon keeps deadlines within seven days and composes with every filt
   });
 });
 
+test('recorded sign-in display ignores legacy activation markers', async () => {
+  await withWorker({}, async ({ signIn, call }) => {
+    const owner = await signIn('owner@example.com');
+    const marker = seconds(-86400), actual = seconds(-60), earlier = seconds(-120);
+    for (const id of ['legacy-no-event','legacy-with-events']) registrySQL(
+      `INSERT INTO accounts (id,email,name,role,status,created_at,signed_in_at) VALUES (?,?,?,'member','active',?,?)`,
+      id, `${id}@example.com`, id, marker, marker);
+    for (const [id,time] of [['recorded-earlier',earlier],['recorded-latest',actual]]) activitySQL(
+      `INSERT INTO activity (id,actor_id,action,created_at) VALUES (?,?,'sign_in',?)`,id,'legacy-with-events',time);
+    const people = (await call(owner.cookie, '/api/people')).json.users;
+    assert.equal(people.find(u=>u.id==='legacy-no-event').lastSignInAt,null,'an activation marker is not evidence of a sign-in');
+    assert.equal(people.find(u=>u.id==='legacy-with-events').lastSignInAt,iso(actual),'show the latest audited sign-in rather than account creation');
+    for (const status of ['disabled','active']) assert.equal((await call(owner.cookie,'/api/people/legacy-no-event',{method:'PATCH',body:{status}})).status,200);
+    const restored = (await call(owner.cookie,'/api/people')).json.users.find(u=>u.id==='legacy-no-event');
+    assert.equal(restored.status,'active','the old activation marker still supports reactivation');
+    assert.equal(restored.lastSignInAt,null);
+    assert.equal(registrySQL('SELECT signed_in_at FROM accounts WHERE id=?','legacy-no-event')[0].signed_in_at,marker,'display metadata does not overwrite the activation marker');
+  });
+});
+
 test('people carry live artifact counts and recorded sign-in times', async () => {
   await withWorker({}, async ({ signIn, call, send, account }) => {
     const owner = await signIn('owner@example.com');

@@ -83,8 +83,9 @@ export async function parityQA({base,api,owner,browserOwner,member,run,evaluate,
     assert.equal(evaluate('new URLSearchParams(location.search).has("cursor")'),false);
     run('back');wait('.artifact-title');assert.equal(evaluate('document.getElementById("sort").value'),'name');
     run('open',base+'/?view=admin&q=Parity+browser&sort=name');wait('.artifact-row');
-    assert.match(evaluate('document.querySelector(".inventory-head").textContent'),/OwnerVisibilityStatusUpdated/);
-    assert.deepEqual(evaluate('[...document.querySelectorAll(".artifact-row:first-child .cell .sr-only")].map(e=>e.textContent)'),['Owner: ','Visibility: ','Status: ','Updated: ']);
+    assert.match(evaluate('document.querySelector(".inventory-head").textContent'),/OwnerVisibilityStatusUpdatedExpires/);
+    assert.deepEqual(evaluate('[...document.querySelectorAll(".artifact-row:first-child .cell .sr-only")].map(e=>e.textContent)'),['Owner: ','Visibility: ','Status: ','Updated: ','Expires: ']);
+    assert.ok(evaluate('document.querySelector(".artifact-row:first-child .expiry-cell").textContent.includes("Never expires")'),'the new expiry column has both an accessible label and a value');
     assert.equal(evaluate('document.querySelectorAll(".artifact-row .access-badge").length'),0,'the inventory does not wear the reader\'s own access');
     assert.match(evaluate('document.querySelector("#status-filter [data-status=archived]").textContent'),/Archived\d+/,'status tabs carry counts');
     run('set','viewport','390','1000');selectQA();

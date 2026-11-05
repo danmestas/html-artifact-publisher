@@ -480,7 +480,15 @@ export class Registry extends DurableObject<Env> {
   }
   async account(id: string): Promise<Account | null> { return this.ctx.storage.sql.exec<Account>('SELECT * FROM accounts WHERE id = ?',id).toArray()[0] ?? null; }
   async byEmail(email: string): Promise<Account | null> { return this.ctx.storage.sql.exec<Account>('SELECT * FROM accounts WHERE email = ?',email).toArray()[0] ?? null; }
-  async people(): Promise<Account[]> { return this.ctx.storage.sql.exec<Account>('SELECT * FROM accounts ORDER BY email LIMIT 1000').toArray(); }
+  async people(): Promise<(Account & { last_sign_in_at: number | null })[]> {
+    // signed_in_at also holds legacy activation markers. Only audited sign-ins
+    // are evidence for the admin display; aggregate once, not per account.
+    return this.ctx.storage.sql.exec<Account & { last_sign_in_at: number | null }>(`
+      SELECT a.*,s.last_sign_in_at FROM accounts a LEFT JOIN (
+        SELECT actor_id,MAX(created_at) AS last_sign_in_at FROM activity
+        WHERE action='sign_in' GROUP BY actor_id
+      ) s ON s.actor_id=a.id ORDER BY a.email LIMIT 1000`).toArray();
+  }
   /**
    * How many live artifacts each owner holds, count(*) in one pass: archived
    * ones count, expired ones do not, and a row with no owner_id (an artifact

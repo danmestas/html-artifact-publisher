@@ -158,7 +158,7 @@ export async function accountRoutes(req: Request, env: Env): Promise<Response | 
         artifactCount:counts[u.id] ?? 0,
         // null means no recorded sign-in (an account that never signed in, or
         // one that predates sign-in auditing); it does not claim it never did.
-        lastSignInAt:u.signed_in_at != null && u.signed_in_at > 0 ? isoOrNull(u.signed_in_at) : null,
+        lastSignInAt:isoOrNull(u.last_sign_in_at),
         ...(invited ? { resendAfter:await r.rateWait(`email:${await sha256hex(u.email)}`),inviteExpiresAt:isoOrNull(await r.loginExpiry(u.id)) } : {}) });
     }
     return json({ users });

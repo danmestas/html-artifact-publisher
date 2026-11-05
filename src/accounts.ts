@@ -123,28 +123,42 @@ export async function accountRoutes(req: Request, env: Env): Promise<Response | 
     if (!admin) return error('Instance owner required',403);
   }
   if ((path==='/api/library' || path==='/api/admin/artifacts') && method==='GET') {
+    const admin = path==='/api/admin/artifacts';
     const view = url.searchParams.get('view') ?? 'all', status = url.searchParams.get('status') ?? 'all';
     if (!['all','mine','shared','starred','archived'].includes(view) || !['all','active','archived'].includes(status)) return error('Invalid filter');
     const cursor = url.searchParams.get('cursor') ?? '';
     const sort = url.searchParams.get('sort') ?? 'recent';
-    if (sort !== 'recent' && sort !== 'name') return error('Invalid sort');
+    // Expiry ordering and the upcoming-deadline filter are the admin
+    // workspace's; a member's library keeps its recent and name contracts.
+    if (sort !== 'recent' && sort !== 'name' && !(admin && sort === 'expiry')) return error('Invalid sort');
+    const expiry = url.searchParams.get('expiry') ?? 'all';
+    if (expiry !== 'all' && expiry !== 'soon') return error('Invalid expiry');
+    if (!admin && expiry !== 'all') return error('Invalid expiry');
     if (cursor) {
       try {
         const v: unknown = JSON.parse(cursor);
         if (!Array.isArray(v) || (sort === 'name'
           ? v.length !== 3 || v[0] !== 'name' || typeof v[1] !== 'string' || v[1].length > 300
-          : v.length !== 2 || !Number.isSafeInteger(v[0]) || v[0] < 0)
+          : sort === 'expiry'
+            ? v.length !== 3 || v[0] !== 'expiry' || !(v[1] === null || (Number.isSafeInteger(v[1]) && (v[1] as number) >= 0))
+            : v.length !== 2 || !Number.isSafeInteger(v[0]) || v[0] < 0)
           || typeof v.at(-1) !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(v.at(-1))) return error('Invalid cursor');
       } catch { return error('Invalid cursor'); }
     }
-    const result = await r.library(user,{ admin:path==='/api/admin/artifacts',view,status,cursor,sort,q:(url.searchParams.get('q') ?? '').slice(0,300),ownerId:(url.searchParams.get('ownerId') ?? '').slice(0,64),limit:limitOf(url) });
+    const result = await r.library(user,{ admin,view,status,cursor,sort,expiry, q:(url.searchParams.get('q') ?? '').slice(0,300),ownerId:(url.searchParams.get('ownerId') ?? '').slice(0,64),limit:limitOf(url) });
     return json({ ...result,artifacts:result.artifacts.map(e => ({ ...e,createdAt:isoOrNull(e.createdAt),updatedAt:isoOrNull(e.updatedAt),expiresAt:isoOrNull(e.expiresAt),viewerUrl:`${url.origin}/v/${e.slug ?? e.id}` })) });
   }
   if (path==='/api/people' && method==='GET') {
+    // Counts come from one grouped pass, not a query per person.
+    const counts = await r.artifactCounts();
     const users = [];
     for (const u of await r.people()) {
       const invited = u.status==='invited';
       users.push({ ...publicUser(u),status:u.status,createdAt:isoOrNull(u.created_at ?? null),
+        artifactCount:counts[u.id] ?? 0,
+        // null means no recorded sign-in (an account that never signed in, or
+        // one that predates sign-in auditing); it does not claim it never did.
+        lastSignInAt:u.signed_in_at != null && u.signed_in_at > 0 ? isoOrNull(u.signed_in_at) : null,
         ...(invited ? { resendAfter:await r.rateWait(`email:${await sha256hex(u.email)}`),inviteExpiresAt:isoOrNull(await r.loginExpiry(u.id)) } : {}) });
     }
     return json({ users });
@@ -177,7 +191,7 @@ export async function accountRoutes(req: Request, env: Env): Promise<Response | 
   if (path==='/api/admin/activity' && method==='GET') {
     const kind = url.searchParams.get('kind') ?? '';
     if (kind && !ACTIVITY_KINDS[kind]) return error('Unknown activity kind');
-    const page = await r.activity(limitOf(url),kind,(url.searchParams.get('cursor') ?? '').slice(0,200));
+    const page = await r.activity(limitOf(url),kind,(url.searchParams.get('cursor') ?? '').slice(0,200),(url.searchParams.get('q') ?? '').slice(0,300));
     return json({ events:page.events.map(e => ({ ...e,createdAt:isoOrNull(e.createdAt) })),nextCursor:page.nextCursor });
   }
   if (path==='/api/credentials') {

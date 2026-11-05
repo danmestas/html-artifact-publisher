@@ -5,7 +5,8 @@
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
+import { promisify } from 'node:util';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -15,6 +16,8 @@ import { startWorker, createArtifact } from './helpers/worker.mjs';
 const root = new URL('..', import.meta.url).pathname;
 const work = mkdtempSync(join(tmpdir(), 'artifact-blob-cleanup-'));
 const fsclient = join(work, 'fsclient');
+// Long clones must not prevent Node from retiring idle HTTP connections.
+const runFile = promisify(execFile);
 const sha256 = b => createHash('sha256').update(b).digest('hex');
 
 before(() => {
@@ -60,8 +63,8 @@ test('bytes another artifact pushed a pointer to, from a clone, survive this one
     assert.equal((await call(`/api/artifacts/${b.id}/blobs/${sha}`, { method: 'PUT', token: b.write, raw: bytes })).status, 200);
     const clone = join(work, `${b.id}.fossil`), pointer = join(work, `${b.id}-pointer`);
     writeFileSync(pointer, pointerText(bytes));
-    execFileSync(fsclient, ['clone', b.cloneUrl, clone], { stdio: 'ignore' });
-    execFileSync(fsclient, ['push', clone, b.cloneUrl, 'pushed.png', `@${pointer}`, 'pointer from a clone'], { stdio: 'ignore' });
+    await runFile(fsclient, ['clone', b.cloneUrl, clone], { timeout: 60000 });
+    await runFile(fsclient, ['push', clone, b.cloneUrl, 'pushed.png', `@${pointer}`, 'pointer from a clone'], { timeout: 60000 });
 
     assert.equal((await call(`/api/artifacts/${a.id}`, { method: 'DELETE', token: a.write })).status, 204);
     await served(w, call, b, 'pushed.png', bytes);

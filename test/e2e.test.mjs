@@ -930,6 +930,11 @@ if (process.env.VIEWER_BROWSER_QA === '1') test('real browser: comment pins, thr
   await viewerQA({ base, a: { ...a, authorXss }, api, output: join(root, '.wrangler/viewer-browser-qa'), attach });
 });
 
+if (process.env.BACKDROP_BROWSER_QA === '1') test('real browser: the viewer backdrop follows the page and the theme', async () => {
+  const { backdropQA } = await import('./backdrop-browser.mjs');
+  await backdropQA({ base, owner, api, output: join(root, '.wrangler/backdrop-browser-qa') });
+});
+
 test('comment link: commenting is all it can do, and delete revokes it', async () => {
   const a = await create({ 'index.html': b64('<p>only comments</p>') });
   const commit = await api(`/api/artifacts/${a.id}`, { method: 'PUT', token: a.comment, body: { parent: a.tip, files: { 'index.html': b64('x') } } });

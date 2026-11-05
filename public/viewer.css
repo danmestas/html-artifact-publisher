@@ -273,7 +273,7 @@ button:disabled { cursor: wait; opacity: .6; }
 #ring { width: 34px; height: 34px; border-radius: 50%; border: 3px solid var(--line); border-top-color: var(--accent); animation: spin .65s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 #stage { position: relative; flex: 1; display: flex; min-height: 0; min-width: 0; }
-#frame { display: none; flex: 1 1 0; min-width: 0; border: none; background: #FFFFFF; }
+#frame { display: none; flex: 1 1 0; min-width: 0; border: none; background: var(--ground); }
 #stage.readonly #frame { margin-top: 44px; }
 #readCue { position: absolute; top: 12px; left: 12px; z-index: 1; display: flex; align-items: center; gap: 7px; color: var(--muted); pointer-events: none; }
 .document-cue { display: grid; place-items: center; width: 28px; height: 28px; border: 1px solid var(--line); border-radius: 6px; background: var(--ground); }

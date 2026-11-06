@@ -1,11 +1,13 @@
 // Opt-in real Chromium QA for the viewer's backdrop: the colour behind and
 // beyond the artifact page. Run by BACKDROP_BROWSER_QA=1 node --test test/e2e.test.mjs.
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 import { frameEval } from './helpers/frame-eval.mjs';
 
+const execFileAsync = promisify(execFile);
 const b64 = s => Buffer.from(s).toString('base64');
 
 const DARK = 'rgb(16, 20, 24)';
@@ -51,40 +53,43 @@ export async function backdropQA({ base, owner, api, output }) {
     artifacts[name] = { ...r.json, read: (r.json.viewerUrl || '').split('#')[1] };
   }
   const session = `backdrop-qa-${process.pid}`;
-  const run = (...args) => {
+  // Awaiting agent-browser keeps Node's event loop free to drain the Worker's
+  // pipes; a synchronous wait starves them and the page looks stalled.
+  const run = async (...args) => {
     try {
-      return execFileSync('agent-browser', ['--session', session, ...args], {
-        encoding: 'utf8', timeout: 45000, stdio: ['ignore', 'pipe', 'pipe'],
+      const { stdout } = await execFileAsync('agent-browser', ['--session', session, ...args], {
+        encoding: 'utf8', timeout: 45000,
         env: { ...process.env, AGENT_BROWSER_IDLE_TIMEOUT_MS: '600000' },
       });
+      return stdout;
     } catch (e) {
       throw new Error(`agent-browser ${args[0]} failed: ${e.stdout ?? ''}${e.stderr ?? ''}`.slice(0, 1500));
     }
   };
-  const evaluate = source => {
-    const result = JSON.parse(run('--json', 'eval', `(${source})`));
+  const evaluate = async source => {
+    const result = JSON.parse(await run('--json', 'eval', `(${source})`));
     assert.equal(result.success, true, JSON.stringify(result));
     return result.data.result;
   };
-  const frame = () => evaluate(`(() => {
+  const frame = async () => evaluate(`(() => {
     const s = getComputedStyle(document.getElementById('frame'));
     return { bg: s.backgroundColor, scheme: getComputedStyle(document.documentElement).colorScheme };
   })()`);
   const open = async (a, theme, media) => {
-    run('set', 'viewport', '390', '844');
-    run('set', 'media', media);
-    run('open', `${base}/v/${a.id}#${a.read}`);
-    run('wait', '#bar:not([hidden])');
-    run('wait', '#frame');
-    run('select', '#viewer-theme', theme);
-    run('wait', '900');
+    await run('set', 'viewport', '390', '844');
+    await run('set', 'media', media);
+    await run('open', `${base}/v/${a.id}#${a.read}`);
+    await run('wait', '#bar:not([hidden])');
+    await run('wait', '#frame');
+    await run('select', '#viewer-theme', theme);
+    await run('wait', '900');
   };
   let failure;
   try {
     // A dark page owns its canvas: the frame is backed by that colour, not white.
     await open(artifacts.opaqueDark, 'dark', 'dark');
     assert.equal((await frame()).bg, DARK, 'the frame is backed by an opaque dark page canvas');
-    run('screenshot', join(output, 'opaque-dark-explicit-dark.png'));
+    await run('screenshot', join(output, 'opaque-dark-explicit-dark.png'));
 
     // The authoring pattern sets the colour on body only; propagation still holds.
     await open(artifacts.bodyDark, 'dark', 'dark');
@@ -97,7 +102,7 @@ export async function backdropQA({ base, owner, api, output }) {
     // A transparent page shows the viewer's own ground, never a fixed white.
     await open(artifacts.transparent, 'dark', 'dark');
     assert.equal((await frame()).bg, VIEWER_GROUND.dark, 'a transparent page is backed by the dark viewer ground');
-    run('screenshot', join(output, 'transparent-explicit-dark.png'));
+    await run('screenshot', join(output, 'transparent-explicit-dark.png'));
     await open(artifacts.transparent, 'light', 'light');
     assert.equal((await frame()).bg, VIEWER_GROUND.light, 'a transparent page is backed by the light viewer ground');
 
@@ -107,7 +112,7 @@ export async function backdropQA({ base, owner, api, output }) {
     for (const [name, label] of [['partialHtml', 'an html canvas at 50% alpha'], ['partialBody', 'a body canvas at 50% alpha']]) {
       await open(artifacts[name], 'dark', 'dark');
       assert.equal((await frame()).bg, VIEWER_GROUND.dark, `${label} keeps the viewer ground behind the page`);
-      run('screenshot', join(output, `partial-${name}.png`));
+      await run('screenshot', join(output, `partial-${name}.png`));
     }
 
     // An unstyled document keeps the browser's own canvas and its matching
@@ -115,7 +120,7 @@ export async function backdropQA({ base, owner, api, output }) {
     // the text stays black on the browser's white and remains readable.
     await open(artifacts.unstyled, 'dark', 'dark');
     assert.equal((await frame()).bg, VIEWER_GROUND.dark, 'an unstyled document leaves the frame on the viewer ground');
-    const unstyled = await frameEval(run('get', 'cdp-url').trim());
+    const unstyled = await frameEval((await run('get', 'cdp-url')).trim());
     try {
       const doc = await unstyled.eval(`({ bg: getComputedStyle(document.documentElement).backgroundColor, text: getComputedStyle(document.body).color })`);
       assert.equal(doc.bg, 'rgba(0, 0, 0, 0)', 'the viewer paints no canvas into an unstyled document');
@@ -123,37 +128,37 @@ export async function backdropQA({ base, owner, api, output }) {
     } finally {
       await unstyled.close();
     }
-    run('screenshot', join(output, 'unstyled-explicit-dark.png'));
+    await run('screenshot', join(output, 'unstyled-explicit-dark.png'));
 
     // A page that switches theme at runtime moves its backdrop with it.
     await open(artifacts.runtimeTheme, 'system', 'dark');
     assert.equal((await frame()).bg, DARK, 'the runtime-theme page starts dark');
     // The page switches its own theme from inside the sandboxed frame.
-    const page = await frameEval(run('get', 'cdp-url').trim());
+    const page = await frameEval((await run('get', 'cdp-url')).trim());
     try {
       await page.eval(`(document.documentElement.classList.add('light'), true)`);
     } finally {
       await page.close();
     }
-    run('wait', '--fn', `getComputedStyle(document.getElementById('frame')).backgroundColor === 'rgb(250, 249, 247)'`);
+    await run('wait', '--fn', `getComputedStyle(document.getElementById('frame')).backgroundColor === 'rgb(250, 249, 247)'`);
     assert.equal((await frame()).bg, 'rgb(250, 249, 247)', 'a runtime theme change repaints the backdrop');
-    run('screenshot', join(output, 'runtime-theme-light.png'));
+    await run('screenshot', join(output, 'runtime-theme-light.png'));
 
     // The reader's appearance change reaches a theme-following page.
     await open(artifacts.followsScheme, 'system', 'dark');
     assert.equal((await frame()).bg, 'rgb(20, 21, 23)', 'a scheme-following page starts dark');
-    run('select', '#viewer-theme', 'light');
-    run('wait', '--fn', `getComputedStyle(document.getElementById('frame')).backgroundColor === 'rgb(251, 250, 248)'`);
+    await run('select', '#viewer-theme', 'light');
+    await run('wait', '--fn', `getComputedStyle(document.getElementById('frame')).backgroundColor === 'rgb(251, 250, 248)'`);
     assert.equal((await frame()).bg, 'rgb(251, 250, 248)', 'Light repaints a scheme-following page');
-    run('select', '#viewer-theme', 'dark');
-    run('wait', '--fn', `getComputedStyle(document.getElementById('frame')).backgroundColor === 'rgb(20, 21, 23)'`);
+    await run('select', '#viewer-theme', 'dark');
+    await run('wait', '--fn', `getComputedStyle(document.getElementById('frame')).backgroundColor === 'rgb(20, 21, 23)'`);
     assert.equal((await frame()).bg, 'rgb(20, 21, 23)', 'Dark paints it back');
-    run('screenshot', join(output, 'follows-scheme-dark.png'));
+    await run('screenshot', join(output, 'follows-scheme-dark.png'));
   } catch (error) {
     failure = error;
-    try { run('screenshot', join(output, 'failure.png')); } catch { /* preserve the original failure */ }
+    try { await run('screenshot', join(output, 'failure.png')); } catch { /* preserve the original failure */ }
     throw error;
   } finally {
-    try { run('close'); } catch (error) { if (!failure) throw error; }
+    try { await run('close'); } catch (error) { if (!failure) throw error; }
   }
 }

@@ -95,6 +95,7 @@ input[type=text], input[type=datetime-local], textarea {
 .version-button:hover, .version-button[aria-expanded="true"] { background: var(--wash); color: var(--ink); }
 .version-button.old { color: var(--accent-ink); }
 #versionTag { font: 11px var(--sans); }
+.phone-history { display: none; }
 .tag { font-size: 10px; font-weight: 400; }
 .tag.latest { color: var(--muted); }
 
@@ -409,11 +410,24 @@ dialog.manage-dialog::backdrop { background: var(--overlay); }
   .nav-scrim { display: none !important; }
 }
 @media (max-width: 640px) {
-  #bar { gap: 2px; padding-inline: max(6px, env(safe-area-inset-left, 0px)) max(6px, env(safe-area-inset-right, 0px)); }
+  /* Give the title its own row. The second row replaces the old read-only
+     strip, so readable controls cost no additional artifact height. */
+  #bar { display: grid; grid-template-columns: 44px minmax(0, 1fr) 44px auto 44px; grid-template-rows: 44px 44px; height: 89px; gap: 0 4px; padding-inline: max(6px, env(safe-area-inset-left, 0px)) max(6px, env(safe-area-inset-right, 0px)); }
+  #bar > .brand, #navBtn { grid-row: 1; grid-column: 1; }
+  #bar:has(#navBtn:not([hidden])) > .brand { display: none; }
+  .title-anchor { grid-row: 1; grid-column: 2 / -1; }
+  .top-spacer { display: none; }
+  #versionBtn { grid-row: 2; grid-column: 1 / 3; justify-self: start; font-family: var(--sans); }
+  #versionHash, #versionTag, #titleHint, #readCue { display: none; }
+  .phone-history { display: inline; }
+  #commentsBtn { grid-row: 2; grid-column: 3; }
+  .share-anchor { grid-row: 2; grid-column: 4; }
+  .appearance-anchor { grid-row: 2; grid-column: 5; }
+  #stage.readonly #frame { margin-top: 0; }
   .brand { padding: 0 2px; }
   .brand-name { display: none; }
-  #titleBtn { height: 44px; padding: 0 4px; gap: 4px; }
-  #title { font-size: 12.5px; }
+  #titleBtn { width: 100%; height: 44px; padding: 0 4px; gap: 4px; }
+  #title { font-size: 14px; }
   .icon-button { width: 44px; height: 44px; }
   #moreBtn { width: 44px; height: 44px; }
   #commentsBtn { min-width: 44px; padding: 0 6px; }
@@ -421,7 +435,7 @@ dialog.manage-dialog::backdrop { background: var(--overlay); }
   .primary-face { height: 32px; padding: 0 10px; }
   .version-button { height: 44px; padding: 0 4px; }
   #versionTag { display: none; }
-  .popover { position: fixed; top: 45px; left: 8px; right: 8px; width: auto; max-width: none; max-height: calc(100dvh - 55px); }
+  .popover { position: fixed; top: 89px; left: 8px; right: 8px; width: auto; max-width: none; max-height: calc(100dvh - 99px); }
   #titleMenu, #shareMenu, #moreMenu { left: 8px; right: 8px; width: auto; }
   .people-add, .person-row { grid-template-columns: minmax(0, 1fr) 104px auto; gap: 6px; }
   .artifact-actions button, .dialog-actions button, .share-row button, .share-row input { min-height: 44px; }

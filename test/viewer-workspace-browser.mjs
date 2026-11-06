@@ -87,6 +87,13 @@ export async function viewerWorkspaceQA({ base, output, api, account, artifact, 
     assert.equal(await json(`document.getElementById('recentList').textContent.includes(${JSON.stringify(artifact.title)})`), true, 'the sidebar lists the signed-in account’s recent artifacts');
     assert.equal(await json(`document.getElementById('librarySidebar').hidden`), false, 'a wide signed-in page docks the library sidebar');
 
+    // On phones the drawer toggle replaces, rather than overlaps, the library link.
+    for (const width of [320, 375, 393]) {
+      await run('set', 'viewport', String(width), '844');
+      assert.equal(await json(`(() => { const n = document.getElementById('navBtn'), r = n.getBoundingClientRect(); return !n.hidden && getComputedStyle(document.getElementById('backLibrary')).display === 'none' && n.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)) && document.documentElement.scrollWidth <= innerWidth; })()`), true, 'phone navigation has an unobstructed touch target');
+    }
+    await run('set', 'viewport', '1440', '900');
+
     // Rename through the cookie-only dialog, then read it back from the API.
     await run('click', '#titleBtn');
     await wait('#titleMenu:not([hidden])');

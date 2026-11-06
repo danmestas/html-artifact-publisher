@@ -1,7 +1,8 @@
 // viewer.js — opens /v/<id>#<token>[@<check-in>]: loads the chosen check-in
 // (trunk tip by default) from the artifact's Fossil repository and renders it
 // in the sandboxed iframe. The page inside gets a small `window.artifact` API
-// over postMessage; the access token never enters the iframe.
+// over postMessage; the access token never enters the iframe, and neither does
+// any account identity.
 
 import { Artifact, ConflictError, parseFragment, fragment, readFileList } from './client.js';
 import { renderDiagrams, renderPikchr } from './diagrams.js';
@@ -47,6 +48,108 @@ let shown = null;    // { checkin, files, blobs } being shown
 let frameUrl = '';   // blob: URL of the rendered page, revoked on the next render
 let renders = 0;     // a newer render() supersedes one still awaiting diagrams or fonts
 let frameReady = false; // the page has loaded and can take pins
+
+// ─── Account identity ────────────────────────────────────────────────────────
+//
+// Content can arrive by capability link without any cookie, so a working
+// artifact is never evidence that anyone is signed in. Everything account-side
+// (recent artifacts, people, snapshots, management) is keyed to the account id
+// this page last confirmed with /api/session, and discarded when that identity
+// is lost or changes. Checks are coalesced so polling does not flood the route.
+//
+// A request is answered for whoever the cookie was when it was sent, which may
+// not be who the cookie is when it answers. `identityEpoch` names the confirmed
+// identity a request was issued under; every account cache or panel write
+// re-reads it after its awaits and is dropped if the epoch moved. A stale 401
+// therefore cannot sign out an account that was confirmed after it was sent.
+let accountId = null;   // null until /api/session answers, '' when signed out
+let identityEpoch = 0;  // bumped whenever the confirmed identity changes
+let sessionCheckedAt = 0;
+let sessionCheckedEpoch = -1;
+let sessionSeq = 0;      // newest /api/session request wins over older ones
+let sessionInFlight = null;
+const SESSION_FRESH_MS = 5_000;
+
+function sessionRequest({ fresh = false } = {}) {
+  if (sessionInFlight && !fresh) return sessionInFlight.promise;
+  const seq = ++sessionSeq;
+  const promise = fetch('/api/session', { credentials: 'same-origin', cache: 'no-store' })
+    .then(async response => {
+      const data = response.ok ? await response.json().catch(() => null) : null;
+      return typeof data?.user?.id === 'string' ? data.user.id : '';
+    })
+    .catch(() => null) // offline: unknown, not "signed out"
+    .finally(() => { if (sessionInFlight?.seq === seq) sessionInFlight = null; });
+  sessionInFlight = { seq, promise };
+  return promise.then(id => ({ id, seq }));
+}
+
+/** The account this page is now acting as, or null when signed out or unknown. */
+async function confirmAccount({ fresh = false } = {}) {
+  if (!fresh && sessionCheckedEpoch === identityEpoch && sessionCheckedAt
+    && Date.now() - sessionCheckedAt < SESSION_FRESH_MS) {
+    return accountId || null;
+  }
+  const { id, seq } = await sessionRequest({ fresh });
+  // A newer check already settled; its answer, not this one, is the identity.
+  if (seq !== sessionSeq) return accountId || null;
+  if (id === null) return accountId || null; // unknown: keep the last confirmed identity
+  if (id !== accountId) {
+    const adopted = accountId !== null;
+    accountId = id;
+    // A change drops the last account's cache, panels and rights, then asks
+    // the server again for the role the new cookie actually has.
+    if (adopted) forgetAccount(); else identityEpoch++;
+  }
+  sessionCheckedAt = Date.now();
+  sessionCheckedEpoch = identityEpoch;
+  return accountId || null;
+}
+
+/** A confirmed identity loss or change drops every account-scoped cache and panel. */
+function forgetAccount() {
+  const epoch = ++identityEpoch;
+  libraryCache = { at: 0, items: null, error: '', accountId: null };
+  people = { grants: [], users: [], ownerId: '' };
+  peopleLoaded = false;
+  publications = [];
+  publicationCursor = '';
+  sidebarUnavailable = true;
+  setNav(false);
+  $('navBtn').hidden = true;
+  $('peopleSection').hidden = true;
+  $('publicationSection').hidden = true;
+  $('peopleList').replaceChildren();
+  $('recentList').replaceChildren();
+  $('recentStatus').textContent = '';
+  // The content role came from the link and still stands; management came from
+  // the cookie and may not. Drop it now, then ask the server again rather than
+  // trusting a page restored under another identity.
+  if (info) { info.canManage = false; if (shown) renderChrome(); }
+  if (art && info && shown) {
+    art.info().then(next => {
+      if (epoch !== identityEpoch) return; // a newer identity owns the page now
+      info = next;
+      renderChrome();
+    }).catch(() => { /* the content link still governs */ });
+  }
+}
+
+/** Whether an account request still speaks for the identity confirmed now. */
+function stillCurrent(epoch, account = accountId) {
+  return epoch === identityEpoch && account === accountId;
+}
+
+/**
+ * Management writes revalidate the cookie first: a capability link that still
+ * opens the content must not act on a management panel restored from a stale
+ * page, and a signed-out or switched account writes nothing.
+ */
+async function managementAuthorization() {
+  const current = await confirmAccount({ fresh: true });
+  if (!current || !info?.canManage) return false;
+  return true;
+}
 
 function fail(message) {
   $('msg').textContent = message;
@@ -192,7 +295,7 @@ async function render() {
   if (frameUrl) URL.revokeObjectURL(frameUrl);
   frameUrl = URL.createObjectURL(new Blob(['<!DOCTYPE html>\n' + doc.documentElement.outerHTML], { type: 'text/html' }));
   const frame = $('frame');
-  closePanel();
+  closeInspector();
   setPlacement(false);
   frameReady = false;
   pageCanvas = null; // the new page reports its own canvas once it loads
@@ -225,7 +328,13 @@ function linkWith(token, at = '') {
 }
 
 function el(tag, props = {}, ...children) {
-  const node = Object.assign(document.createElement(tag), props);
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(props)) {
+    // Hyphenated names are attributes, not properties: assigning them would
+    // create a stray JS field and leave an element with no accessible name.
+    if (key.includes('-') || key.includes(':')) node.setAttribute(key, value);
+    else node[key] = value;
+  }
   node.append(...children.filter(c => c != null));
   return node;
 }
@@ -249,12 +358,21 @@ function renderChrome() {
   $('versionBtn').classList.toggle('old', !latest);
   const head = info.timeline[0];
   $('updated').textContent = head ? `Updated ${ago(head.time)} by ${head.user}` : '';
-  $('role').textContent = writer ? 'Can edit' : can.commentBox ? 'Can comment' : 'View only';
-  $('role').className = `pill ${writer ? 'write' : 'read'}`;
+  const role = writer ? 'Can edit' : can.commentBox ? 'Can comment' : 'View only';
+  $('role').textContent = role;
+  $('role').className = writer ? 'role-write' : 'role-read';
+  $('titleHint').textContent = role;
+  $('titleHint').hidden = false;
   $('commentForm').hidden = !can.commentBox || $('threadPanel').dataset.mode !== 'draft';
-  $('deleteBtn').hidden = !writer || (!link.token && !info.canManage);
+  // Named viewers and editors see an account role; capability links manage by token.
+  const accountManage = !!info.canManage;
+  $('deleteBtn').hidden = !writer || (!link.token && !accountManage);
   $('uploadFilesBtn').hidden = $('uploadFolderBtn').hidden = !writer;
+  $('renameBtn').hidden = $('expirationBtn').hidden = $('archiveBtn').hidden = !accountManage;
+  $('renameBtn').disabled = $('expirationBtn').disabled = $('archiveBtn').disabled = !accountManage;
+  $('archiveBtn').textContent = 'Archive';
   $('backLibrary').hidden = false;
+  renderAuthority();
 
   $('oldStrip').hidden = latest;
   $('restoreBtn').hidden = latest || !writer;
@@ -269,6 +387,25 @@ function renderChrome() {
   renderVersions();
   renderShare();
   renderThreads();
+  if (!$('threadPanel').hidden) placeInspector();
+}
+
+/**
+ * Who is acting here: a capability link, a signed-in account, or both. The
+ * content role a reader sees comes from the link they hold; management comes
+ * from the account cookie. Saying so avoids implying one upgraded the other.
+ */
+function renderAuthority() {
+  const note = $('authorityNote');
+  const accountManage = !!info.canManage;
+  const viaLink = !!link.token;
+  let text = '';
+  if (accountManage && viaLink) text = 'Signed in with management access. This link also grants its own access on its own.';
+  else if (accountManage) text = 'Signed in with management access.';
+  else if (viaLink && info.role === 'write') text = 'Opened with an edit link. Renaming and expiration belong to the artifact owner in the library.';
+  else if (viaLink) text = 'Opened with a capability link. People and snapshots are managed by the owner in the library.';
+  note.textContent = text;
+  note.hidden = !text;
 }
 
 // ─── Comments: each thread is a ticket in the artifact's repository ─────────
@@ -499,7 +636,7 @@ function renderThreads() {
     const editing = [...views].find(([, view]) => view.contains(active));
     if (editing) expanded.set(editing[0], true);
   }
-  const scroll = $('threadPanel').scrollTop;
+  const scroll = panelScroller()?.scrollTop ?? 0;
   const inputScroll = active?.scrollTop;
   for (const [id, items] of [['threadList', open], ['resolvedList', resolved]]) {
     const list = $(id), nodes = items.map(t => threadView(t, can));
@@ -518,7 +655,7 @@ function renderThreads() {
     if (document.activeElement !== active) active.focus({ preventScroll: true });
     active.scrollTop = inputScroll;
   }
-  $('threadPanel').scrollTop = scroll;
+  if (panelScroller()) panelScroller().scrollTop = scroll;
   paintProgress();
   renderAnchor();
   if (JSON.stringify(next) !== JSON.stringify(pins)) {
@@ -623,23 +760,20 @@ addEventListener('message', e => {
     draftAnchor = d.anchor;
     selection = '';
     setPlacement(false);
-    openPanel('draft', pagePoint(d));
+    openInspector('comments', 'draft', pagePoint(d));
     renderAnchor();
     trackAnchor(draftAnchor);
     $('commentText').focus();
   } else if (d.type === 'position' && !$('threadPanel').hidden && trackedAnchor && d.anchor === trackedAnchor) {
     if (d.unavailable === true) {
       panelPoint = null;
-      $('threadPanel').style.left = $('threadPanel').style.top = $('threadPanel').style.right = '';
       $('commentsNote').textContent = 'Location not found';
     } else if (pagePoint(d)) {
       panelPoint = pagePoint(d);
-      positionPanel();
     }
   } else if (d.type === 'cancel' && placing) {
     setPlacement(false);
-    closePanel();
-    $('commentsBtn').focus();
+    closeInspector(true);
   } else if (d.type === 'dismiss' && !placing && !isTyping() && !commentBusy) {
     closePopovers();
   }
@@ -668,6 +802,26 @@ function refreshThreads() {
 }
 setInterval(refreshThreads, COMMENT_WATCH_MS);
 document.addEventListener('visibilitychange', refreshThreads);
+
+// Content polling says nothing about the cookie, so re-read it on its own
+// schedule: a signed-out or switched account loses the sidebar and management
+// panel instead of keeping either from a page it loaded earlier.
+const SESSION_WATCH_MS = 60_000;
+function revalidateAccount() {
+  if (document.visibilityState !== 'visible') return;
+  confirmAccount({ fresh: true }).then(id => {
+    if (!id) return;
+    // A page restored for another account (or a first confirmation) has no
+    // account chrome or inventory yet: build both, never reuse the old ones.
+    if (sidebarUnavailable) { showAccountChrome(); loadLibrary(); }
+    else if (navOpen) loadLibrary();
+  });
+}
+setInterval(revalidateAccount, SESSION_WATCH_MS);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') revalidateAccount(); });
+// A page restored from the back/forward cache may hide a sign-out that happened
+// elsewhere; its account UI is revalidated before it is trusted again.
+addEventListener('pageshow', e => { if (e.persisted) revalidateAccount(); });
 
 /** A comment on its way: "Sending…" with dots when a responder will get it, else `doing`. */
 function showPosting(status, doing, comment) {
@@ -765,55 +919,93 @@ function renderResponder() {
   $('responderContact').textContent = n.contact ? `(${n.contact})` : '';
 }
 
-function positionPanel() {
-  const panel = $('threadPanel'), stage = $('stage').getBoundingClientRect();
-  if (panel.hidden || !panelPoint) return;
-  const frame = $('frame').getBoundingClientRect();
-  const x = frame.left - stage.left + panelPoint.x, y = frame.top - stage.top + panelPoint.y;
-  const width = panel.offsetWidth, height = panel.offsetHeight;
-  const clamp = (n, max) => Math.max(8, Math.min(n, max));
-  const left = x + 32 + width <= stage.width - 8 ? x + 32 : x - width - 12;
-  panel.style.left = `${clamp(left, stage.width - width - 8)}px`;
-  panel.style.top = `${clamp(y - 12, stage.height - height - 8)}px`;
-  panel.style.right = 'auto';
-}
-new ResizeObserver(positionPanel).observe($('stage'));
-new ResizeObserver(positionPanel).observe($('threadPanel'));
+// ─── The inspector: version history or comments, one at a time ─────────────
+//
+// Docked beside the page on wide screens, an overlay on narrow ones. Opening,
+// switching, closing or resizing it never reloads the page: the iframe keeps
+// its document, scroll position and selection, and the panel keeps its drafts
+// and expanded threads because they live in this module, not in the DOM.
 
+const inspectorQuery = matchMedia('(max-width: 1050px)');
+let inspectorMode = ''; // '' when closed, else 'comments' or 'history'
+let inspectorReturn = null; // the control that opened it, focused again on close
+
+function panelScroller() {
+  return $('threadPanel').hidden ? ($('historyPanel').hidden ? null : $('historyPanel').querySelector('.panel-scroll')) : $('threadPanel').querySelector('.panel-scroll');
+}
+
+/**
+ * The inspector is docked (wide) or a full-height overlay (narrow), so there is
+ * no floating card to place. This only clears any stale inline geometry and,
+ * while an anchor is tracked, keeps it out of the layout's way.
+ */
+function placeInspector() {
+  if (!inspectorMode) return;
+  const panel = $('threadPanel');
+  panel.style.removeProperty('top');
+  panel.style.removeProperty('left');
+  panel.style.removeProperty('right');
+  panel.style.removeProperty('margin-top');
+  panel.style.removeProperty('max-height');
+}
+
+/** Ask the page to accept a comment location, or stop asking. */
 function setPlacement(active) {
   placing = active && !commentBusy && !!info && controls(info).commentBox;
   $('placementHint').hidden = !placing;
   $('cancelPlacement').hidden = !placing;
   post({ type: 'placement', active: placing });
 }
-function closePanel(restore = false) {
-  const wasOpen = !$('threadPanel').hidden;
+
+function openInspector(mode, threadMode = 'index', point = null) {
+  const wasOpen = !!inspectorMode;
+  // The control that opened the inspector is where focus returns on close.
+  const returnTo = wasOpen ? inspectorReturn : document.activeElement;
+  closePopovers('inspector');
+  setPlacement(false);
+  inspectorReturn = returnTo;
+  inspectorMode = mode;
+  $('inspector').hidden = false;
+  $('threadPanel').hidden = mode !== 'comments';
+  $('historyPanel').hidden = mode !== 'history';
+  $('versionBtn').setAttribute('aria-expanded', String(mode === 'history'));
+  $('commentsBtn').setAttribute('aria-expanded', String(mode === 'comments'));
+  if (mode === 'comments') {
+    const panel = $('threadPanel');
+    panel.dataset.mode = threadMode;
+    panelPoint = point;
+    $('panelTitle').textContent = threadMode === 'draft' ? 'New comment' : threadMode === 'thread' ? 'Comment' : 'Comments';
+    $('allComments').hidden = threadMode === 'index';
+    $('commentForm').hidden = !controls(info).commentBox || threadMode !== 'draft';
+    if (threadMode === 'index') {
+      focused = '';
+      for (const view of views.values()) view.classList.remove('focus');
+      trackAnchor('');
+    }
+    placeInspector();
+    loadThreads(true);
+    if (!wasOpen && threadMode === 'index') $('threadClose').focus({ preventScroll: true });
+  } else {
+    renderVersions();
+  }
+  requestAnimationFrame(placeInspector);
+}
+
+function closeInspector(restore = false) {
+  if (!inspectorMode) return;
+  inspectorMode = '';
+  $('inspector').hidden = true;
   $('threadPanel').hidden = true;
+  $('historyPanel').hidden = true;
+  $('versionBtn').setAttribute('aria-expanded', 'false');
   $('commentsBtn').setAttribute('aria-expanded', 'false');
   panelPoint = null;
   trackAnchor('');
-  if (restore && wasOpen) $('commentsBtn').focus();
+  const back = restore ? inspectorReturn : null;
+  inspectorReturn = null;
+  if (back?.isConnected && typeof back.focus === 'function') back.focus({ preventScroll: true });
 }
-function openPanel(mode = 'index', point = null) {
-  closePopovers('threadPanel');
-  setPlacement(false);
-  const panel = $('threadPanel');
-  panel.dataset.mode = mode;
-  panelPoint = point;
-  panel.style.left = panel.style.top = panel.style.right = '';
-  panel.hidden = false;
-  $('panelTitle').textContent = mode === 'draft' ? 'New comment' : mode === 'thread' ? 'Comment' : 'Comments';
-  $('allComments').hidden = mode === 'index';
-  $('commentForm').hidden = !controls(info).commentBox || mode !== 'draft';
-  $('commentsBtn').setAttribute('aria-expanded', 'true');
-  if (mode === 'index') {
-    focused = '';
-    for (const view of views.values()) view.classList.remove('focus');
-    trackAnchor('');
-  }
-  positionPanel();
-  loadThreads(true);
-}
+
 function activateThread(t, point = null) {
   const view = views.get(t.uuid);
   if (!view) return;
@@ -821,19 +1013,27 @@ function activateThread(t, point = null) {
   expanded.set(t.uuid, true);
   for (const other of views.values()) other.classList.toggle('focus', other === view);
   view.open = true;
-  openPanel('thread', point || { x: $('frame').clientWidth / 2, y: 40 });
+  openInspector('comments', 'thread', point || { x: $('frame').clientWidth / 2, y: 40 });
   $('panelTitle').textContent = `Comment ${t.label}`;
   trackAnchor(t.anchor);
+  const target = views.get(t.uuid);
+  target?.scrollIntoView({ block: 'nearest' });
 }
+
 $('commentsBtn').addEventListener('click', e => {
   e.stopPropagation();
-  if ($('threadPanel').hidden || $('threadPanel').dataset.mode !== 'index') {
-    openPanel();
-  } else closePanel(true);
+  if (inspectorMode === 'comments' && $('threadPanel').dataset.mode === 'index') closeInspector(true);
+  else openInspector('comments');
 });
-$('threadClose').addEventListener('click', () => closePanel(true));
-$('allComments').addEventListener('click', () => openPanel());
-$('threadPanel').addEventListener('click', e => e.stopPropagation());
+$('versionBtn').addEventListener('click', e => {
+  e.stopPropagation();
+  if (inspectorMode === 'history') closeInspector(true);
+  else openInspector('history');
+});
+$('threadClose').addEventListener('click', () => closeInspector(true));
+$('historyClose').addEventListener('click', () => closeInspector(true));
+$('allComments').addEventListener('click', () => openInspector('comments'));
+$('inspector').addEventListener('click', e => e.stopPropagation());
 $('anchorClear').addEventListener('click', () => {
   if (commentBusy) return;
   selection = draftAnchor = '';
@@ -848,14 +1048,14 @@ $('generalComment').addEventListener('click', () => {
     return;
   }
   draftAnchor = '';
-  openPanel('draft');
+  openInspector('comments', 'draft');
   $('commentText').focus();
 });
 $('placeComment').addEventListener('click', () => {
   if (commentBusy || !controls(info).commentBox) return;
   if (!markersVisible) setMarkerVisibility(true);
   if (draftAnchor) {
-    openPanel('draft', { x: $('frame').clientWidth / 2, y: 40 });
+    openInspector('comments', 'draft', { x: $('frame').clientWidth / 2, y: 40 });
     trackAnchor(draftAnchor);
     $('commentText').focus();
     return;
@@ -864,17 +1064,17 @@ $('placeComment').addEventListener('click', () => {
   setPlacement(true);
   $('frame').focus();
 });
-$('cancelPlacement').addEventListener('click', e => { e.stopPropagation(); setPlacement(false); openPanel(); });
+$('cancelPlacement').addEventListener('click', e => { e.stopPropagation(); setPlacement(false); openInspector('comments'); });
 $('cancelComment').addEventListener('click', () => {
   if (commentBusy) return;
   $('commentText').value = '';
   selection = draftAnchor = '';
   $('commentStatus').textContent = '';
-  closePanel(true);
+  closeInspector(true);
   renderAnchor();
 });
-$('threadPanel').addEventListener('keydown', e => {
-  if (e.key === 'Escape') { e.stopPropagation(); closePanel(true); }
+$('inspector').addEventListener('keydown', e => {
+  if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeInspector(true); }
 });
 
 $('commentForm').addEventListener('submit', async e => {
@@ -894,7 +1094,7 @@ $('commentForm').addEventListener('submit', async e => {
     await loadThreads();
     const posted = threads.find(t => t.uuid === result.ticketUuid);
     if (posted && point) activateThread(posted, point);
-    else openPanel();
+    else openInspector('comments');
   } catch (err) {
     $('commentStatus').textContent = `Could not post: ${err.message}`;
   } finally {
@@ -903,7 +1103,8 @@ $('commentForm').addEventListener('submit', async e => {
 });
 
 function renderVersions() {
-  $('versionCount').textContent = `${info.timeline.length} check-in${info.timeline.length === 1 ? '' : 's'}`;
+  const count = info.timeline.length;
+  $('versionCount').textContent = `${count} check-in${count === 1 ? '' : 's'}`;
   $('versionList').replaceChildren(...info.timeline.map(c => {
     const item = el('a', {
       className: 'version',
@@ -916,9 +1117,275 @@ function renderVersions() {
       c.uuid === info.tip ? el('span', { className: 'tag latest', textContent: 'Latest' }) : el('span'));
     item.setAttribute('role', 'menuitemradio');
     item.setAttribute('aria-checked', String(c.uuid === shown.checkin));
+    item.setAttribute('aria-current', String(c.uuid === shown.checkin));
     return item;
   }));
+  // The version the reader is on, so a long history opens where they are.
+  const active = $('versionList').querySelector('[aria-current="true"]');
+  if (active && inspectorMode === 'history') $('historyPanel').querySelector('.panel-scroll').scrollTop = Math.max(0, active.offsetTop - 48);
 }
+
+// ─── Manage: rename, expiration, archive (signed-in management only) ───────
+
+/** A same-origin cookie call. Never a capability Authorization header. */
+async function manageRequest(path, { method = 'GET', body } = {}) {
+  // Reads may use the page's last confirmed identity; a write revalidates it
+  // first so a restored page cannot change an artifact after sign-out.
+  if (method !== 'GET' && !(await managementAuthorization())) {
+    throw new Error('Sign in again to manage this artifact.');
+  }
+  const headers = body === undefined ? {} : { 'Content-Type': 'application/json' };
+  const response = await fetch(path, {
+    method, headers, credentials: 'same-origin', cache: 'no-store',
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const detail = response.status === 204 ? null : await response.json().catch(() => null);
+  if (!response.ok) throw new Error(typeof detail?.error === 'string' ? detail.error : `Request failed (HTTP ${response.status}).`);
+  return detail;
+}
+const managePath = suffix => `/api/artifacts/${encodeURIComponent(art.id)}/${suffix}`;
+
+function dialogClose(dialog) { if (dialog.open) dialog.close(); }
+for (const dialog of [$('renameDialog'), $('expirationDialog')]) {
+  dialog.addEventListener('click', e => { if (e.target === dialog) dialogClose(dialog); });
+  for (const button of dialog.querySelectorAll('[data-close]')) button.addEventListener('click', () => dialogClose(dialog));
+}
+
+function localDateTimeValue(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+$('renameBtn').addEventListener('click', () => {
+  closePopovers();
+  $('renameTitle').value = info.title || '';
+  $('renameStatus').textContent = '';
+  $('renameDialog').showModal();
+  $('renameTitle').focus();
+  $('renameTitle').select();
+});
+$('renameForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  if (!info.canManage) return;
+  const title = $('renameTitle').value.trim();
+  if (!title) { $('renameStatus').textContent = 'A title is required.'; return; }
+  const submit = $('renameForm').querySelector('[type=submit]');
+  submit.disabled = $('renameTitle').readOnly = true;
+  $('renameStatus').textContent = 'Saving…';
+  const epoch = identityEpoch, owner = accountId;
+  try {
+    await manageRequest(managePath('manage'), { method: 'PATCH', body: { title } });
+    if (!stillCurrent(epoch, owner)) return; // another account owns this page now
+    info.title = title;
+    $('renameStatus').textContent = 'Saved.';
+    renderChrome();
+    dialogClose($('renameDialog'));
+    notice('Title saved.');
+  } catch (err) {
+    if (!stillCurrent(epoch, owner)) return;
+    $('renameStatus').textContent = `Could not rename: ${err.message}`;
+  } finally {
+    submit.disabled = $('renameTitle').readOnly = false;
+  }
+});
+
+$('expirationBtn').addEventListener('click', () => {
+  closePopovers();
+  $('expiryMode').value = info.expiresAt ? 'date' : 'never';
+  $('expiryDate').value = info.expiresAt ? localDateTimeValue(info.expiresAt) : '';
+  $('expiryDate').disabled = $('expiryMode').value === 'never';
+  $('expiryDateLabel').hidden = $('expiryMode').value === 'never';
+  $('expirationStatus').textContent = info.expiresAt
+    ? `Currently expires ${new Date(info.expiresAt).toLocaleString()}.`
+    : 'This artifact does not expire.';
+  $('expirationDialog').showModal();
+  if ($('expiryMode').value === 'date') $('expiryDate').focus(); else $('expiryMode').focus();
+});
+$('expiryMode').addEventListener('change', () => {
+  const never = $('expiryMode').value === 'never';
+  $('expiryDate').disabled = never;
+  $('expiryDateLabel').hidden = never;
+  if (!never) $('expiryDate').focus();
+});
+$('expirationForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  if (!info.canManage) return;
+  let expiresAt;
+  if ($('expiryMode').value === 'never') expiresAt = null;
+  else {
+    const chosen = new Date($('expiryDate').value);
+    if (!chosen.getTime()) { $('expirationStatus').textContent = 'Choose a date and time, or choose Never expires.'; return; }
+    if (chosen.getTime() <= Date.now()) { $('expirationStatus').textContent = 'Choose a time in the future.'; return; }
+    expiresAt = chosen.toISOString();
+  }
+  const submit = $('expirationForm').querySelector('[type=submit]');
+  submit.disabled = true;
+  $('expirationStatus').textContent = 'Saving…';
+  const epoch = identityEpoch, owner = accountId;
+  try {
+    const result = await manageRequest(managePath('manage'), { method: 'PATCH', body: { expiresAt } });
+    if (!stillCurrent(epoch, owner)) return;
+    info.expiresAt = expiresAt;
+    renderShare();
+    dialogClose($('expirationDialog'));
+    notice(result?.expirationPending ? 'Expiration update accepted. The library is still updating.' : expiresAt ? 'Expiration saved.' : 'Expiration cleared.');
+  } catch (err) {
+    if (!stillCurrent(epoch, owner)) return;
+    $('expirationStatus').textContent = `Could not save: ${err.message}`;
+  } finally {
+    submit.disabled = false;
+  }
+});
+
+$('archiveBtn').addEventListener('click', async () => {
+  closePopovers();
+  if (!info.canManage) return;
+  // The artifact info carries no archive flag, so archive is a one-way action
+  // here; Archived in the library is where it is restored.
+  if (!confirm(`Archive “${info.title}”? It leaves the library but its links keep working. Restore it from Archived in the library.`)) return;
+  const button = $('archiveBtn');
+  button.disabled = true;
+  try {
+    await manageRequest(managePath('manage'), { method: 'PATCH', body: { archived: true } });
+    notice('Archived. It leaves the library and its links keep working.');
+    loadLibrary(true);
+  } catch (err) {
+    notice(`Could not archive: ${err.message}`);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+// ─── People: named access, from the sharing endpoint ───────────────────────
+
+let people = { grants: [], users: [], ownerId: '' };
+let peopleLoading = false; // a refresh of the list is in flight
+let peopleSaving = false;  // a grant change is in flight
+let peopleError = '';
+let peopleLoaded = false;
+
+function personName(user) {
+  return user.name && user.name !== user.email ? user.name : user.email || 'Signed-in account';
+}
+
+async function loadPeople(refetch = false) {
+  if (!info?.canManage) return false;
+  if (peopleLoading) return false;
+  if (peopleLoaded && !refetch) { renderPeople(); return true; }
+  peopleLoading = true;
+  $('peopleError').hidden = true;
+  $('peopleStatus').textContent = peopleSaving ? 'Saving access…' : 'Loading people…';
+  const epoch = identityEpoch, owner = accountId;
+  let ok = false;
+  try {
+    // People are account data: confirm the cookie still owns this page first.
+    if (!(await confirmAccount({ fresh: true }))) throw new Error('Sign in again to see who has access.');
+    if (!stillCurrent(epoch, owner)) return false; // a newer identity owns this panel now
+    const next = await manageRequest(managePath('sharing'));
+    if (!stillCurrent(epoch, owner)) return false;
+    people = next;
+    peopleLoaded = true;
+    peopleError = '';
+    ok = true;
+  } catch (err) {
+    if (!stillCurrent(epoch, owner)) return false;
+    peopleError = err.message;
+  } finally {
+    peopleLoading = false;
+    $('peopleStatus').textContent = peopleSaving ? 'Saving access…' : '';
+    renderPeople();
+  }
+  return ok;
+}
+
+function renderPeople() {
+  $('peopleSection').hidden = !info?.canManage;
+  if (!info?.canManage) return;
+  const busy = peopleLoading || peopleSaving;
+  $('peopleError').textContent = peopleError;
+  $('peopleError').hidden = !peopleError;
+  const byId = new Map(people.users.map(u => [u.id, u]));
+  $('peopleList').replaceChildren(...people.grants.map(grant => {
+    const user = byId.get(grant.userId) ?? grant;
+    const permission = el('select', { className: 'permission', 'aria-label': `Permission for ${personName(user)}` },      el('option', { value: 'read', textContent: 'Can view' }), el('option', { value: 'write', textContent: 'Can edit' }));
+    permission.value = grant.permission;
+    permission.disabled = busy;
+    permission.addEventListener('change', () => saveGrant(grant.userId, permission.value, permission));
+    const remove = el('button', { type: 'button', className: 'remove', textContent: 'Remove', disabled: busy });
+    remove.setAttribute('aria-label', `Remove access for ${personName(user)}`);
+    remove.addEventListener('click', () => saveGrant(grant.userId, null, remove));
+    return el('div', { className: 'person-row' },
+      el('span', { className: 'person-name' }, el('strong', { textContent: personName(user) }), el('small', { textContent: user.email && user.email !== personName(user) ? user.email : '' })),
+      permission, remove);
+  }));
+  if (!people.grants.length) $('peopleList').append(el('p', { className: 'hint', textContent: 'No one else has named access yet.' }));
+
+  // Only people who could actually be granted access, from the same endpoint.
+  const granted = new Set(people.grants.map(g => g.userId));
+  $('peoplePick').replaceChildren(el('option', { value: '', textContent: 'Choose a person…' }),
+    ...people.users.filter(u => !granted.has(u.id)).map(u => el('option', { value: u.id, textContent: personName(u) })));
+  const eligible = people.users.some(u => !granted.has(u.id));
+  $('peopleForm').hidden = !eligible;
+  $('peoplePick').disabled = busy;
+  $('peoplePermission').disabled = busy;
+  $('peopleForm').querySelector('[type=submit]').disabled = busy;
+}
+
+async function saveGrant(userId, permission, control) {
+  if (peopleLoading || peopleSaving || !info.canManage) return;
+  peopleSaving = true;
+  peopleError = '';
+  control.disabled = true;
+  $('peopleStatus').textContent = permission ? 'Saving access…' : 'Removing access…';
+  const epoch = identityEpoch, owner = accountId;
+  renderPeople();
+  try {
+    await manageRequest(managePath('sharing'), { method: 'PUT', body: { userId, permission } });
+    if (!stillCurrent(epoch, owner)) return; // a newer identity owns this panel now
+    // The save is authoritative for its own row: show it at once, then confirm
+    // it against the server. The refresh is a separate read, not blocked by
+    // this write's lock, so the successful change is never left stale.
+    applyGrant(userId, permission);
+    renderPeople();
+    const refreshed = await loadPeople(true);
+    if (!stillCurrent(epoch, owner)) return;
+    $('peopleStatus').textContent = refreshed
+      ? (permission ? 'Access saved.' : 'Access removed. Any capability link they hold keeps working.')
+      : 'Saved. The list could not be refreshed; reopen Share to reload it.';
+    notice(permission ? 'Named access saved.' : 'Named access removed.');
+  } catch (err) {
+    if (!stillCurrent(epoch, owner)) return;
+    peopleError = err.message;
+    $('peopleStatus').textContent = '';
+  } finally {
+    peopleSaving = false;
+    renderPeople();
+  }
+}
+
+/** The row state a confirmed grant change implies, shown before the refresh. */
+function applyGrant(userId, permission) {
+  const user = people.users.find(u => u.id === userId) ?? people.grants.find(g => g.userId === userId);
+  const grant = { userId, permission, ...(user?.email ? { email: user.email } : {}), ...(user?.name ? { name: user.name } : {}) };
+  people = {
+    ...people,
+    grants: permission ? [...people.grants.filter(g => g.userId !== userId), grant] : people.grants.filter(g => g.userId !== userId),
+  };
+  peopleLoaded = true;
+}
+
+$('peopleForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  if (peopleLoading || peopleSaving || !info.canManage) return;
+  const userId = $('peoplePick').value;
+  if (!userId) { peopleError = 'Choose a person to add.'; renderPeople(); return; }
+  await saveGrant(userId, $('peoplePermission').value, $('peopleForm').querySelector('[type=submit]'));
+  $('peoplePick').value = '';
+});
+
+// ─── Share and export ──────────────────────────────────────────────────────
 
 /** One labelled, read-only value with a Copy button. */
 function shareRow(id, label, hint, value, { secret = false } = {}) {
@@ -977,8 +1444,13 @@ let publicationBusy = false;
 let publicationLoading = false;
 
 async function publicationRequest(path, { method = 'GET', body } = {}) {
-  const headers = art.auth ? { Authorization: art.auth } : {};
-  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  // Snapshots belong to a signed-in account. The cookie decides, exactly as it
+  // does for sharing; a capability token in the link grants nothing here. A
+  // write revalidates the account, so a stale page publishes nothing.
+  if (method !== 'GET' && !(await managementAuthorization())) {
+    throw new Error('Sign in again to manage public snapshots.');
+  }
+  const headers = body === undefined ? {} : { 'Content-Type': 'application/json' };
   const response = await fetch(path, {
     method, headers, credentials: 'same-origin', cache: 'no-store',
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -1012,11 +1484,16 @@ function renderPublications() {
       renderShare();
       renderPublications();
       publicationStatus('Deleting public snapshot…');
+      const epoch = identityEpoch, owner = accountId;
       try {
         await publicationRequest(`/api/publications/${encodeURIComponent(publication.id)}`, { method: 'DELETE' });
+        if (!stillCurrent(epoch, owner)) return;
         publications = publications.filter(item => item.id !== publication.id);
         publicationStatus('Public snapshot deleted. The private artifact is unchanged.');
-      } catch (e) { publicationStatus(e.message, true); }
+      } catch (e) {
+        if (!stillCurrent(epoch, owner)) return;
+        publicationStatus(e.message, true);
+      }
       finally { publicationBusy = false; renderShare(); renderPublications(); }
     });
     actions.append(remove);
@@ -1031,14 +1508,20 @@ function renderPublications() {
 async function loadPublications(append = false) {
   if (!info?.canManage || publicationLoading) return;
   publicationLoading = true;
+  const epoch = identityEpoch, owner = accountId;
   renderPublications();
   try {
     const query = new URLSearchParams({ artifactId: art.id });
     if (append && publicationCursor) query.set('cursor', publicationCursor);
     const result = await publicationRequest(`/api/publications?${query}`);
+    // A late answer lists whoever owned the cookie when it was sent.
+    if (!stillCurrent(epoch, owner)) return;
     publications = append ? [...publications, ...result.publications] : result.publications;
     publicationCursor = result.nextCursor || '';
-  } catch (e) { publicationStatus(e.message, true); }
+  } catch (e) {
+    if (!stillCurrent(epoch, owner)) return;
+    publicationStatus(e.message, true);
+  }
   finally { publicationLoading = false; renderPublications(); }
 }
 
@@ -1051,36 +1534,43 @@ $('publishPublic').addEventListener('click', async () => {
   renderShare();
   renderPublications();
   publicationStatus('Preparing standalone snapshot…');
+  const epoch = identityEpoch, owner = accountId;
   try {
     const bundle = await art.bundle(at);
     if (bundle.checkin !== at) throw new Error('The selected version could not be loaded exactly. Please reload and try again.');
     const documents = await preparePublication(art, bundle);
+    if (!stillCurrent(epoch, owner)) return;
     publicationStatus('Publishing public snapshot…');
     const publication = await publicationRequest(`${art.base}/publications`, { method: 'POST', body: { at, documents } });
+    if (!stillCurrent(epoch, owner)) return;
     publications = [publication, ...publications.filter(item => item.id !== publication.id)];
     publicationStatus(publication.status === 'live' && publication.url
       ? 'Published. Copy or open the public link below.' : `Snapshot status: ${publication.status}. Reopen Share to refresh.`);
-  } catch (e) { publicationStatus(e.message, true); }
+  } catch (e) {
+    if (!stillCurrent(epoch, owner)) return;
+    publicationStatus(e.message, true);
+  }
   finally { publicationBusy = false; renderShare(); renderPublications(); }
 });
 
 function renderShare() {
+  const can = controls(info);
+  // Named access and public snapshots belong to signed-in management only.
+  $('peopleSection').hidden = !info.canManage;
   $('publicationSection').hidden = !info.canManage;
   $('publishPublic').disabled = publicationBusy;
   $('publishPublic').textContent = publicationBusy ? 'Working…' : `Publish version ${shortId(shown.checkin)}`;
-  $('shareMenu').querySelector('.collaboration').open = !info.canManage;
+  if (info.canManage) { renderPeople(); renderPublications(); }
   if (!link.token) {
-    const can = controls(info);
     $('shareRows').replaceChildren(...[
       shareRow('libraryLink', 'Library link',
         'Only the owner, instance owner, and people with named access can open this link after signing in.',
         location.origin + location.pathname),
       can.commentLink ? commentLinkRow() : null,
     ].filter(Boolean));
-    $('shareFoot').textContent = 'Manage named access from your library. This link does not grant access.';
+    $('shareFoot').textContent = 'This link does not grant access on its own.';
     return;
   }
-  const can = controls(info);
   const writer = can.edit;
   // A comment link is not a Fossil login, and holders of one see no other link.
   const reader = info.role === 'read';
@@ -1098,10 +1588,11 @@ function renderShare() {
     : 'Does not expire';
 }
 
-// One popover open at a time; Escape or a click elsewhere closes it.
-const popovers = [['titleBtn', 'titleMenu'], ['versionBtn', 'versionMenu'], ['shareBtn', 'shareMenu'], ['moreBtn', 'moreMenu']];
+// ─── Popovers: one open at a time; Escape or a click elsewhere closes it ────
+const popovers = [['titleBtn', 'titleMenu'], ['shareBtn', 'shareMenu'], ['moreBtn', 'moreMenu']];
 function closePopovers(except) {
-  if (except !== 'threadPanel') { closePanel(); setPlacement(false); }
+  if (except !== 'inspector') closeInspector();
+  setPlacement(false);
   for (const [btn, menu] of popovers) {
     if (menu === except) continue;
     $(menu).hidden = true;
@@ -1115,7 +1606,11 @@ for (const [btn, menu] of popovers) {
     closePopovers(menu);
     $(menu).hidden = !open;
     $(btn).setAttribute('aria-expanded', String(open));
-    if (open && menu === 'shareMenu') loadPublications();
+    if (open && menu === 'shareMenu') {
+      shareTab('share');
+      loadPublications();
+      loadPeople();
+    }
   });
   $(menu).addEventListener('click', e => e.stopPropagation());
   const items = () => [...$(menu).querySelectorAll('button:not(:disabled), a[href], select')].filter(n => n.getClientRects().length);
@@ -1136,12 +1631,11 @@ document.addEventListener('click', () => closePopovers());
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     const open = popovers.find(([, menu]) => !$(menu).hidden);
-    if (open || !$('threadPanel').hidden || placing) e.preventDefault();
+    if (open || inspectorMode || placing) e.preventDefault();
     closePopovers();
     if (open) $(open[0]).focus();
   }
 });
-$('versionList').addEventListener('click', () => closePopovers());
 
 function shareTab(which, focus = false) {
   for (const name of ['share', 'export']) {
@@ -1151,6 +1645,7 @@ function shareTab(which, focus = false) {
     $(`${name}Pane`).hidden = !active;
   }
   if (focus) $(`${which}Tab`).focus();
+  if (which === 'export') closeInspector();
 }
 for (const name of ['share', 'export']) {
   $(`${name}Tab`).addEventListener('click', () => shareTab(name));
@@ -1160,6 +1655,168 @@ for (const name of ['share', 'export']) {
     shareTab(e.key === 'Home' ? 'share' : e.key === 'End' ? 'export' : name === 'share' ? 'export' : 'share', true);
   });
 }
+
+// ─── The library sidebar: an optional, honest map of the reader's library ──
+//
+// Signed-in accounts get their real recent artifacts from the existing
+// authorized endpoint, cached briefly. Anonymous capability readers get no
+// inventory: only the existing library routes, which ask them to sign in.
+
+const RECENT_LIMIT = 8;
+const LIBRARY_CACHE_MS = 30_000;
+let libraryCache = { at: 0, items: null, error: '', accountId: null };
+let navOpen = false;
+let sidebarUnavailable = false;
+
+function setNav(open, restore = false) {
+  navOpen = open && !sidebarUnavailable;
+  $('librarySidebar').hidden = sidebarUnavailable ? true : !navOpen;
+  $('navScrim').hidden = !navOpen;
+  $('navBtn').setAttribute('aria-expanded', String(navOpen));
+  if (!navOpen && restore) $('navBtn').focus({ preventScroll: true });
+}
+
+function renderRecent() {
+  const { items, error } = libraryCache;
+  const list = $('recentList');
+  if (error) {
+    $('recentStatus').textContent = `Recent artifacts could not load: ${error}`;
+    list.replaceChildren();
+    return;
+  }
+  if (!items) { $('recentStatus').textContent = 'Loading recent artifacts…'; return; }
+  $('recentStatus').textContent = items.length ? '' : 'No artifacts yet.';
+  list.replaceChildren(...items.map(item => {
+    const link = el('a', { className: 'recent-item', href: item.viewerUrl },
+      el('strong', { textContent: item.title || 'Untitled' }),
+      el('small', { textContent: [item.ownerName, item.updatedAt ? ago(item.updatedAt) : ''].filter(Boolean).join(' · ') }));
+    if (item.id === art?.id) link.setAttribute('aria-current', 'page');
+    link.addEventListener('click', e => outgoingGuard(e));
+    return link;
+  }));
+}
+
+async function loadLibrary(force = false) {
+  if (sidebarUnavailable) return renderRecent();
+  // The cache belongs to one account; another identity never reads it.
+  if (libraryCache.accountId !== accountId) libraryCache = { at: 0, items: null, error: '', accountId };
+  if (!force && libraryCache.items && Date.now() - libraryCache.at < LIBRARY_CACHE_MS) return renderRecent();
+  if (!force && !navOpen) { renderRecent(); return; }
+  const epoch = identityEpoch, owner = accountId;
+  try {
+    const response = await fetch('/api/library?sort=recent&limit=' + RECENT_LIMIT, { credentials: 'same-origin', cache: 'no-store' });
+    // A late answer belongs to whoever the cookie was when it was sent. If the
+    // identity moved, this is another account's inventory (or a stale 401);
+    // writing either would be wrong.
+    if (!stillCurrent(epoch, owner)) return;
+    if (response.status === 401) {
+      // Signed out: there is no inventory to show, only the routes that ask for sign-in.
+      accountId = '';
+      forgetAccount();
+      libraryCache = { at: Date.now(), items: [], error: '', accountId: '' };
+      return;
+    }
+    if (!response.ok) throw new Error(`Library request failed (HTTP ${response.status}).`);
+    const data = await response.json();
+    if (!stillCurrent(epoch, owner)) return;
+    libraryCache = { at: Date.now(), items: (data.artifacts ?? []).slice(0, RECENT_LIMIT), error: '', accountId: owner };
+  } catch (err) {
+    if (!stillCurrent(epoch, owner)) return;
+    libraryCache = { ...libraryCache, at: Date.now(), error: err.message };
+  }
+  renderRecent();
+}
+
+async function startSidebar() {
+  try {
+    const id = await confirmAccount({ fresh: true });
+    if (!id) {
+      // Anonymous capability readers: no inventory, only the library routes that
+      // ask them to sign in. No toggle appears for a sidebar they cannot have.
+      sidebarUnavailable = true;
+      setNav(false);
+      return;
+    }
+    showAccountChrome();
+    await loadLibrary();
+  } catch {
+    // Offline or no accounts on this instance: the artifact itself still works.
+    sidebarUnavailable = true;
+    setNav(false);
+  }
+}
+
+/** A confirmed account gets the library toggle and, wide, the docked sidebar. */
+function showAccountChrome() {
+  sidebarUnavailable = false;
+  $('navBtn').hidden = false;
+  if (matchMedia('(min-width: 1051px)').matches) setNav(true);
+}
+
+$('navBtn').addEventListener('click', e => {
+  e.stopPropagation();
+  setNav(!navOpen);
+  if (navOpen) loadLibrary();
+});
+$('navScrim').addEventListener('click', () => setNav(false, true));
+$('librarySidebar').addEventListener('click', e => e.stopPropagation());
+// Find is an existing route; leaving the page is navigation, so drafts and open
+// management forms are never silently thrown away.
+for (const link of [$('navAll'), $('navFind'), $('navStarred'), $('navShared')]) {
+  link.addEventListener('click', e => outgoingGuard(e));
+}
+addEventListener('resize', () => {
+  if (sidebarUnavailable) return;
+  if (matchMedia('(min-width: 1051px)').matches && !navOpen) setNav(true);
+  if (matchMedia('(max-width: 1050px)').matches && navOpen) setNav(false);
+  placeInspector();
+});
+inspectorQuery.addEventListener('change', placeInspector);
+
+/** A page that would lose a draft or an unsaved management form asks first. */
+function hasUnsavedWork() {
+  if ($('renameDialog').open || $('expirationDialog').open) return true;
+  if ($('commentText').value.trim()) return true;
+  for (const value of drafts.values()) if (value && value.trim()) return true;
+  if (peopleLoaded || !$('peopleForm').hidden) {
+    if ($('peoplePick').value) return true;
+    if ([...document.querySelectorAll('#peopleList select')].some(s => s.dataset.dirty === 'true')) return true;
+  }
+  return false;
+}
+function confirmLeave(event) {
+  if (hasUnsavedWork() && !confirm('Leave this artifact? Unsaved comment drafts and open forms will be lost.')) event.preventDefault();
+}
+/**
+ * The one guard for links that leave this viewer for another same-tab page:
+ * static library/Find links and the dynamic Recent rows alike, so a draft is
+ * never discarded by one door and protected at the other. A new tab, a
+ * modifier-click or a changed version hash is not leaving the page, so it is
+ * never prompted for.
+ */
+function outgoingGuard(event) {
+  if (event.defaultPrevented) return;
+  if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+  const anchor = event.currentTarget;
+  if (anchor.target && anchor.target !== '_self') return;
+  let next;
+  try { next = new URL(anchor.href, location.href); } catch { return; }
+  if (next.origin !== location.origin) return;
+  // Another version of this same page swaps in place (the viewer listens for
+  // the hash change), so there is no page to leave and nothing to lose. The
+  // same URL is a reload; a different capability token is a different
+  // authority. Both reload, so both are guarded.
+  if (next.pathname === location.pathname && next.search === location.search
+    && next.hash !== location.hash) {
+    try {
+      if (viewerFragment(next.hash).token === viewerFragment(location.hash).token) return;
+    } catch { /* a malformed fragment is not a page change to sneak past the guard */ }
+  }
+  confirmLeave(event);
+}
+$('backLibrary').addEventListener('click', e => confirmLeave(e));
+
+// ─── Restore, delete, upload, download ─────────────────────────────────────
 
 $('restoreBtn').addEventListener('click', async () => {
   const btn = $('restoreBtn');
@@ -1239,7 +1896,7 @@ function notice(text) {
   if (!text.endsWith('…')) noticeTimer = setTimeout(() => { $('toast').hidden = true; }, 6000);
 }
 
-// ─── The page's window.artifact API ──────────────────────────────────────────
+// ─── The page's window.artifact API ────────────────────────────────────────
 
 const ops = {
   canWrite: () => info.role === 'write',
@@ -1293,7 +1950,7 @@ addEventListener('message', async e => {
   }
 });
 
-// ─── Watching for new versions ───────────────────────────────────────────────
+// ─── Watching for new versions ──────────────────────────────────────────────
 
 async function watch() {
   if (document.visibilityState !== 'visible' || !art || !info) return;
@@ -1313,7 +1970,7 @@ $('toastShow').addEventListener('click', () => {
   else reload(true).catch(e => fail(e.message));
 });
 
-// ─── Start ───────────────────────────────────────────────────────────────────
+// ─── Start ──────────────────────────────────────────────────────────────────
 
 /** Load the timeline, and with `show` the check-in the link names. */
 // A large script, stylesheet or document stored as a blob is fetched and then
@@ -1351,6 +2008,7 @@ async function main() {
   art = new Artifact(location.origin, m[1], link.token);
   await reload(true);
   await loadThreads();
+  startSidebar();
 }
 
 addEventListener('hashchange', () => {

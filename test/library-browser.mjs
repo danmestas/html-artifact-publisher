@@ -2,9 +2,11 @@
 // test/accounts.test.mjs. Requires the agent-browser executable, not production
 // dependencies. The account suite owns the isolated Wrangler lifecycle.
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
+import { promisify } from 'node:util';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+const execFileAsync=promisify(execFile);
 
 // The expiration flow on its own, so it can run without the navigation matrix.
 // `artifact` names the artifact and the session that may manage it.
@@ -95,7 +97,10 @@ export function browserDriver(session='accounts-library-qa') {
     assert.equal(result.success,true,JSON.stringify(result));
     return result.data.result;
   };
-  return {run,evaluate,wait:selector=>run('wait',selector),click:selector=>run('click',selector)};
+  // Long waits must leave the fixture's Node event loop free to drain the
+  // Wrangler/proxy pipes while the browser waits for its HTTP response.
+  const runAsync=async(...args)=>(await execFileAsync('agent-browser',['--session',session,...args],{encoding:'utf8',timeout:45000,env:{...process.env,AGENT_BROWSER_IDLE_TIMEOUT_MS:'60000'}})).stdout;
+  return {run,runAsync,evaluate,wait:selector=>run('wait',selector),click:selector=>run('click',selector)};
 }
 
 export async function browserQA({base,loginUrl,output,api,owner,browserOwner,member}) {

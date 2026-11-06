@@ -119,7 +119,7 @@ nav{display:grid;gap:2px}
 .filter-button .nav-icon{width:14px;height:14px}
 .filter-count{font-size:10.5px;color:var(--accent);font-weight:600}
 .filter-count:empty{display:none}
-.filter-popover{position:absolute;z-index:12;right:0;top:46px;width:290px;background:var(--panel);padding:16px;border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow)}
+.filter-popover{position:fixed;z-index:12;right:auto;width:min(290px,calc(100vw - 32px));max-height:calc(100dvh - 32px);overflow:auto;overscroll-behavior:contain;background:var(--panel);padding:16px;border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow)}
 .popover-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:6px}
 .popover-head h2{font-size:15px;margin:0;font-weight:600}
 .popover-head .icon-button{width:36px;height:36px;min-width:36px;font-size:18px;border-color:transparent;background:transparent}
@@ -358,7 +358,7 @@ input::placeholder,textarea::placeholder{color:var(--muted);opacity:1}
   .inline-field{flex:1 1 150px;min-width:0}
   .toolbar select{width:100%;max-width:none;min-height:44px;font-size:13px}
   .filter-button{min-height:44px;padding-inline:8px;font-size:13px}
-  .filter-popover{right:0;left:0;width:auto;top:auto;position:absolute}
+  .filter-popover{right:auto;left:auto;width:calc(100vw - 32px);position:fixed}
   .segmented{display:none}
   .filter-popover .segmented{display:flex}
   .filter-popover .segmented button{min-height:44px}

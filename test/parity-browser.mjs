@@ -31,7 +31,9 @@ export async function parityQA({base,api,owner,browserOwner,member,run,evaluate,
       assert.equal(r.status,201);ids.push(r.json.id);
     }
     await api(`/api/artifacts/${ids[0]}/sharing`,{method:'PUT',cookie:owner.cookie,body:{userId:member.user.id,permission:'read'}});
-    run('set','viewport','1440','1000');run('open',base+'/?q=Parity+browser&sort=name');wait('.artifact-title');wait('.artifact-preview iframe');run('wait','--load','networkidle');
+    run('set','viewport','1440','1000');run('open',base+'/?q=Parity+browser&sort=name');wait('.artifact-title');
+    // Preview isolation is a grid-specific workflow, not the default layout.
+    click('[data-layout="grid"]');wait('.artifact-preview iframe');run('wait','--load','networkidle');
     assert.deepEqual(evaluate('[...document.querySelectorAll(".artifact-title")].map(e=>e.textContent)'),['Parity browser Alpha','Parity browser Beta']);
     assert.deepEqual(evaluate('[...document.querySelectorAll(".access-badge")].map(e=>e.textContent)'),['Shared by you','Private']);
     // The summary line describes the list; the pagination line still carries the exact shown/total count.

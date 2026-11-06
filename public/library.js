@@ -38,11 +38,14 @@ let sentEmail = '';
 let resendTimer;
 let activityEvents = [];
 let publicationCleanupResult = '';
-let recentItems = [];   // Real artifacts from the last authorized library fetch, memory only.
+let recentItems = [];   // Real artifacts from the authorized recent query, memory only.
+let recentRequest = 0;
 let accountId = null;   // The signed-in account these in-memory caches belong to.
+let accountRole = null;
+let accountEpoch = 0;   // Invalidates completions from an earlier identity, even A → out → A.
 let preferences = {};
 try { preferences = JSON.parse(localStorage.getItem('artifact-library-preferences') || '{}') || {}; } catch { /* Optional per-browser preferences. */ }
-let layout = preferences.layout === 'list' ? 'list' : 'grid';
+let layout = preferences.layout === 'grid' ? 'grid' : 'list';
 // The URL is the whole list state: view, search, filters, sort, and how many rows are shown (n).
 function readState() {
   const p = new URLSearchParams(location.search);
@@ -129,13 +132,24 @@ function savePreferences() {
   } catch { /* Storage can be disabled. */ }
 }
 
+function staleAccountRequest() { return new DOMException('Account changed while the request was in flight.', 'AbortError'); }
 async function api(path, { method = 'GET', body } = {}) {
-  const response = await fetch(path, {
-    method, credentials: 'same-origin', cache: 'no-store',
-    headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  const epoch = accountEpoch;
+  let response;
+  try {
+    response = await fetch(path, {
+      method, credentials: 'same-origin', cache: 'no-store',
+      headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch (err) {
+    if (epoch !== accountEpoch) throw staleAccountRequest();
+    throw err;
+  }
   const data = response.status === 204 ? null : await response.json().catch(() => null);
+  // Drain the response, but never let an old success or 401 affect a newer
+  // account. Callers that cache data also check again after their await.
+  if (epoch !== accountEpoch) throw staleAccountRequest();
   if (!response.ok) {
     if (response.status === 401 && user) {
       user = null;
@@ -167,6 +181,8 @@ function takeLoginReturn() {
 // or an expired session must not inherit the previous person's titles, people
 // list or activity. Recent artifacts are never written to storage.
 function resetAccountCaches() {
+  ++accountEpoch;
+  closeDialog();
   clearPreviews();
   people = [];
   activityEvents = [];
@@ -186,9 +202,11 @@ function resetAccountCaches() {
 }
 function adoptAccount(nextUser) {
   const id = nextUser ? nextUser.id : null;
-  if (id === accountId) return;
+  const role = nextUser ? nextUser.role : null;
+  if (id === accountId && role === accountRole) return;
   resetAccountCaches();
   accountId = id;
+  accountRole = role;
 }
 function showLogin() {
   document.documentElement.setAttribute('data-system-appearance', '');
@@ -288,9 +306,9 @@ $('account-menu-button').addEventListener('click', () => {
 });
 document.addEventListener('click', e => { if (!$('account-menu').hidden && !e.target.closest('.account')) closeAccountMenu(); });
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape' && !$('account-menu').hidden) { closeAccountMenu(); $('account-menu-button').focus(); }
-  // Escape closes the Filters popover and returns focus to its trigger.
-  else if (e.key === 'Escape' && filtersOpen()) { closeFilters(); filterFocus().focus(); }
+  if (e.key === 'Escape' && !$('account-menu').hidden) { e.preventDefault(); closeAccountMenu(); $('account-menu-button').focus(); }
+  // Consume the handled key: its browser default can stop loading requests.
+  else if (e.key === 'Escape' && filtersOpen()) { e.preventDefault(); closeFilters(); filterFocus().focus(); }
   // Cmd/Ctrl+K focuses the actual search field; it is not a command palette.
   // Never interrupt an open dialog: it may hold a one-time credential or
   // unsaved management edits, and moving focus would risk losing them.
@@ -383,9 +401,19 @@ window.addEventListener('popstate', () => {
 // in one labeled popover instead of a permanent row of competing controls.
 const filterFocus = () => $('filter-toggle');
 function filtersOpen() { return !$('filter-popover').hidden; }
+function positionFilters() {
+  const popover=$('filter-popover'),anchor=$('filter-toggle').getBoundingClientRect();
+  const bounds=popover.getBoundingClientRect();
+  const left=Math.max(16,Math.min(anchor.right-bounds.width,innerWidth-bounds.width-16));
+  const below=anchor.bottom+6,above=anchor.top-bounds.height-6;
+  const preferred=below+bounds.height<=innerHeight-16?below:above>=16?above:Math.max(16,innerHeight-bounds.height-16);
+  popover.style.left=`${left}px`;popover.style.top=`${preferred}px`;
+}
 function openFilters() {
   if ($('filter-toggle').hidden) return;
   $('filter-popover').hidden = false;
+  $('filter-popover').scrollTop=0;
+  positionFilters();
   $('filter-toggle').setAttribute('aria-expanded', 'true');
   const first = $('owner-filter').hidden ? $('status-filter').querySelector('button') : $('owner-filter');
   first?.focus();
@@ -398,6 +426,8 @@ function closeFilters() {
 document.addEventListener('click', e => {
   if (filtersOpen() && !e.target.closest('#filter-popover') && !e.target.closest('#filter-toggle')) closeFilters();
 });
+window.addEventListener('resize',()=>{if(filtersOpen())positionFilters()});
+document.addEventListener('scroll',e=>{if(filtersOpen()&&!$('filter-popover').contains(e.target))closeFilters()},true);
 if ($('filter-toggle')) $('filter-toggle').addEventListener('click', () => { if (filtersOpen()) closeFilters(); else openFilters(); });
 if ($('popover-close')) $('popover-close').addEventListener('click', () => { closeFilters(); filterFocus().focus(); });
 if ($('popover-done')) $('popover-done').addEventListener('click', () => { closeFilters(); filterFocus().focus(); });
@@ -424,6 +454,8 @@ $('expiry-filter').addEventListener('change', () => {
 function clearFilters() {
   clearTimeout(searchTimer);
   state.q = ''; state.ownerId = ''; state.status = 'all'; state.expiry = 'all'; state.kind = 'all';
+  // Expiry ordering is presented as a removable filter; clearing must remove it.
+  if (state.sort === 'expiry') state.sort = 'recent';
   resetPagination(); writeUrl(); loadPage();
 }
 $('clear-filters').addEventListener('click', clearFilters);
@@ -542,14 +574,19 @@ function renderRecent() {
     return link;
   }));
 }
-async function loadRecent() {
-  if (!user || recentLoaded) return;
+async function loadRecent(force = false) {
+  if (!user || (recentLoaded && !force)) return;
+  const epoch = accountEpoch, request = ++recentRequest;
   recentLoaded = true;
   try {
     const data = await api('/api/library?' + new URLSearchParams({ view: 'all', sort: 'recent', limit: '3' }));
+    if (epoch !== accountEpoch || request !== recentRequest) return;
     recentItems = (data.artifacts || []).filter(item => !item.archived).slice(0, 3);
     renderRecent();
-  } catch { /* Recent is optional; the library itself reports failures. */ }
+  } catch {
+    // An obsolete failure must not invalidate the new account's completed list.
+    if (epoch === accountEpoch && request === recentRequest) recentLoaded = false;
+  }
 }
 
 async function showApp() {
@@ -572,7 +609,9 @@ function empty(title, text) {
   return node('div', { className: 'empty' }, node('h2', { textContent: title }), node('p', { textContent: text }));
 }
 async function loadPeople() {
+  const epoch = accountEpoch;
   const data = await api('/api/people');
+  if (epoch !== accountEpoch) throw staleAccountRequest();
   people = data.users;
   return people;
 }
@@ -677,8 +716,10 @@ async function loadPage() {
       renderActiveFilters();
       if (inventory) renderStatusCounts(counts);
       else {
-        recentItems = items.filter(item => !item.archived).slice(0, 3);
+        // Recent is its own chronological collection, not the first results of
+        // a search/scope/name sort. Keep its links on the current return URI.
         renderRecent();
+        loadRecent();
       }
       nextCursor = cursor; shownCount = items.length; state.n = Math.max(BATCH, items.length);
       moreStatus(shownCount, total, 'artifact');
@@ -740,7 +781,7 @@ function viewerUrl(item) {
 // Links are built while rendering, so "Show more" must rewrite the returnTo on
 // rows already on the page; Back then restores the batches the URL records.
 function refreshViewerLinks() {
-  for (const anchor of document.querySelectorAll('#content a[href^="/v/"]')) {
+  for (const anchor of document.querySelectorAll('#content a[href^="/v/"], #recent-list a[href^="/v/"]')) {
     try {
       const href = new URL(anchor.getAttribute('href'), location.origin);
       if (href.origin !== location.origin) continue;
@@ -1201,7 +1242,7 @@ function closeDialog() {
 $('dialog-close').addEventListener('click', closeDialog);
 $('dialog').addEventListener('close', finishDialogClose);
 async function dialogTask(action, { close = true, reload = true } = {}) {
-  const seq = dialogSequence;
+  const seq = dialogSequence, epoch = accountEpoch;
   const controls = [...$('dialog-body').querySelectorAll('button,input,select')];
   const states = controls.map(c => c.disabled);
   controls.forEach(c => { c.disabled = true; });
@@ -1209,8 +1250,9 @@ async function dialogTask(action, { close = true, reload = true } = {}) {
   message('dialog-error');
   try {
     await action();
+    if (epoch !== accountEpoch) return;
     if (seq === dialogSequence && close) closeDialog();
-    if (reload && user) await loadPage();
+    if (reload && user) { await loadPage(); loadRecent(true); }
   } catch (err) { if (seq === dialogSequence && $('dialog').open) message('dialog-error', err.message); }
   finally {
     $('dialog-close').disabled = false;
@@ -1477,7 +1519,9 @@ function openCreateCredential() {
     e.preventDefault();
     dialogTask(async () => {
       if (!name.value.trim()) throw new Error('Enter a credential name.');
+      const epoch = accountEpoch, seq = dialogSequence;
       const data = await api('/api/credentials', { method: 'POST', body: { name: name.value.trim() } });
+      if (epoch !== accountEpoch || seq !== dialogSequence) return;
       // Never persist the secret, put it in a URL, or send it into an artifact.
       const secret = node('div', { className: 'secret', textContent: data.token, tabIndex: 0, ariaLabel: 'New API credential' });
       const copy = button('Copy credential', async () => {
@@ -1505,6 +1549,7 @@ async function main() {
     if (location.pathname === '/login') history.replaceState(null, '', '/');
     await showApp();
   } catch (err) {
+    if (err.name === 'AbortError') return;
     $('boot').hidden = true;
     showLogin();
     message('login-feedback', 'Could not check whether you are signed in. Reload the page to try again.', 'error');

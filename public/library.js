@@ -7,6 +7,8 @@ const BATCH = 12;          // artifacts and publications load this many at a tim
 const EVENT_BATCH = 25;
 const LOGIN_MINUTES = 60;  // how long a sign-in link works; the server's LOGIN_TTL says the same
 const LIBRARY_VIEWS = ['all', 'mine', 'shared', 'starred', 'archived'];
+const SCOPE_VIEWS = ['all', 'mine', 'shared'];
+const LIBRARY_NAV_VIEWS = [...SCOPE_VIEWS, 'starred', 'archived'];
 const ADMIN_VIEWS = ['admin', 'people', 'activity'];
 const VIEWS = {
   all: ['Your artifacts', 'A place for your work, and the work shared with you.'],
@@ -36,9 +38,14 @@ let sentEmail = '';
 let resendTimer;
 let activityEvents = [];
 let publicationCleanupResult = '';
+let recentItems = [];   // Real artifacts from the authorized recent query, memory only.
+let recentRequest = 0;
+let accountId = null;   // The signed-in account these in-memory caches belong to.
+let accountRole = null;
+let accountEpoch = 0;   // Invalidates completions from an earlier identity, even A → out → A.
 let preferences = {};
 try { preferences = JSON.parse(localStorage.getItem('artifact-library-preferences') || '{}') || {}; } catch { /* Optional per-browser preferences. */ }
-let layout = preferences.layout === 'list' ? 'list' : 'grid';
+let layout = preferences.layout === 'grid' ? 'grid' : 'list';
 // The URL is the whole list state: view, search, filters, sort, and how many rows are shown (n).
 function readState() {
   const p = new URLSearchParams(location.search);
@@ -125,16 +132,28 @@ function savePreferences() {
   } catch { /* Storage can be disabled. */ }
 }
 
+function staleAccountRequest() { return new DOMException('Account changed while the request was in flight.', 'AbortError'); }
 async function api(path, { method = 'GET', body } = {}) {
-  const response = await fetch(path, {
-    method, credentials: 'same-origin', cache: 'no-store',
-    headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  const epoch = accountEpoch;
+  let response;
+  try {
+    response = await fetch(path, {
+      method, credentials: 'same-origin', cache: 'no-store',
+      headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch (err) {
+    if (epoch !== accountEpoch) throw staleAccountRequest();
+    throw err;
+  }
   const data = response.status === 204 ? null : await response.json().catch(() => null);
+  // Drain the response, but never let an old success or 401 affect a newer
+  // account. Callers that cache data also check again after their await.
+  if (epoch !== accountEpoch) throw staleAccountRequest();
   if (!response.ok) {
     if (response.status === 401 && user) {
       user = null;
+      adoptAccount(null);
       closeDialog();
       loginState = 'form';
       rememberLoginReturn();
@@ -157,6 +176,37 @@ function takeLoginReturn() {
     sessionStorage.removeItem('artifact-login-return');
     return /^\?[^#]*$/.test(back) && back.length <= 2048 ? back : '';
   } catch { return ''; }
+}
+// In-memory lists belong to one signed-in account. A new identity, a sign-out
+// or an expired session must not inherit the previous person's titles, people
+// list or activity. Recent artifacts are never written to storage.
+function resetAccountCaches() {
+  ++accountEpoch;
+  closeDialog();
+  clearPreviews();
+  people = [];
+  activityEvents = [];
+  publicationCleanupResult = '';
+  recentItems = [];
+  recentLoaded = false;
+  nextCursor = null;
+  shownCount = 0;
+  renderedView = null;
+  ++loadSequence;
+  $('content').replaceChildren();
+  $('filter-chips').replaceChildren();
+  $('clear-filters').hidden = true;
+  $('filter-count').textContent = '';
+  $('filter-count').hidden = true;
+  renderRecent();
+}
+function adoptAccount(nextUser) {
+  const id = nextUser ? nextUser.id : null;
+  const role = nextUser ? nextUser.role : null;
+  if (id === accountId && role === accountRole) return;
+  resetAccountCaches();
+  accountId = id;
+  accountRole = role;
 }
 function showLogin() {
   document.documentElement.setAttribute('data-system-appearance', '');
@@ -232,6 +282,7 @@ $('verify-button').addEventListener('click', async () => {
     const data = await api('/api/auth/verify', { method: 'POST', body: { token: loginToken } });
     loginToken = '';
     user = data.user;
+    adoptAccount(user);
     history.replaceState(null, '', '/' + takeLoginReturn());
     state = readState();
     await showApp();
@@ -255,17 +306,33 @@ $('account-menu-button').addEventListener('click', () => {
 });
 document.addEventListener('click', e => { if (!$('account-menu').hidden && !e.target.closest('.account')) closeAccountMenu(); });
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape' && !$('account-menu').hidden) { closeAccountMenu(); $('account-menu-button').focus(); }
+  if (e.key === 'Escape' && !$('account-menu').hidden) { e.preventDefault(); closeAccountMenu(); $('account-menu-button').focus(); }
+  // Consume the handled key: its browser default can stop loading requests.
+  else if (e.key === 'Escape' && filtersOpen()) { e.preventDefault(); closeFilters(); filterFocus().focus(); }
+  // Cmd/Ctrl+K focuses the actual search field; it is not a command palette.
+  // Never interrupt an open dialog: it may hold a one-time credential or
+  // unsaved management edits, and moving focus would risk losing them.
+  else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k' && !$('app').hidden && !$('dialog').open) {
+    e.preventDefault();
+    $('search').focus();
+    $('search').select();
+  }
 });
+// A viewer "Find" link arrives as /?view=all#search. Focus the real search
+// input once the app is ready, then drop the fragment so it is not resent.
+function focusSearchFragment() {
+  if (location.hash !== '#search' || !user) return false;
+  history.replaceState(null, '', location.pathname + location.search);
+  $('search').focus();
+  $('search').select();
+  return true;
+}
 $('logout').addEventListener('click', async () => {
   $('logout').disabled = true;
   try {
     await api('/api/auth/logout', { method: 'POST' });
     user = null;
-    people = [];
-    publicationCleanupResult = '';
-    ++loadSequence;
-    $('content').replaceChildren();
+    adoptAccount(null);
     closeDialog();
     history.replaceState(null, '', '/login');
     loginState = 'form';
@@ -293,6 +360,7 @@ function closeNavigation() {
   document.querySelector('.sidebar').classList.remove('expanded');
   $('nav-toggle').setAttribute('aria-expanded', 'false');
   closeAccountMenu();
+  closeFilters();
 }
 $('nav-toggle').addEventListener('click', () => {
   const expanded = document.querySelector('.sidebar').classList.toggle('expanded');
@@ -308,11 +376,61 @@ function navigate(view) {
   loadPage();
   $('main').focus();
 }
-document.querySelectorAll('[data-view]').forEach(b => b.addEventListener('click', () => navigate(b.dataset.view)));
+// All/Mine/Shared and Archived switch which library slice is shown. They are
+// filters on the current list: keep the search query and sort, reset pagination.
+function setScope(view) {
+  clearTimeout(searchTimer);
+  state.view = view;
+  state.ownerId = ''; state.status = 'all'; state.expiry = 'all'; state.kind = 'all';
+  if (view !== 'admin' && state.sort === 'expiry') state.sort = 'recent';
+  resetPagination();
+  writeUrl();
+  closeNavigation();
+  loadPage();
+  $('main').focus();
+}
+document.querySelectorAll('[data-view]').forEach(b => {
+  if (b.hasAttribute('data-scope')) b.addEventListener('click', () => setScope(b.dataset.view));
+  else b.addEventListener('click', () => navigate(b.dataset.view));
+});
 window.addEventListener('popstate', () => {
   state = readState();
   if (user) loadPage();
 });
+// The Filters control is progressive disclosure: owner/status/expiry/sort live
+// in one labeled popover instead of a permanent row of competing controls.
+const filterFocus = () => $('filter-toggle');
+function filtersOpen() { return !$('filter-popover').hidden; }
+function positionFilters() {
+  const popover=$('filter-popover'),anchor=$('filter-toggle').getBoundingClientRect();
+  const bounds=popover.getBoundingClientRect();
+  const left=Math.max(16,Math.min(anchor.right-bounds.width,innerWidth-bounds.width-16));
+  const below=anchor.bottom+6,above=anchor.top-bounds.height-6;
+  const preferred=below+bounds.height<=innerHeight-16?below:above>=16?above:Math.max(16,innerHeight-bounds.height-16);
+  popover.style.left=`${left}px`;popover.style.top=`${preferred}px`;
+}
+function openFilters() {
+  if ($('filter-toggle').hidden) return;
+  $('filter-popover').hidden = false;
+  $('filter-popover').scrollTop=0;
+  positionFilters();
+  $('filter-toggle').setAttribute('aria-expanded', 'true');
+  const first = $('owner-filter').hidden ? $('status-filter').querySelector('button') : $('owner-filter');
+  first?.focus();
+}
+function closeFilters() {
+  if ($('filter-popover').hidden) return;
+  $('filter-popover').hidden = true;
+  $('filter-toggle').setAttribute('aria-expanded', 'false');
+}
+document.addEventListener('click', e => {
+  if (filtersOpen() && !e.target.closest('#filter-popover') && !e.target.closest('#filter-toggle')) closeFilters();
+});
+window.addEventListener('resize',()=>{if(filtersOpen())positionFilters()});
+document.addEventListener('scroll',e=>{if(filtersOpen()&&!$('filter-popover').contains(e.target))closeFilters()},true);
+if ($('filter-toggle')) $('filter-toggle').addEventListener('click', () => { if (filtersOpen()) closeFilters(); else openFilters(); });
+if ($('popover-close')) $('popover-close').addEventListener('click', () => { closeFilters(); filterFocus().focus(); });
+if ($('popover-done')) $('popover-done').addEventListener('click', () => { closeFilters(); filterFocus().focus(); });
 function search() {
   state.q = $('search').value;
   resetPagination();
@@ -333,11 +451,15 @@ $('expiry-filter').addEventListener('change', () => {
   state.expiry = $('expiry-filter').value;
   resetPagination(); writeUrl(); loadPage();
 });
-$('clear-filters').addEventListener('click', () => {
+function clearFilters() {
   clearTimeout(searchTimer);
   state.q = ''; state.ownerId = ''; state.status = 'all'; state.expiry = 'all'; state.kind = 'all';
+  // Expiry ordering is presented as a removable filter; clearing must remove it.
+  if (state.sort === 'expiry') state.sort = 'recent';
   resetPagination(); writeUrl(); loadPage();
-});
+}
+$('clear-filters').addEventListener('click', clearFilters);
+if ($('popover-clear')) $('popover-clear').addEventListener('click', () => { clearFilters(); closeFilters(); filterFocus().focus(); });
 document.querySelectorAll('#status-filter [data-status]').forEach(b => b.addEventListener('click', () => {
   if (state.status === b.dataset.status) return;
   state.status = b.dataset.status;
@@ -399,6 +521,74 @@ function moreStatus(shown, total, noun) {
   $('shown').textContent = total === null ? `${shown} ${noun}${shown === 1 ? '' : 's'} shown` : `${shown} of ${total} shown`;
 }
 
+/** Active inventory filters as removable chips, plus the count on the Filters button. */
+function renderActiveFilters() {
+  const chips = $('filter-chips');
+  const inventory = state.view === 'admin';
+  const activity = state.view === 'activity';
+  const plan = [];
+  if (state.q) plan.push(['q', `Search: ${state.q}`]);
+  if (activity && state.kind !== 'all') plan.push(['kind', KIND_LABELS[state.kind]]);
+  if (inventory) {
+    if (state.ownerId) {
+      const option = [...$('owner-filter').options].find(o => o.value === state.ownerId);
+      plan.push(['ownerId', `Owner: ${option?.textContent || state.ownerId}`]);
+    }
+    if (state.status !== 'all') plan.push(['status', state.status === 'archived' ? 'Archived' : 'Active']);
+    if (state.expiry === 'soon') plan.push(['expiry', 'Expiring in 7 days']);
+    if (state.sort === 'expiry') plan.push(['sort', 'Expires soonest']);
+  }
+  chips.replaceChildren(...plan.map(([key, text]) => {
+    const chip = button(text, () => removeFilter(key), 'filter-chip');
+    chip.setAttribute('aria-label', `Remove filter: ${text}`);
+    return chip;
+  }));
+  const count = plan.length;
+  $('filter-count').textContent = count ? String(count) : '';
+  $('filter-count').hidden = !count;
+  $('filter-toggle').setAttribute('aria-label', count ? `Filters, ${count} active` : 'Filters');
+  $('clear-filters').hidden = !count;
+}
+function removeFilter(key) {
+  clearTimeout(searchTimer);
+  if (key === 'q') { state.q = ''; $('search').value = ''; }
+  if (key === 'ownerId') { state.ownerId = ''; $('owner-filter').value = ''; }
+  if (key === 'status') { state.status = 'all'; }
+  if (key === 'expiry') { state.expiry = 'all'; $('expiry-filter').value = 'all'; }
+  if (key === 'sort') { state.sort = 'recent'; $('sort').value = 'recent'; }
+  if (key === 'kind') state.kind = 'all';
+  resetPagination(); writeUrl(); loadPage();
+}
+
+let recentLoaded = false;
+// Recent links come from the same authorized library query the list uses.
+// They live in memory only, and never claim an artifact the account cannot open.
+function renderRecent() {
+  const group = $('recent-group'), list = $('recent-list');
+  group.hidden = !recentItems.length;
+  list.replaceChildren(...recentItems.map(item => {
+    const link = node('a', { className: 'nav-button', href: viewerUrl(item), title: item.title || 'Untitled artifact' },
+      node('span', { className: 'nav-icon', ariaHidden: 'true' }), node('span', { textContent: item.title || 'Untitled artifact' }));
+    link.firstChild.innerHTML = iconSvg(item.icon);
+    link.addEventListener('click', rememberLibraryNavigation);
+    return link;
+  }));
+}
+async function loadRecent(force = false) {
+  if (!user || (recentLoaded && !force)) return;
+  const epoch = accountEpoch, request = ++recentRequest;
+  recentLoaded = true;
+  try {
+    const data = await api('/api/library?' + new URLSearchParams({ view: 'all', sort: 'recent', limit: '3' }));
+    if (epoch !== accountEpoch || request !== recentRequest) return;
+    recentItems = (data.artifacts || []).filter(item => !item.archived).slice(0, 3);
+    renderRecent();
+  } catch {
+    // An obsolete failure must not invalidate the new account's completed list.
+    if (epoch === accountEpoch && request === recentRequest) recentLoaded = false;
+  }
+}
+
 async function showApp() {
   if (!user) return showLogin();
   document.documentElement.removeAttribute('data-system-appearance');
@@ -412,12 +602,16 @@ async function showApp() {
   $('account-role').textContent = user.role === 'owner' ? 'Instance owner' : 'Member';
   document.querySelectorAll('[data-owner-only]').forEach(n => { n.hidden = user.role !== 'owner'; });
   await loadPage();
+  loadRecent();
+  focusSearchFragment();
 }
 function empty(title, text) {
   return node('div', { className: 'empty' }, node('h2', { textContent: title }), node('p', { textContent: text }));
 }
 async function loadPeople() {
+  const epoch = accountEpoch;
   const data = await api('/api/people');
+  if (epoch !== accountEpoch) throw staleAccountRequest();
   people = data.users;
   return people;
 }
@@ -440,25 +634,44 @@ async function loadPage() {
   $('page-title').textContent = VIEWS[view][0];
   $('page-description').textContent = VIEWS[view][1];
   document.title = `${VIEWS[view][0]} · Artifacts`;
-  document.querySelectorAll('[data-view]').forEach(b => {
-    if (b.dataset.view === view) b.setAttribute('aria-current', 'page');
+  // Scope is a filter on the library, so All/Mine/Shared all mark "Library".
+  const currentView = LIBRARY_NAV_VIEWS.includes(view) && view !== 'starred' && view !== 'archived' ? 'all' : view;
+  document.querySelectorAll('.sidebar [data-view]').forEach(b => {
+    if (b.dataset.view === currentView) b.setAttribute('aria-current', 'page');
     else b.removeAttribute('aria-current');
   });
   $('filters').hidden = !library && !inventory && view !== 'people' && view !== 'activity';
-  $('sort').hidden = !library && !inventory;
+  // The library keeps a visible sort; inventory sort belongs with its other
+  // filters inside the labeled Filters popover.
+  $('sort-field').hidden = !library && !inventory;
+  (inventory ? $('filter-sort-slot') : $('sort-slot')).append($('sort-field'));
+  $('sort-label').className = inventory ? 'field-label' : 'sr-only';
+  $('filter-sort-slot').hidden = !inventory;
   const searchLabel = view === 'people' ? 'Search people' : view === 'activity' ? 'Search activity' : 'Search artifacts';
   $('search-label').textContent = searchLabel;
-  $('search-label').className = library ? 'sr-only' : 'search-label';
+  const searchFilled = !!state.q;
+  // The library's search stays a plain, labeled field; people/activity keep a
+  // visible label once a search is in play.
+  $('search-label').className = library && !searchFilled ? 'sr-only' : 'search-label';
   $('search').placeholder = view === 'people' ? 'Name or email…' : view === 'activity' ? 'Person, artifact or ID…' : 'Search artifacts…';
+  $('scopes').hidden = !library;
+  // Archived stays one click away from the library without becoming a sixth peer.
+  $('archived-link').hidden = !LIBRARY_NAV_VIEWS.includes(view);
+  $('archived-link').setAttribute('aria-pressed', String(view === 'archived'));
+  document.querySelectorAll('#scopes [data-view]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.view === view)));
   $('layout-switch').hidden = !library;
+  $('filter-toggle').hidden = !inventory;
+  $('owner-field').hidden = !inventory;
+  $('expiry-field').hidden = !inventory;
+  $('status-field').hidden = !inventory;
   $('owner-filter').hidden = !inventory;
   $('status-filter').hidden = !inventory;
   $('expiry-filter').hidden = !inventory;
   $('sort').querySelector('[value="expiry"]').hidden = !inventory;
   $('sort').querySelector('[value="expiry"]').disabled = !inventory;
+  if (!inventory) closeFilters();
   $('expiry-filter').value = state.expiry;
-  const filtered = state.q || (inventory && (state.ownerId || state.status !== 'all' || state.expiry === 'soon')) || (view === 'activity' && state.kind !== 'all');
-  $('clear-filters').hidden = !filtered;
+  renderActiveFilters();
   $('inventory-note').hidden = !inventory;
   $('inventory-note').textContent = `Expiration permanently deletes private content and history. Public copies remain until unpublished. Times shown in ${timeZoneName()}.`;
   $('privacy-note').hidden = !library && !inventory;
@@ -475,7 +688,11 @@ async function loadPage() {
   $('result-status').textContent = 'Loading…';
   message('page-error');
   $('content').setAttribute('aria-busy', 'true');
-  $('content').replaceChildren(node('div', { className: 'loading', textContent: `Loading ${inventory ? 'the instance inventory' : view === 'people' ? 'people and invitations' : view === 'activity' ? 'activity' : view === 'credentials' ? 'credentials' : view === 'publications' ? 'published links' : 'your work'}…` }));
+  // A refresh of the same view keeps the useful list on screen; only a view
+  // with nothing rendered yet gets the loading placeholder.
+  const hadContent = renderedView === view && $('content').childElementCount > 0;
+  if (!hadContent) $('content').replaceChildren(node('div', { className: 'loading', textContent: `Loading ${inventory ? 'the instance inventory' : view === 'people' ? 'people and invitations' : view === 'activity' ? 'activity' : view === 'credentials' ? 'credentials' : view === 'publications' ? 'published links' : 'your work'}…` }));
+  else $('content').classList.add('is-refreshing');
   try {
     if (library || inventory) {
       if (inventory) {
@@ -496,7 +713,14 @@ async function loadPage() {
         items.push(...data.artifacts); total = data.total; counts = data.counts ?? counts; cursor = data.nextCursor;
       } while (cursor && items.length < state.n);
       renderArtifacts(items, inventory);
+      renderActiveFilters();
       if (inventory) renderStatusCounts(counts);
+      else {
+        // Recent is its own chronological collection, not the first results of
+        // a search/scope/name sort. Keep its links on the current return URI.
+        renderRecent();
+        loadRecent();
+      }
       nextCursor = cursor; shownCount = items.length; state.n = Math.max(BATCH, items.length);
       moreStatus(shownCount, total, 'artifact');
       $('result-status').textContent = `${total} artifact${total === 1 ? '' : 's'} · ${state.sort === 'expiry' ? 'Expires soonest · never last' : state.sort === 'name' ? 'Name A–Z' : 'Recently updated first'}`;
@@ -532,12 +756,15 @@ async function loadPage() {
     }
   } catch (err) {
     if (seq !== loadSequence) return;
+    $('content').classList.remove('is-refreshing');
     $('content').replaceChildren(button('Try again', loadPage));
     $('result-status').textContent = 'Could not load this page.';
     message('page-error', err.message);
   } finally {
     if (seq === loadSequence) {
+      renderedView = view;
       $('content').setAttribute('aria-busy', 'false');
+      $('content').classList.remove('is-refreshing');
       if (restoreScroll !== null) {
         const top = restoreScroll;
         restoreScroll = null;
@@ -554,7 +781,7 @@ function viewerUrl(item) {
 // Links are built while rendering, so "Show more" must rewrite the returnTo on
 // rows already on the page; Back then restores the batches the URL records.
 function refreshViewerLinks() {
-  for (const anchor of document.querySelectorAll('#content a[href^="/v/"]')) {
+  for (const anchor of document.querySelectorAll('#content a[href^="/v/"], #recent-list a[href^="/v/"]')) {
     try {
       const href = new URL(anchor.getAttribute('href'), location.origin);
       if (href.origin !== location.origin) continue;
@@ -564,6 +791,7 @@ function refreshViewerLinks() {
   }
 }
 let restoreScroll = null;
+let renderedView = null;   // which view the content currently shows, for honest refresh
 function rememberLibraryNavigation() {
   if (!user) return;
   try {
@@ -648,7 +876,7 @@ function renderArtifacts(items, inventory, append = false) {
     return;
   }
   if (!items.length) {
-    const filtered = state.q || state.ownerId || state.status !== 'all' || state.expiry === 'soon';
+    const filtered = !!state.q || (inventory && (!!state.ownerId || state.status !== 'all' || state.expiry === 'soon')) || (state.view === 'activity' && state.kind !== 'all');
     $('content').replaceChildren(empty(filtered ? 'No matching artifacts' : inventory ? 'No artifacts in this instance' : state.view === 'starred' ? 'Keep your favorites close' : 'Your shelf is ready',
       filtered ? 'Try a different search or clear your filters.' : inventory ? 'Artifacts published by members appear here, including private and archived work. Expired content is permanently deleted.' : state.view === 'starred' ? 'Open an artifact’s menu and choose Star artifact.' : 'Publish an HTML page and the files it uses, or find work shared with you here.'));
     return;
@@ -675,9 +903,14 @@ function artifactEntries(items, inventory, grid) {
     icon.innerHTML = iconSvg(item.icon);
     title.prepend(icon);
     const badge = node('span', { className: 'access-badge', textContent: item.accessLabel });
+    // The list's quiet rows show a subtitle: owner when it is not yours, then
+    // status. The accessible cells below still carry the full columns.
+    const subtitle = inventory
+      ? `${mine(item) ? 'You' : item.ownerName || 'Instance owner'} · ${item.visibility === 'shared' ? 'Shared' : 'Private'} · ${item.archived ? 'Archived' : 'Active'}`
+      : meta(item);
     // The inventory is about everyone's work; the reader's own access is beside the point there.
     const summary = node('div', {}, title, node('div', { className: 'shelf-meta' }, inventory ? null : badge,
-      node('span', { className: 'artifact-meta', title: meta(item), textContent: meta(item) })));
+      node('span', { className: 'artifact-meta', title: subtitle, textContent: subtitle })));
     if (inventory) summary.append(node('div', { className: 'inventory-mobile' },
       node('span', { textContent: `${mine(item) ? 'You' : item.ownerName || 'Instance owner'} · ${item.visibility === 'shared' ? 'Shared' : 'Private'} · ${item.archived ? 'Archived' : 'Active'}` }),
       node('span', { className: 'inventory-expiration', textContent: expirationSummary(item) })));
@@ -1009,7 +1242,7 @@ function closeDialog() {
 $('dialog-close').addEventListener('click', closeDialog);
 $('dialog').addEventListener('close', finishDialogClose);
 async function dialogTask(action, { close = true, reload = true } = {}) {
-  const seq = dialogSequence;
+  const seq = dialogSequence, epoch = accountEpoch;
   const controls = [...$('dialog-body').querySelectorAll('button,input,select')];
   const states = controls.map(c => c.disabled);
   controls.forEach(c => { c.disabled = true; });
@@ -1017,8 +1250,9 @@ async function dialogTask(action, { close = true, reload = true } = {}) {
   message('dialog-error');
   try {
     await action();
+    if (epoch !== accountEpoch) return;
     if (seq === dialogSequence && close) closeDialog();
-    if (reload && user) await loadPage();
+    if (reload && user) { await loadPage(); loadRecent(true); }
   } catch (err) { if (seq === dialogSequence && $('dialog').open) message('dialog-error', err.message); }
   finally {
     $('dialog-close').disabled = false;
@@ -1285,7 +1519,9 @@ function openCreateCredential() {
     e.preventDefault();
     dialogTask(async () => {
       if (!name.value.trim()) throw new Error('Enter a credential name.');
+      const epoch = accountEpoch, seq = dialogSequence;
       const data = await api('/api/credentials', { method: 'POST', body: { name: name.value.trim() } });
+      if (epoch !== accountEpoch || seq !== dialogSequence) return;
       // Never persist the secret, put it in a URL, or send it into an artifact.
       const secret = node('div', { className: 'secret', textContent: data.token, tabIndex: 0, ariaLabel: 'New API credential' });
       const copy = button('Copy credential', async () => {
@@ -1308,10 +1544,12 @@ async function main() {
     if (loginToken) return showLogin();
     const session = await api('/api/session');
     user = session.user;
+    adoptAccount(user);
     if (!user) { rememberLoginReturn(); return showLogin(); }
     if (location.pathname === '/login') history.replaceState(null, '', '/');
     await showApp();
   } catch (err) {
+    if (err.name === 'AbortError') return;
     $('boot').hidden = true;
     showLogin();
     message('login-feedback', 'Could not check whether you are signed in. Reload the page to try again.', 'error');

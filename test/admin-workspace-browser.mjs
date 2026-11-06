@@ -5,11 +5,18 @@ import { browserDriver } from './library-browser.mjs';
 
 export async function adminWorkspaceQA({base,output,owner,api}) {
   mkdirSync(output,{recursive:true});
-  const {run,evaluate,wait,click}=browserDriver('accounts-admin-workspace-qa');
+  const {run,runAsync,evaluate,wait,click}=browserDriver('accounts-admin-workspace-qa');
   const fixtures=[];
   let failure;
   const ready=()=>wait('#content[aria-busy="false"]');
   const rowIds=()=>evaluate('[...document.querySelectorAll(".artifact-title")].map(e=>new URL(e.href).pathname.split("/").at(-1))');
+  const more=()=>{
+    // Scroll the actual main pane before taking click coordinates; an implicit
+    // CDP scroll-and-click can otherwise activate the row previously here.
+    evaluate('document.getElementById("more").scrollIntoView({block:"center",behavior:"instant"})');
+    run('wait','--fn','(()=>{const r=document.getElementById("more").getBoundingClientRect();return r.top>=0&&r.bottom<=innerHeight})()');
+    click('#more');
+  };
   try {
     run('cookies','set','artifact_session',owner.cookie.split('=')[1],'--url',base,'--httpOnly','--sameSite','Lax');
     for(const view of ['people','activity','credentials']) {
@@ -25,24 +32,33 @@ export async function adminWorkspaceQA({base,output,owner,api}) {
       fixtures.push(response.json.id);
     }
     run('open',`${base}/?view=admin&q=${encodeURIComponent(prefix)}`);ready();
+    // Inventory filters are progressive disclosure behind one labeled control.
+    assert.equal(evaluate('document.getElementById("filter-toggle").hidden'),false,'inventory offers a labeled Filters control');
+    click('#filter-toggle');wait('#filter-popover:not([hidden])');
     assert.equal(evaluate('!!document.querySelector("#expiry-filter:not([hidden])")'),true,'inventory exposes its expiration filter');
     assert.equal(evaluate('[...document.querySelectorAll("#sort option")].some(e=>e.value==="expiry"&&e.textContent==="Expires soonest")'),true,'expiration ordering is discoverable');
     assert.ok(evaluate('document.querySelector(".inventory-head").textContent.includes("Expires")'),'expiry is visible without opening Manage');
     run('select','#sort','expiry');ready();
     assert.equal(evaluate('new URL(location.href).searchParams.get("sort")'),'expiry','expiration ordering survives a shareable inventory URL');
     assert.equal(evaluate('document.getElementById("page-error").hidden'),true,'expiry sort uses the real API successfully');
+    assert.match(evaluate('document.getElementById("filter-chips").textContent'),/Expires soonest/,'the active sort is a removable chip');
+    assert.match(evaluate('document.getElementById("filter-chips").textContent'),/Search: Admin workflow fixture/,'the active search is a removable chip');
+    assert.equal(evaluate('document.getElementById("filter-count").textContent'),'2','the Filters control counts every active filter');
     assert.deepEqual(rowIds(),fixtures.slice(0,12),'finite deadlines are earliest first');
-    click('#more');run('wait','--fn','document.querySelectorAll(".artifact-title").length===16');
+    run('press','Escape');run('wait','--fn','document.getElementById("filter-popover").hidden');
+    more();await runAsync('wait','--fn','document.querySelectorAll(".artifact-title").length===16');
     assert.deepEqual(rowIds(),fixtures,'pagination keeps finite deadlines ordered and never last');
     run('reload');ready();
     assert.equal(evaluate('document.getElementById("sort").value'),'expiry','refresh restores expiration ordering');
     assert.deepEqual(rowIds(),fixtures,'refresh preserves the expanded expiry list');
     click('.artifact-title');wait('#bar:not([hidden])');click('#backLibrary');ready();
     assert.deepEqual(rowIds(),fixtures,'viewer return preserves expiry ordering and expanded count');
+    click('#filter-toggle');wait('#filter-popover:not([hidden])');
     run('select','#expiry-filter','soon');ready();
     assert.equal(evaluate('new URL(location.href).searchParams.get("expiry")'),'soon');
     assert.equal(evaluate('document.querySelectorAll(".artifact-title").length'),12,'changing expiry filter resets pagination');
-    click('#more');run('wait','--fn','document.querySelectorAll(".artifact-title").length===14');
+    run('press','Escape');run('wait','--fn','document.getElementById("filter-popover").hidden');
+    more();await runAsync('wait','--fn','document.querySelectorAll(".artifact-title").length===14');
     assert.deepEqual(rowIds(),fixtures.slice(0,14),'seven-day filter excludes distant and never deadlines');
     for(const width of [320,390,768,1280])for(const theme of ['light','dark']) {
       run('set','viewport',String(width),'1000');
@@ -62,7 +78,22 @@ export async function adminWorkspaceQA({base,output,owner,api}) {
     assert.equal(evaluate('document.getElementById("search").value'),'');
     assert.equal(evaluate('document.getElementById("expiry-filter").value'),'all');
     assert.ok(rowIds().length,'clear filters recovers the inventory');
+    for(const control of ['clear-filters','popover-clear']) {
+      run('open',`${base}/?view=admin&sort=expiry`);ready();
+      assert.equal(evaluate('document.getElementById("filter-count").textContent'),'1','expiry ordering alone is an active filter');
+      if(control==='popover-clear'){
+        run('set','viewport','320','600');click('#filter-toggle');wait('#filter-popover:not([hidden])');
+        assert.equal(evaluate('(()=>{const p=document.getElementById("filter-popover").getBoundingClientRect();return p.top>=15&&p.bottom<=innerHeight-15&&p.left>=15&&p.right<=innerWidth-15})()'),true,'filters stay inside a small viewport');
+        assert.equal(evaluate('(()=>{const r=document.getElementById("popover-done").getBoundingClientRect();return r.top>=0&&r.bottom<=innerHeight})()'),true,'Done is reachable without scrolling the page');
+      }
+      click('#'+control);ready();
+      assert.equal(evaluate('document.getElementById("sort").value'),'recent','clear removes the sort-only expiry filter');
+      assert.equal(evaluate('new URL(location.href).searchParams.has("sort")'),false);
+      assert.equal(evaluate('document.getElementById("filter-chips").children.length'),0);
+      assert.equal(evaluate('document.getElementById("filter-count").hidden'),true);
+    }
 
+    run('set','viewport','1280','1000');
     const invited=await api('/api/invitations',{method:'POST',cookie:owner.cookie,body:{email:'admin-leaving-member@example.com',name:'Admin leaving member'}});
     assert.equal(invited.status,200,'invite a local offboarding fixture');
     const verified=await api('/api/auth/verify',{method:'POST',body:{token:new URL(invited.json.loginUrl).hash.slice(7)}});
@@ -125,7 +156,7 @@ export async function adminWorkspaceQA({base,output,owner,api}) {
     assert.equal(evaluate('document.querySelector(".event-filter [aria-pressed=true]").textContent'),'Artifacts','a linked Activity URL restores its kind');
     const firstEvents=evaluate('document.querySelectorAll(".event").length');
     assert.equal(firstEvents,25,'Activity starts with a bounded batch');
-    click('#more');run('wait','--fn',`document.querySelectorAll('.event').length>${firstEvents}`);
+    more();await runAsync('wait','--fn',`document.querySelectorAll('.event').length>${firstEvents}`);
     const expandedEvents=evaluate('document.querySelectorAll(".event").length');
     const text=evaluate('document.getElementById("content").textContent');
     assert.match(text,/published /,'publish entries name their action and artifact');
@@ -170,7 +201,14 @@ export async function adminWorkspaceQA({base,output,owner,api}) {
     click('#clear-filters');ready();
     assert.equal(evaluate('document.getElementById("search").value'),'');
     assert.equal(evaluate('document.querySelector(".event-filter [aria-pressed=true]").textContent'),'Everything');
-  } catch(error) { failure=error;throw error; }
+  } catch(error) {
+    failure=error;
+    try {
+      console.error('Admin browser state:',JSON.stringify(evaluate('({path:location.pathname+location.search,rows:document.querySelectorAll(".artifact-title").length,status:document.getElementById("result-status")?.textContent,error:document.getElementById("page-error")?.textContent,busy:document.getElementById("content")?.getAttribute("aria-busy"),moreDisabled:document.getElementById("more")?.disabled})')));
+      run('screenshot',join(output,'admin-workflow-failure.png'));
+    } catch { /* Keep the original assertion or command error. */ }
+    throw error;
+  }
   finally {
     let cleanupError;
     try { run('close'); } catch(error) { cleanupError=error; }

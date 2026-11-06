@@ -478,16 +478,20 @@ test('owner selects, extends, shortens and clears expiration without touching co
   const resealed=await manage({cookie:ownerAccount.cookie},{expiresAt:withSeconds});
   assert.equal(resealed.status,200);
   assert.equal(Date.parse(await current({cookie:member.cookie})),Date.parse(withSeconds),'saving the same instant changes nothing');
-  // A combined request audits each change it makes.
+  // Scope before pagination: unrelated activity (including same-second rows)
+  // can push this artifact's events out of a global newest-20 page.
+  const audits=async()=>{
+    const response=await api(`/api/admin/activity?kind=artifacts&limit=100&q=${encodeURIComponent(id)}`,{cookie:ownerAccount.cookie});
+    assert.equal(response.status,200);
+    return response.json.events.filter(e=>e.artifactId===id);
+  };
+  const beforeCombined=new Set((await audits()).map(e=>e.id));
+  // A combined request audits each change it makes. Match its new IDs, not
+  // older rename/expiration events or a random same-second ordering.
   assert.equal((await manage({cookie:ownerAccount.cookie},{title:'Expiration fixture audited',expiresAt:future(1800)})).status,200);
-  const combined=(await api('/api/admin/activity?kind=artifacts&limit=20',{cookie:ownerAccount.cookie})).json.events.slice(0,20).filter(e=>e.artifactId===id);
-  assert.ok(combined.some(e=>e.action==='rename'),'a combined request still records the rename');
-  assert.ok(combined.some(e=>e.action==='expiration'),'a combined request records the expiration change too');
-  // The expiration audit names the artifact as this request leaves it, not as
-  // it was before the rename in the same request. Rows created in the same
-  // second are ordered by id, so match the event rather than a position.
-  assert.ok(combined.some(e=>e.action==='expiration'&&e.artifactTitle==='Expiration fixture audited'),'the expiration audit carries the requested title');
-  assert.ok(combined.length>=2);
+  const combined=(await audits()).filter(e=>!beforeCombined.has(e.id));
+  assert.deepEqual(combined.map(e=>e.action).sort(),['expiration','rename'],'the combined request records each change exactly once');
+  assert.ok(combined.every(e=>e.artifactTitle==='Expiration fixture audited'),'both new audit entries carry the requested title');
   assert.equal((await manage({cookie:ownerAccount.cookie},{title:'Expiration fixture',expiresAt:null})).status,200);
   assert.equal((await manage({cookie:ownerAccount.cookie},{expiresAt:null})).status,200);
   info=await api(path,{cookie:member.cookie});
@@ -496,7 +500,7 @@ test('owner selects, extends, shortens and clears expiration without touching co
   assert.equal((await entry()).expiresAt,null);
   assert.equal(info.json.tip,before.json.tip);
   assert.deepEqual(info.json.timeline,before.json.timeline);
-  assert.ok((await api('/api/admin/activity?kind=artifacts',{cookie:ownerAccount.cookie})).json.events.some(e=>e.action==='expiration'&&e.artifactId===id),'changing expiration is audited');
+  assert.ok((await audits()).some(e=>e.action==='expiration'),'changing expiration is audited');
   await api(path,{method:'DELETE',cookie:member.cookie});
   await api(`/api/artifacts/${viaLink.id}`,{method:'DELETE',cookie:ownerAccount.cookie});
 });

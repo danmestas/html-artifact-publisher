@@ -20,3 +20,5 @@
 .toolbar{align-items:flex-end}.toolbar .search-label{margin:0 0 6px;color:var(--muted);font-size:12px}
 @media(max-width:760px){.event-filter button{min-height:44px}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;animation:none!important;transition:none!important}}
+/* Desktop: the sidebar holds still at full height and scrolls on its own, so the library scrolls without carrying the navigation away. */
+@media(min-width:761px){.sidebar{position:sticky;top:0;height:100dvh;overflow-y:auto;overscroll-behavior:contain}}

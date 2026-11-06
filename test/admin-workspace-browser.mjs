@@ -25,13 +25,20 @@ export async function adminWorkspaceQA({base,output,owner,api}) {
       fixtures.push(response.json.id);
     }
     run('open',`${base}/?view=admin&q=${encodeURIComponent(prefix)}`);ready();
+    // Inventory filters are progressive disclosure behind one labeled control.
+    assert.equal(evaluate('document.getElementById("filter-toggle").hidden'),false,'inventory offers a labeled Filters control');
+    click('#filter-toggle');wait('#filter-popover:not([hidden])');
     assert.equal(evaluate('!!document.querySelector("#expiry-filter:not([hidden])")'),true,'inventory exposes its expiration filter');
     assert.equal(evaluate('[...document.querySelectorAll("#sort option")].some(e=>e.value==="expiry"&&e.textContent==="Expires soonest")'),true,'expiration ordering is discoverable');
     assert.ok(evaluate('document.querySelector(".inventory-head").textContent.includes("Expires")'),'expiry is visible without opening Manage');
     run('select','#sort','expiry');ready();
     assert.equal(evaluate('new URL(location.href).searchParams.get("sort")'),'expiry','expiration ordering survives a shareable inventory URL');
     assert.equal(evaluate('document.getElementById("page-error").hidden'),true,'expiry sort uses the real API successfully');
+    assert.match(evaluate('document.getElementById("filter-chips").textContent'),/Expires soonest/,'the active sort is a removable chip');
+    assert.match(evaluate('document.getElementById("filter-chips").textContent'),/Search: Admin workflow fixture/,'the active search is a removable chip');
+    assert.equal(evaluate('document.getElementById("filter-count").textContent'),'2','the Filters control counts every active filter');
     assert.deepEqual(rowIds(),fixtures.slice(0,12),'finite deadlines are earliest first');
+    run('press','Escape');run('wait','--fn','document.getElementById("filter-popover").hidden');
     click('#more');run('wait','--fn','document.querySelectorAll(".artifact-title").length===16');
     assert.deepEqual(rowIds(),fixtures,'pagination keeps finite deadlines ordered and never last');
     run('reload');ready();
@@ -39,9 +46,11 @@ export async function adminWorkspaceQA({base,output,owner,api}) {
     assert.deepEqual(rowIds(),fixtures,'refresh preserves the expanded expiry list');
     click('.artifact-title');wait('#bar:not([hidden])');click('#backLibrary');ready();
     assert.deepEqual(rowIds(),fixtures,'viewer return preserves expiry ordering and expanded count');
+    click('#filter-toggle');wait('#filter-popover:not([hidden])');
     run('select','#expiry-filter','soon');ready();
     assert.equal(evaluate('new URL(location.href).searchParams.get("expiry")'),'soon');
     assert.equal(evaluate('document.querySelectorAll(".artifact-title").length'),12,'changing expiry filter resets pagination');
+    run('press','Escape');run('wait','--fn','document.getElementById("filter-popover").hidden');
     click('#more');run('wait','--fn','document.querySelectorAll(".artifact-title").length===14');
     assert.deepEqual(rowIds(),fixtures.slice(0,14),'seven-day filter excludes distant and never deadlines');
     for(const width of [320,390,768,1280])for(const theme of ['light','dark']) {

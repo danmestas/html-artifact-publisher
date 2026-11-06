@@ -7,6 +7,8 @@ const BATCH = 12;          // artifacts and publications load this many at a tim
 const EVENT_BATCH = 25;
 const LOGIN_MINUTES = 60;  // how long a sign-in link works; the server's LOGIN_TTL says the same
 const LIBRARY_VIEWS = ['all', 'mine', 'shared', 'starred', 'archived'];
+const SCOPE_VIEWS = ['all', 'mine', 'shared'];
+const LIBRARY_NAV_VIEWS = [...SCOPE_VIEWS, 'starred', 'archived'];
 const ADMIN_VIEWS = ['admin', 'people', 'activity'];
 const VIEWS = {
   all: ['Your artifacts', 'A place for your work, and the work shared with you.'],
@@ -36,6 +38,8 @@ let sentEmail = '';
 let resendTimer;
 let activityEvents = [];
 let publicationCleanupResult = '';
+let recentItems = [];   // Real artifacts from the last authorized library fetch, memory only.
+let accountId = null;   // The signed-in account these in-memory caches belong to.
 let preferences = {};
 try { preferences = JSON.parse(localStorage.getItem('artifact-library-preferences') || '{}') || {}; } catch { /* Optional per-browser preferences. */ }
 let layout = preferences.layout === 'list' ? 'list' : 'grid';
@@ -135,6 +139,7 @@ async function api(path, { method = 'GET', body } = {}) {
   if (!response.ok) {
     if (response.status === 401 && user) {
       user = null;
+      adoptAccount(null);
       closeDialog();
       loginState = 'form';
       rememberLoginReturn();
@@ -157,6 +162,33 @@ function takeLoginReturn() {
     sessionStorage.removeItem('artifact-login-return');
     return /^\?[^#]*$/.test(back) && back.length <= 2048 ? back : '';
   } catch { return ''; }
+}
+// In-memory lists belong to one signed-in account. A new identity, a sign-out
+// or an expired session must not inherit the previous person's titles, people
+// list or activity. Recent artifacts are never written to storage.
+function resetAccountCaches() {
+  clearPreviews();
+  people = [];
+  activityEvents = [];
+  publicationCleanupResult = '';
+  recentItems = [];
+  recentLoaded = false;
+  nextCursor = null;
+  shownCount = 0;
+  renderedView = null;
+  ++loadSequence;
+  $('content').replaceChildren();
+  $('filter-chips').replaceChildren();
+  $('clear-filters').hidden = true;
+  $('filter-count').textContent = '';
+  $('filter-count').hidden = true;
+  renderRecent();
+}
+function adoptAccount(nextUser) {
+  const id = nextUser ? nextUser.id : null;
+  if (id === accountId) return;
+  resetAccountCaches();
+  accountId = id;
 }
 function showLogin() {
   document.documentElement.setAttribute('data-system-appearance', '');
@@ -232,6 +264,7 @@ $('verify-button').addEventListener('click', async () => {
     const data = await api('/api/auth/verify', { method: 'POST', body: { token: loginToken } });
     loginToken = '';
     user = data.user;
+    adoptAccount(user);
     history.replaceState(null, '', '/' + takeLoginReturn());
     state = readState();
     await showApp();
@@ -256,16 +289,32 @@ $('account-menu-button').addEventListener('click', () => {
 document.addEventListener('click', e => { if (!$('account-menu').hidden && !e.target.closest('.account')) closeAccountMenu(); });
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && !$('account-menu').hidden) { closeAccountMenu(); $('account-menu-button').focus(); }
+  // Escape closes the Filters popover and returns focus to its trigger.
+  else if (e.key === 'Escape' && filtersOpen()) { closeFilters(); filterFocus().focus(); }
+  // Cmd/Ctrl+K focuses the actual search field; it is not a command palette.
+  // Never interrupt an open dialog: it may hold a one-time credential or
+  // unsaved management edits, and moving focus would risk losing them.
+  else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k' && !$('app').hidden && !$('dialog').open) {
+    e.preventDefault();
+    $('search').focus();
+    $('search').select();
+  }
 });
+// A viewer "Find" link arrives as /?view=all#search. Focus the real search
+// input once the app is ready, then drop the fragment so it is not resent.
+function focusSearchFragment() {
+  if (location.hash !== '#search' || !user) return false;
+  history.replaceState(null, '', location.pathname + location.search);
+  $('search').focus();
+  $('search').select();
+  return true;
+}
 $('logout').addEventListener('click', async () => {
   $('logout').disabled = true;
   try {
     await api('/api/auth/logout', { method: 'POST' });
     user = null;
-    people = [];
-    publicationCleanupResult = '';
-    ++loadSequence;
-    $('content').replaceChildren();
+    adoptAccount(null);
     closeDialog();
     history.replaceState(null, '', '/login');
     loginState = 'form';
@@ -293,6 +342,7 @@ function closeNavigation() {
   document.querySelector('.sidebar').classList.remove('expanded');
   $('nav-toggle').setAttribute('aria-expanded', 'false');
   closeAccountMenu();
+  closeFilters();
 }
 $('nav-toggle').addEventListener('click', () => {
   const expanded = document.querySelector('.sidebar').classList.toggle('expanded');
@@ -308,11 +358,49 @@ function navigate(view) {
   loadPage();
   $('main').focus();
 }
-document.querySelectorAll('[data-view]').forEach(b => b.addEventListener('click', () => navigate(b.dataset.view)));
+// All/Mine/Shared and Archived switch which library slice is shown. They are
+// filters on the current list: keep the search query and sort, reset pagination.
+function setScope(view) {
+  clearTimeout(searchTimer);
+  state.view = view;
+  state.ownerId = ''; state.status = 'all'; state.expiry = 'all'; state.kind = 'all';
+  if (view !== 'admin' && state.sort === 'expiry') state.sort = 'recent';
+  resetPagination();
+  writeUrl();
+  closeNavigation();
+  loadPage();
+  $('main').focus();
+}
+document.querySelectorAll('[data-view]').forEach(b => {
+  if (b.hasAttribute('data-scope')) b.addEventListener('click', () => setScope(b.dataset.view));
+  else b.addEventListener('click', () => navigate(b.dataset.view));
+});
 window.addEventListener('popstate', () => {
   state = readState();
   if (user) loadPage();
 });
+// The Filters control is progressive disclosure: owner/status/expiry/sort live
+// in one labeled popover instead of a permanent row of competing controls.
+const filterFocus = () => $('filter-toggle');
+function filtersOpen() { return !$('filter-popover').hidden; }
+function openFilters() {
+  if ($('filter-toggle').hidden) return;
+  $('filter-popover').hidden = false;
+  $('filter-toggle').setAttribute('aria-expanded', 'true');
+  const first = $('owner-filter').hidden ? $('status-filter').querySelector('button') : $('owner-filter');
+  first?.focus();
+}
+function closeFilters() {
+  if ($('filter-popover').hidden) return;
+  $('filter-popover').hidden = true;
+  $('filter-toggle').setAttribute('aria-expanded', 'false');
+}
+document.addEventListener('click', e => {
+  if (filtersOpen() && !e.target.closest('#filter-popover') && !e.target.closest('#filter-toggle')) closeFilters();
+});
+if ($('filter-toggle')) $('filter-toggle').addEventListener('click', () => { if (filtersOpen()) closeFilters(); else openFilters(); });
+if ($('popover-close')) $('popover-close').addEventListener('click', () => { closeFilters(); filterFocus().focus(); });
+if ($('popover-done')) $('popover-done').addEventListener('click', () => { closeFilters(); filterFocus().focus(); });
 function search() {
   state.q = $('search').value;
   resetPagination();
@@ -333,11 +421,13 @@ $('expiry-filter').addEventListener('change', () => {
   state.expiry = $('expiry-filter').value;
   resetPagination(); writeUrl(); loadPage();
 });
-$('clear-filters').addEventListener('click', () => {
+function clearFilters() {
   clearTimeout(searchTimer);
   state.q = ''; state.ownerId = ''; state.status = 'all'; state.expiry = 'all'; state.kind = 'all';
   resetPagination(); writeUrl(); loadPage();
-});
+}
+$('clear-filters').addEventListener('click', clearFilters);
+if ($('popover-clear')) $('popover-clear').addEventListener('click', () => { clearFilters(); closeFilters(); filterFocus().focus(); });
 document.querySelectorAll('#status-filter [data-status]').forEach(b => b.addEventListener('click', () => {
   if (state.status === b.dataset.status) return;
   state.status = b.dataset.status;
@@ -399,6 +489,69 @@ function moreStatus(shown, total, noun) {
   $('shown').textContent = total === null ? `${shown} ${noun}${shown === 1 ? '' : 's'} shown` : `${shown} of ${total} shown`;
 }
 
+/** Active inventory filters as removable chips, plus the count on the Filters button. */
+function renderActiveFilters() {
+  const chips = $('filter-chips');
+  const inventory = state.view === 'admin';
+  const activity = state.view === 'activity';
+  const plan = [];
+  if (state.q) plan.push(['q', `Search: ${state.q}`]);
+  if (activity && state.kind !== 'all') plan.push(['kind', KIND_LABELS[state.kind]]);
+  if (inventory) {
+    if (state.ownerId) {
+      const option = [...$('owner-filter').options].find(o => o.value === state.ownerId);
+      plan.push(['ownerId', `Owner: ${option?.textContent || state.ownerId}`]);
+    }
+    if (state.status !== 'all') plan.push(['status', state.status === 'archived' ? 'Archived' : 'Active']);
+    if (state.expiry === 'soon') plan.push(['expiry', 'Expiring in 7 days']);
+    if (state.sort === 'expiry') plan.push(['sort', 'Expires soonest']);
+  }
+  chips.replaceChildren(...plan.map(([key, text]) => {
+    const chip = button(text, () => removeFilter(key), 'filter-chip');
+    chip.setAttribute('aria-label', `Remove filter: ${text}`);
+    return chip;
+  }));
+  const count = plan.length;
+  $('filter-count').textContent = count ? String(count) : '';
+  $('filter-count').hidden = !count;
+  $('filter-toggle').setAttribute('aria-label', count ? `Filters, ${count} active` : 'Filters');
+  $('clear-filters').hidden = !count;
+}
+function removeFilter(key) {
+  clearTimeout(searchTimer);
+  if (key === 'q') { state.q = ''; $('search').value = ''; }
+  if (key === 'ownerId') { state.ownerId = ''; $('owner-filter').value = ''; }
+  if (key === 'status') { state.status = 'all'; }
+  if (key === 'expiry') { state.expiry = 'all'; $('expiry-filter').value = 'all'; }
+  if (key === 'sort') { state.sort = 'recent'; $('sort').value = 'recent'; }
+  if (key === 'kind') state.kind = 'all';
+  resetPagination(); writeUrl(); loadPage();
+}
+
+let recentLoaded = false;
+// Recent links come from the same authorized library query the list uses.
+// They live in memory only, and never claim an artifact the account cannot open.
+function renderRecent() {
+  const group = $('recent-group'), list = $('recent-list');
+  group.hidden = !recentItems.length;
+  list.replaceChildren(...recentItems.map(item => {
+    const link = node('a', { className: 'nav-button', href: viewerUrl(item), title: item.title || 'Untitled artifact' },
+      node('span', { className: 'nav-icon', ariaHidden: 'true' }), node('span', { textContent: item.title || 'Untitled artifact' }));
+    link.firstChild.innerHTML = iconSvg(item.icon);
+    link.addEventListener('click', rememberLibraryNavigation);
+    return link;
+  }));
+}
+async function loadRecent() {
+  if (!user || recentLoaded) return;
+  recentLoaded = true;
+  try {
+    const data = await api('/api/library?' + new URLSearchParams({ view: 'all', sort: 'recent', limit: '3' }));
+    recentItems = (data.artifacts || []).filter(item => !item.archived).slice(0, 3);
+    renderRecent();
+  } catch { /* Recent is optional; the library itself reports failures. */ }
+}
+
 async function showApp() {
   if (!user) return showLogin();
   document.documentElement.removeAttribute('data-system-appearance');
@@ -412,6 +565,8 @@ async function showApp() {
   $('account-role').textContent = user.role === 'owner' ? 'Instance owner' : 'Member';
   document.querySelectorAll('[data-owner-only]').forEach(n => { n.hidden = user.role !== 'owner'; });
   await loadPage();
+  loadRecent();
+  focusSearchFragment();
 }
 function empty(title, text) {
   return node('div', { className: 'empty' }, node('h2', { textContent: title }), node('p', { textContent: text }));
@@ -440,25 +595,44 @@ async function loadPage() {
   $('page-title').textContent = VIEWS[view][0];
   $('page-description').textContent = VIEWS[view][1];
   document.title = `${VIEWS[view][0]} · Artifacts`;
-  document.querySelectorAll('[data-view]').forEach(b => {
-    if (b.dataset.view === view) b.setAttribute('aria-current', 'page');
+  // Scope is a filter on the library, so All/Mine/Shared all mark "Library".
+  const currentView = LIBRARY_NAV_VIEWS.includes(view) && view !== 'starred' && view !== 'archived' ? 'all' : view;
+  document.querySelectorAll('.sidebar [data-view]').forEach(b => {
+    if (b.dataset.view === currentView) b.setAttribute('aria-current', 'page');
     else b.removeAttribute('aria-current');
   });
   $('filters').hidden = !library && !inventory && view !== 'people' && view !== 'activity';
-  $('sort').hidden = !library && !inventory;
+  // The library keeps a visible sort; inventory sort belongs with its other
+  // filters inside the labeled Filters popover.
+  $('sort-field').hidden = !library && !inventory;
+  (inventory ? $('filter-sort-slot') : $('sort-slot')).append($('sort-field'));
+  $('sort-label').className = inventory ? 'field-label' : 'sr-only';
+  $('filter-sort-slot').hidden = !inventory;
   const searchLabel = view === 'people' ? 'Search people' : view === 'activity' ? 'Search activity' : 'Search artifacts';
   $('search-label').textContent = searchLabel;
-  $('search-label').className = library ? 'sr-only' : 'search-label';
+  const searchFilled = !!state.q;
+  // The library's search stays a plain, labeled field; people/activity keep a
+  // visible label once a search is in play.
+  $('search-label').className = library && !searchFilled ? 'sr-only' : 'search-label';
   $('search').placeholder = view === 'people' ? 'Name or email…' : view === 'activity' ? 'Person, artifact or ID…' : 'Search artifacts…';
+  $('scopes').hidden = !library;
+  // Archived stays one click away from the library without becoming a sixth peer.
+  $('archived-link').hidden = !LIBRARY_NAV_VIEWS.includes(view);
+  $('archived-link').setAttribute('aria-pressed', String(view === 'archived'));
+  document.querySelectorAll('#scopes [data-view]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.view === view)));
   $('layout-switch').hidden = !library;
+  $('filter-toggle').hidden = !inventory;
+  $('owner-field').hidden = !inventory;
+  $('expiry-field').hidden = !inventory;
+  $('status-field').hidden = !inventory;
   $('owner-filter').hidden = !inventory;
   $('status-filter').hidden = !inventory;
   $('expiry-filter').hidden = !inventory;
   $('sort').querySelector('[value="expiry"]').hidden = !inventory;
   $('sort').querySelector('[value="expiry"]').disabled = !inventory;
+  if (!inventory) closeFilters();
   $('expiry-filter').value = state.expiry;
-  const filtered = state.q || (inventory && (state.ownerId || state.status !== 'all' || state.expiry === 'soon')) || (view === 'activity' && state.kind !== 'all');
-  $('clear-filters').hidden = !filtered;
+  renderActiveFilters();
   $('inventory-note').hidden = !inventory;
   $('inventory-note').textContent = `Expiration permanently deletes private content and history. Public copies remain until unpublished. Times shown in ${timeZoneName()}.`;
   $('privacy-note').hidden = !library && !inventory;
@@ -475,7 +649,11 @@ async function loadPage() {
   $('result-status').textContent = 'Loading…';
   message('page-error');
   $('content').setAttribute('aria-busy', 'true');
-  $('content').replaceChildren(node('div', { className: 'loading', textContent: `Loading ${inventory ? 'the instance inventory' : view === 'people' ? 'people and invitations' : view === 'activity' ? 'activity' : view === 'credentials' ? 'credentials' : view === 'publications' ? 'published links' : 'your work'}…` }));
+  // A refresh of the same view keeps the useful list on screen; only a view
+  // with nothing rendered yet gets the loading placeholder.
+  const hadContent = renderedView === view && $('content').childElementCount > 0;
+  if (!hadContent) $('content').replaceChildren(node('div', { className: 'loading', textContent: `Loading ${inventory ? 'the instance inventory' : view === 'people' ? 'people and invitations' : view === 'activity' ? 'activity' : view === 'credentials' ? 'credentials' : view === 'publications' ? 'published links' : 'your work'}…` }));
+  else $('content').classList.add('is-refreshing');
   try {
     if (library || inventory) {
       if (inventory) {
@@ -496,7 +674,12 @@ async function loadPage() {
         items.push(...data.artifacts); total = data.total; counts = data.counts ?? counts; cursor = data.nextCursor;
       } while (cursor && items.length < state.n);
       renderArtifacts(items, inventory);
+      renderActiveFilters();
       if (inventory) renderStatusCounts(counts);
+      else {
+        recentItems = items.filter(item => !item.archived).slice(0, 3);
+        renderRecent();
+      }
       nextCursor = cursor; shownCount = items.length; state.n = Math.max(BATCH, items.length);
       moreStatus(shownCount, total, 'artifact');
       $('result-status').textContent = `${total} artifact${total === 1 ? '' : 's'} · ${state.sort === 'expiry' ? 'Expires soonest · never last' : state.sort === 'name' ? 'Name A–Z' : 'Recently updated first'}`;
@@ -532,12 +715,15 @@ async function loadPage() {
     }
   } catch (err) {
     if (seq !== loadSequence) return;
+    $('content').classList.remove('is-refreshing');
     $('content').replaceChildren(button('Try again', loadPage));
     $('result-status').textContent = 'Could not load this page.';
     message('page-error', err.message);
   } finally {
     if (seq === loadSequence) {
+      renderedView = view;
       $('content').setAttribute('aria-busy', 'false');
+      $('content').classList.remove('is-refreshing');
       if (restoreScroll !== null) {
         const top = restoreScroll;
         restoreScroll = null;
@@ -564,6 +750,7 @@ function refreshViewerLinks() {
   }
 }
 let restoreScroll = null;
+let renderedView = null;   // which view the content currently shows, for honest refresh
 function rememberLibraryNavigation() {
   if (!user) return;
   try {
@@ -648,7 +835,7 @@ function renderArtifacts(items, inventory, append = false) {
     return;
   }
   if (!items.length) {
-    const filtered = state.q || state.ownerId || state.status !== 'all' || state.expiry === 'soon';
+    const filtered = !!state.q || (inventory && (!!state.ownerId || state.status !== 'all' || state.expiry === 'soon')) || (state.view === 'activity' && state.kind !== 'all');
     $('content').replaceChildren(empty(filtered ? 'No matching artifacts' : inventory ? 'No artifacts in this instance' : state.view === 'starred' ? 'Keep your favorites close' : 'Your shelf is ready',
       filtered ? 'Try a different search or clear your filters.' : inventory ? 'Artifacts published by members appear here, including private and archived work. Expired content is permanently deleted.' : state.view === 'starred' ? 'Open an artifact’s menu and choose Star artifact.' : 'Publish an HTML page and the files it uses, or find work shared with you here.'));
     return;
@@ -675,9 +862,14 @@ function artifactEntries(items, inventory, grid) {
     icon.innerHTML = iconSvg(item.icon);
     title.prepend(icon);
     const badge = node('span', { className: 'access-badge', textContent: item.accessLabel });
+    // The list's quiet rows show a subtitle: owner when it is not yours, then
+    // status. The accessible cells below still carry the full columns.
+    const subtitle = inventory
+      ? `${mine(item) ? 'You' : item.ownerName || 'Instance owner'} · ${item.visibility === 'shared' ? 'Shared' : 'Private'} · ${item.archived ? 'Archived' : 'Active'}`
+      : meta(item);
     // The inventory is about everyone's work; the reader's own access is beside the point there.
     const summary = node('div', {}, title, node('div', { className: 'shelf-meta' }, inventory ? null : badge,
-      node('span', { className: 'artifact-meta', title: meta(item), textContent: meta(item) })));
+      node('span', { className: 'artifact-meta', title: subtitle, textContent: subtitle })));
     if (inventory) summary.append(node('div', { className: 'inventory-mobile' },
       node('span', { textContent: `${mine(item) ? 'You' : item.ownerName || 'Instance owner'} · ${item.visibility === 'shared' ? 'Shared' : 'Private'} · ${item.archived ? 'Archived' : 'Active'}` }),
       node('span', { className: 'inventory-expiration', textContent: expirationSummary(item) })));
@@ -1308,6 +1500,7 @@ async function main() {
     if (loginToken) return showLogin();
     const session = await api('/api/session');
     user = session.user;
+    adoptAccount(user);
     if (!user) { rememberLoginReturn(); return showLogin(); }
     if (location.pathname === '/login') history.replaceState(null, '', '/');
     await showApp();

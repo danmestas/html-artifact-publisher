@@ -164,6 +164,7 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
       click(`[data-layout="${layout}"]`);
       run('set','viewport',String(width),width===390?'844':'1000');
       evaluate(`document.documentElement.dataset.theme=${JSON.stringify(theme)}`);
+      run('wait','[aria-busy="false"]');
       wait('.artifact-title .artifact-icon svg');
       const icon=evaluate(`(()=>{const e=document.querySelector('.artifact-title .artifact-icon');const s=e.querySelector('svg');return {hidden:e.getAttribute('aria-hidden'),path:s.querySelector('path').getAttribute('d'),wrapperWidth:e.getBoundingClientRect().width,width:s.getBoundingClientRect().width,color:getComputedStyle(s).stroke,layout:document.querySelector('.artifact-grid')?'grid':'list'}})()`);
       assert.equal(icon.hidden,'true');assert.match(icon.path,/M4 3v17/);assert.ok(icon.width>=14,JSON.stringify(icon));assert.ok(icon.wrapperWidth>=14,JSON.stringify(icon));assert.notEqual(icon.color,'none');assert.equal(icon.layout,layout);
@@ -219,6 +220,43 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
         run('screenshot',join(output,`${view}-${theme}-${width}.png`));
       }
     }
+    run('set','viewport','1440','1000');
+    // Sidebar hierarchy: primary destinations first, administration named apart.
+    run('open',base+'/?view=mine');wait('.artifact-title');
+    const nav=evaluate(`(()=>{const primary=[...document.querySelectorAll('.nav-primary .nav-button')].map(b=>({text:b.textContent.trim(),current:b.getAttribute('aria-current')}));const admin=[...document.querySelectorAll('.nav-admin .nav-button')].map(b=>b.textContent.trim());const scopes=[...document.querySelectorAll('#scopes [data-view]')].map(b=>b.textContent.trim());return {primary,admin,scopes,scopesVisible:!document.getElementById('scopes').hidden,archivedVisible:!document.getElementById('archived-link').hidden}})()`);
+    assert.deepEqual(nav.primary.map(p=>p.text),['Library','Starred','Published links'],'the sidebar leads with three primary destinations');
+    assert.equal(nav.primary[0].current,'page','the current library destination is marked');
+    assert.deepEqual(nav.admin,['Inventory','People','Activity'],'owner-only administration is a named group');
+    assert.deepEqual(nav.scopes,['All','Mine','Shared'],'scope lives with the list, not as six equal sidebar peers');
+    assert.equal(nav.scopesVisible,true);assert.equal(nav.archivedVisible,true,'Archived stays easily reachable');
+    // A scope switch is a filter on the current list: keep the search query.
+    run('fill','#search',`Browser pagination`);run('press','Enter');run('wait','[aria-busy="false"]');
+    click('#scopes [data-view="shared"]');run('wait','[aria-busy="false"]');
+    assert.equal(evaluate('new URL(location.href).searchParams.get("view")'),'shared');
+    assert.equal(evaluate('document.getElementById("search").value'),'Browser pagination','scope changes keep the current search');
+    click('#archived-link');run('wait','[aria-busy="false"]');
+    assert.equal(evaluate('new URL(location.href).searchParams.get("view")'),'archived','Archived is one click from the library');
+    assert.equal(evaluate('document.getElementById("archived-link").getAttribute("aria-pressed")'),'true');
+    // A viewer Find link focuses the real search field and drops the fragment.
+    run('open',base+'/?view=all#search');wait('#app:not([hidden])');wait('[aria-busy="false"]');
+    assert.equal(evaluate('location.hash'),'','the search fragment is not left behind');
+    assert.equal(evaluate('document.activeElement.id'),'search','#search focuses the real search input');
+    // Cmd/Ctrl+K is the same search, never a fake command surface.
+    evaluate('document.getElementById("search").blur()');
+    run('press','Meta+k');
+    assert.equal(evaluate('document.activeElement.id'),'search','Cmd/Ctrl+K focuses search');
+    // It must not disturb an open dialog that may hold a one-time credential.
+    click('#content article:first-child .artifact-menu');wait('#dialog[open]');
+    evaluate('document.getElementById("search").blur()');
+    run('press','Meta+k');
+    assert.equal(evaluate('document.getElementById("dialog").open'),true,'Cmd/Ctrl+K leaves modal editing alone');
+    run('press','Escape');run('wait','--fn','!document.getElementById("dialog").open');
+    // Recent links are real authorized artifacts, not samples.
+    run('open',base+'/?view=all');wait('.artifact-title');run('wait','[aria-busy="false"]');
+    run('wait','--fn','!document.getElementById("recent-group").hidden');
+    const recent=evaluate(`[...document.querySelectorAll('#recent-list a')].map(a=>({href:new URL(a.href).pathname,text:a.textContent.trim()}))`);
+    assert.ok(recent.length>0&&recent.length<=3,'Recent shows at most three real artifacts');
+    assert.ok(recent.every(r=>r.href.startsWith('/v/')),'Recent links point at real artifacts');
     run('open',base+'/?sort=name');wait('.artifact-title');
     assert.equal(evaluate('document.getElementById("sort").value'),'name');
     const sortedTitles=evaluate('[...document.querySelectorAll(".artifact-title")].map(e=>e.textContent.replace(/^★/,"").toLowerCase())');
@@ -370,7 +408,7 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
     assert.ok((await api('/api/people',{cookie:owner.cookie})).json.users.some(u=>u.email==='browser-invitation@example.com'&&u.status==='disabled'));
     // A failed library fetch offers recovery without dropping the signed-in user.
     evaluate(`(()=>{const original=window.fetch;window.fetch=(...args)=>{if(String(args[0]).startsWith('/api/library')){window.fetch=original;return Promise.reject(new Error('Local test connection failure'))}return original(...args)}})()`);
-    click('#nav-toggle');wait('#navigation');click('[data-view="all"]');wait('#page-error:not([hidden])');
+    click('#nav-toggle');wait('#navigation');click('.sidebar [data-view="all"]');wait('#page-error:not([hidden])');
     assert.ok(evaluate('document.getElementById("page-error").textContent.includes("Local test connection failure")'));
     run('find','role','button','click','--name','Try again');wait('.artifact-title');
     assert.equal(evaluate('document.getElementById("page-error").hidden'),true);

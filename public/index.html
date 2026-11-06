@@ -15,7 +15,7 @@
   <a class="skip-link" href="#main">Skip to content</a>
   <div id="boot" class="boot" role="status">Opening your library…</div>
   <section id="login" class="login" hidden aria-labelledby="login-title">
-    <div class="login-story"><div class="brand"><span class="mark" aria-hidden="true"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="4" y="5" width="16" height="3.2" rx="1.6" fill="currentColor"/><rect x="4" y="10.4" width="12" height="3.2" rx="1.6" fill="currentColor" opacity=".75"/><rect x="4" y="15.8" width="8" height="3.2" rx="1.6" fill="currentColor" opacity=".5"/></svg></span> Artifacts</div></div>
+    <div class="login-story"><div class="brand"><span class="mark" aria-hidden="true"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="4" y="5" width="16" height="3.2" rx="1.6" fill="currentColor"/><rect x="4" y="10.4" width="12" height="3.2" rx="1.6" fill="currentColor" opacity=".75"/><rect x="4" y="15.8" width="8" height="3.2" rx="1.6" fill="currentColor" opacity=".5"/></svg></span> <span class="brand-name">Artifacts</span></div></div>
     <div class="login-form"><div class="form-inner">
       <h2 id="login-title">Sign in to Artifacts</h2>
       <p id="login-description" class="muted">We’ll email you a one-time link. No password.</p>
@@ -42,20 +42,26 @@
     <p class="tagline"><a href="/agent-setup.html">Set up an agent to publish</a></p>
   </section>
   <div id="app" class="shell" hidden>
-    <aside class="sidebar">
-      <div class="sidebar-top"><a class="brand" href="/"><span class="mark" aria-hidden="true"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="4" y="5" width="16" height="3.2" rx="1.6" fill="currentColor"/><rect x="4" y="10.4" width="12" height="3.2" rx="1.6" fill="currentColor" opacity=".75"/><rect x="4" y="15.8" width="8" height="3.2" rx="1.6" fill="currentColor" opacity=".5"/></svg></span> Artifacts</a><button id="nav-toggle" class="mobile-nav" aria-controls="navigation" aria-expanded="false" aria-label="Open navigation and account">Menu</button></div>
+    <aside class="sidebar" aria-label="Workspace navigation">
+      <div class="sidebar-top">
+        <a class="brand" href="/"><span class="mark" aria-hidden="true"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="4" y="5" width="16" height="3.2" rx="1.6" fill="currentColor"/><rect x="4" y="10.4" width="12" height="3.2" rx="1.6" fill="currentColor" opacity=".75"/><rect x="4" y="15.8" width="8" height="3.2" rx="1.6" fill="currentColor" opacity=".5"/></svg></span> <span class="brand-name">Artifacts</span></a>
+        <button id="nav-toggle" class="mobile-nav" aria-controls="navigation" aria-expanded="false" aria-label="Open navigation and account">Menu</button>
+      </div>
       <div id="navigation" class="navigation">
-        <nav aria-label="Library navigation">
-          <button data-view="all">All artifacts</button>
-          <button data-view="mine">Created by me</button>
-          <button data-view="shared">Shared with me</button>
-          <button data-view="starred">Starred</button>
-          <button data-view="archived">Archived</button>
-          <button data-view="publications">Published links</button>
-          <span class="nav-label" data-owner-only hidden>Instance administration</span>
-          <button data-view="admin" data-owner-only hidden>Every artifact</button>
-          <button data-view="people" data-owner-only hidden>People & invitations</button>
-          <button data-view="activity" data-owner-only hidden>Activity</button>
+        <nav class="nav-primary" aria-label="Library">
+          <button data-view="all" class="nav-button" type="button"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM14 3v5h4M9 12h6m-6 4h6"/></svg></span>Library</button>
+          <button data-view="starred" class="nav-button" type="button"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9z"/></svg></span>Starred</button>
+          <button data-view="publications" class="nav-button" type="button"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M9 15l6-6M8 17l-1 1a4 4 0 0 1-6-6l4-4a4 4 0 0 1 6 0M13 7l1-1a4 4 0 0 1 6 6l-4 4a4 4 0 0 1-6 0"/></svg></span>Published links</button>
+        </nav>
+        <div id="recent-group" class="recent-group" hidden>
+          <p class="nav-label">Recent</p>
+          <nav id="recent-list" class="recent-list" aria-label="Recent artifacts"></nav>
+        </div>
+        <nav class="nav-admin" aria-label="Administration" data-owner-only hidden>
+          <p class="nav-label">Administration</p>
+          <button data-view="admin" class="nav-button" type="button"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7h16v14H4zM3 3h18v4H3zM10 11h4"/></svg></span>Inventory</button>
+          <button data-view="people" class="nav-button" type="button" aria-label="People &amp; invitations"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M16 20v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 10a4 4 0 1 0 0-8 4 4 0 0 0 0 8M17 3a4 4 0 0 1 0 8M22 20v-2a4 4 0 0 0-3-3.9"/></svg></span>People</button>
+          <button data-view="activity" class="nav-button" type="button"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg></span>Activity</button>
         </nav>
         <div class="account">
           <button id="account-menu-button" class="account-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="account-menu">
@@ -73,21 +79,38 @@
       </div>
     </aside>
     <main id="main" class="main" tabindex="-1">
-      <header class="page-header"><div><h1 id="page-title">Your artifacts</h1><p id="page-description" class="muted"></p></div><button id="page-action" class="primary" hidden></button></header>
+      <header class="page-header">
+        <div class="page-heading"><h1 id="page-title">Your artifacts</h1><p id="page-description" class="muted"></p></div>
+        <button id="page-action" class="primary" hidden></button>
+      </header>
       <form id="filters" class="toolbar" role="search">
         <div class="search"><label id="search-label" class="sr-only" for="search">Search artifacts</label><input id="search" type="search" placeholder="Search artifacts…" maxlength="300" autocomplete="off"></div>
-        <select id="owner-filter" aria-label="Filter by owner" hidden><option value="">Every owner</option></select>
-        <div id="status-filter" class="tabs" role="group" aria-label="Filter by status" hidden>
-          <button type="button" data-status="all" aria-pressed="true">All<small></small></button>
-          <button type="button" data-status="active" aria-pressed="false">Active<small></small></button>
-          <button type="button" data-status="archived" aria-pressed="false">Archived<small></small></button>
+        <div id="scopes" class="library-scopes" role="group" aria-label="Library scope" hidden>
+          <button type="button" data-view="all" data-scope aria-pressed="false">All</button>
+          <button type="button" data-view="mine" data-scope aria-pressed="false">Mine</button>
+          <button type="button" data-view="shared" data-scope aria-pressed="false">Shared</button>
         </div>
-        <select id="expiry-filter" aria-label="Filter by expiration" hidden><option value="all">Any expiration</option><option value="soon">Expiring in 7 days</option></select>
+        <button id="archived-link" class="archive-link" type="button" data-view="archived" data-scope aria-pressed="false" hidden>Archived</button>
         <span class="spacer" aria-hidden="true"></span>
-        <select id="sort" aria-label="Sort artifacts"><option value="recent">Recently updated</option><option value="name">Name A–Z</option><option value="expiry" hidden>Expires soonest</option></select>
-        <button id="clear-filters" type="button" hidden>Clear filters</button>
+        <div id="sort-slot" class="sort-slot"><label id="sort-field" class="inline-field"><span id="sort-label" class="sr-only">Sort artifacts</span><select id="sort" aria-label="Sort artifacts"><option value="recent">Recently updated</option><option value="name">Name A–Z</option><option value="expiry" hidden>Expires soonest</option></select></label></div>
+        <button id="filter-toggle" class="filter-button" type="button" aria-expanded="false" aria-controls="filter-popover" hidden><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 6h16M7 12h10M10 18h4"/></svg></span>Filters<span id="filter-count" class="filter-count"></span></button>
+        <div id="filter-popover" class="filter-popover" role="group" aria-label="Filter inventory" hidden>
+          <div class="popover-head"><h2>Filter inventory</h2><button id="popover-close" class="icon-button" type="button" aria-label="Close filters">×</button></div>
+          <div id="owner-field" class="field"><label for="owner-filter">Owner</label><select id="owner-filter" hidden><option value="">Every owner</option></select></div>
+          <div id="status-field" class="field"><span class="field-label">Status</span>
+            <div id="status-filter" class="segmented" role="group" aria-label="Filter by status" hidden>
+              <button type="button" data-status="all" aria-pressed="true">All<small></small></button>
+              <button type="button" data-status="active" aria-pressed="false">Active<small></small></button>
+              <button type="button" data-status="archived" aria-pressed="false">Archived<small></small></button>
+            </div>
+          </div>
+          <div id="expiry-field" class="field"><label for="expiry-filter">Expiration</label><select id="expiry-filter" hidden><option value="all">Any expiration</option><option value="soon">Expiring in 7 days</option></select></div>
+          <div id="filter-sort-slot" class="field"><span id="filter-sort-label" class="field-label">Sort</span></div>
+          <div class="popover-footer"><button type="button" class="linkish" id="popover-clear">Clear</button><button type="button" class="primary" id="popover-done">Done</button></div>
+        </div>
         <div id="layout-switch" class="segmented" role="group" aria-label="Library layout"><button type="button" data-layout="grid" aria-pressed="true">Grid</button><button type="button" data-layout="list" aria-pressed="false">List</button></div>
       </form>
+      <div id="active-filters" class="active-filters"><div id="filter-chips" class="filter-chips"></div><button id="clear-filters" class="filter-clear" type="button" hidden>Clear filters</button></div>
       <p id="result-status" class="tiny" role="status" aria-live="polite"></p>
       <div id="page-error" class="error" role="alert" hidden></div>
       <div id="content"></div>

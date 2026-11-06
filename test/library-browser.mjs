@@ -105,7 +105,7 @@ export function browserDriver(session='accounts-library-qa') {
 
 export async function browserQA({base,loginUrl,output,api,owner,browserOwner,member}) {
   mkdirSync(output,{recursive:true});
-  const {run,evaluate,wait,click}=browserDriver();
+  const {run,runAsync,evaluate,wait,click}=browserDriver();
   const evidence=[],fixtures=[];
   let failure;
   const selectQA=()=>{
@@ -160,7 +160,9 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
       assert.equal(evaluate('document.activeElement.matches(".artifact-menu")'),true,'Cancel returns focus to the triggering artifact');
     }
     const { parityQA } = await import('./parity-browser.mjs');
-    await parityQA({base,api,owner,browserOwner,member,run,evaluate,wait,click,output,selectQA});
+    // parityQA awaits every browser command so Node keeps draining the
+    // Wrangler pipes while the browser waits on the page.
+    await parityQA({base,api,owner,browserOwner,member,runAsync,evaluate,output,selectQA});
     run('set','viewport','390','844');
     run('open',base+'/?view=starred');wait('.artifact-title');
     for (const width of [1440,390]) for (const theme of ['light','dark']) for (const layout of ['grid','list']) {

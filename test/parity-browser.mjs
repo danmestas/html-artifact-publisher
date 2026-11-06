@@ -2,9 +2,15 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 
 // Uses the existing suite's single browser tab and throwaway accounts/server.
-export async function parityQA({base,api,owner,browserOwner,member,run,evaluate,wait,click,output,selectQA}) {
+export async function parityQA({base,api,owner,browserOwner,member,runAsync,evaluate,output,selectQA}) {
+  // Every browser command awaits: a blocked Node event loop cannot drain the
+  // Wrangler processes' pipes, which stalls the responses the page is waiting
+  // for until the daemon's IPC read expires.
+  const run=(...args)=>runAsync(...args);
+  const wait=selector=>runAsync('wait',selector);
+  const click=selector=>runAsync('click',selector);
   const ids=[];
-  const cdpURL=run('get','cdp-url').trim();
+  const cdpURL=(await run('get','cdp-url')).trim();
   const endpoints=await (await fetch(`http://${new URL(cdpURL).host}/json/list`)).json();
   const target=endpoints.find(e=>e.type==='page' && e.url.startsWith(base));
   assert.ok(target,'find the test tab without opening another');
@@ -31,9 +37,9 @@ export async function parityQA({base,api,owner,browserOwner,member,run,evaluate,
       assert.equal(r.status,201);ids.push(r.json.id);
     }
     await api(`/api/artifacts/${ids[0]}/sharing`,{method:'PUT',cookie:owner.cookie,body:{userId:member.user.id,permission:'read'}});
-    run('set','viewport','1440','1000');run('open',base+'/?q=Parity+browser&sort=name');wait('.artifact-title');
+    await run('set','viewport','1440','1000');await run('open',base+'/?q=Parity+browser&sort=name');await wait('.artifact-title');
     // Preview isolation is a grid-specific workflow, not the default layout.
-    click('[data-layout="grid"]');wait('.artifact-preview iframe');run('wait','--load','networkidle');
+    await click('[data-layout="grid"]');await wait('.artifact-preview iframe');await run('wait','--load','networkidle');
     assert.deepEqual(evaluate('[...document.querySelectorAll(".artifact-title")].map(e=>e.textContent)'),['Parity browser Alpha','Parity browser Beta']);
     assert.deepEqual(evaluate('[...document.querySelectorAll(".access-badge")].map(e=>e.textContent)'),['Shared by you','Private']);
     // The summary line describes the list; the pagination line still carries the exact shown/total count.
@@ -56,100 +62,100 @@ export async function parityQA({base,api,owner,browserOwner,member,run,evaluate,
     assert.ok(texts.some(t=>t.includes('Actual Alpha document')));assert.ok(texts.some(t=>t.includes('Actual Beta document')));
     // Opening the response directly must retain its sandbox and network policy.
     // Observe on the top-level target so OOPIF network isolation cannot hide events.
-    run('open',base+'/p/'+ids[0]);run('wait','--load','networkidle');
+    await run('open',base+'/p/'+ids[0]);await run('wait','--load','networkidle');
     await send('Runtime.evaluate',{expression:'document.readyState'});
     assert.match(evaluate('document.body.innerText'),/Actual Alpha document/);
     assert.equal(evaluate('document.body.dataset.executed||null'),null);
     const outbound=[...requests.values()].filter(r=>r.url.includes('preview-leak'));
     assert.ok(outbound.length>0,'hostile inline CSS attempts a resource load');
     assert.ok(outbound.every(r=>r.blocked==='csp' && !r.response),JSON.stringify(outbound));
-    run('open',base+'/?q=Parity+browser&sort=name');wait('.artifact-preview iframe');run('wait','--load','networkidle');
+    await run('open',base+'/?q=Parity+browser&sort=name');await wait('.artifact-preview iframe');await run('wait','--load','networkidle');
     assert.ok(evaluate('document.querySelector(".artifact-preview iframe").contentDocument===null'),'opaque origin prevents trusted-parent DOM access');
-    run('screenshot',join(output,'parity-previews-desktop.png'));
-    run('cookies','set','artifact_session',member.cookie.split('=')[1],'--url',base,'--httpOnly','--sameSite','Lax');
-    run('open',base+'/?q=Parity+browser&sort=name');wait('.artifact-title');
+    await run('screenshot',join(output,'parity-previews-desktop.png'));
+    await run('cookies','set','artifact_session',member.cookie.split('=')[1],'--url',base,'--httpOnly','--sameSite','Lax');
+    await run('open',base+'/?q=Parity+browser&sort=name');await wait('.artifact-title');
     assert.deepEqual(evaluate('[...document.querySelectorAll(".access-badge")].map(e=>e.textContent)'),['Can view']);
     await api(`/api/artifacts/${ids[0]}/sharing`,{method:'PUT',cookie:owner.cookie,body:{userId:member.user.id,permission:'write'}});
-    run('open',base+'/?q=Parity+browser&sort=name');wait('.artifact-title');
+    await run('open',base+'/?q=Parity+browser&sort=name');await wait('.artifact-title');
     assert.deepEqual(evaluate('[...document.querySelectorAll(".access-badge")].map(e=>e.textContent)'),['Can edit']);
-    run('cookies','set','artifact_session',browserOwner.cookie.split('=')[1],'--url',base,'--httpOnly','--sameSite','Lax');
-    run('open',base+'/?q=Parity+browser&sort=name');wait('.artifact-preview iframe');
-    click('.artifact-preview');wait('#bar:not([hidden])');
+    await run('cookies','set','artifact_session',browserOwner.cookie.split('=')[1],'--url',base,'--httpOnly','--sameSite','Lax');
+    await run('open',base+'/?q=Parity+browser&sort=name');await wait('.artifact-preview iframe');
+    await click('.artifact-preview');await wait('#bar:not([hidden])');
     assert.ok(evaluate('location.pathname').startsWith('/v/'),'preview activation opens normal viewer');
-    run('back');wait('.artifact-preview iframe');
-    click('.artifact-preview');wait('#bar:not([hidden])');
-    click('#backLibrary');wait('.artifact-title');
+    await run('back');await wait('.artifact-preview iframe');
+    await click('.artifact-preview');await wait('#bar:not([hidden])');
+    await click('#backLibrary');await wait('.artifact-title');
     assert.equal(evaluate('document.getElementById("sort").value'),'name');
     assert.equal(evaluate('document.getElementById("search").value'),'Parity browser');
-    run('select','#sort','recent');run('wait','[aria-busy="false"]');
+    await run('select','#sort','recent');await run('wait','[aria-busy="false"]');
     assert.equal(evaluate('new URLSearchParams(location.search).has("cursor")'),false);
-    run('back');wait('.artifact-title');assert.equal(evaluate('document.getElementById("sort").value'),'name');
-    run('open',base+'/?view=admin&q=Parity+browser&sort=name');wait('.artifact-row');
+    await run('back');await wait('.artifact-title');assert.equal(evaluate('document.getElementById("sort").value'),'name');
+    await run('open',base+'/?view=admin&q=Parity+browser&sort=name');await wait('.artifact-row');
     assert.match(evaluate('document.querySelector(".inventory-head").textContent'),/OwnerVisibilityStatusUpdatedExpires/);
     assert.deepEqual(evaluate('[...document.querySelectorAll(".artifact-row:first-child .cell .sr-only")].map(e=>e.textContent)'),['Owner: ','Visibility: ','Status: ','Updated: ','Expires: ']);
     assert.ok(evaluate('document.querySelector(".artifact-row:first-child .expiry-cell").textContent.includes("Never expires")'),'the new expiry column has both an accessible label and a value');
     assert.equal(evaluate('document.querySelectorAll(".artifact-row .access-badge").length'),0,'the inventory does not wear the reader\'s own access');
     assert.match(evaluate('document.querySelector("#status-filter [data-status=archived]").textContent'),/Archived\d+/,'status tabs carry counts');
-    run('set','viewport','390','1000');selectQA();
+    await run('set','viewport','390','1000');selectQA();
     const fallback=await api('/api/artifacts',{method:'POST',cookie:owner.cookie,body:{title:'Unavailable preview fixture',ttlSeconds:null,files:{'index.html':Buffer.from('<script>window.interactiveOnly=true</script>').toString('base64')}}});
     assert.equal(fallback.status,201);ids.push(fallback.json.id);
-    run('set','media','dark');run('open',base+'/p/'+fallback.json.id);run('wait','--load','networkidle');
+    await run('set','media','dark');await run('open',base+'/p/'+fallback.json.id);await run('wait','--load','networkidle');
     assert.match(evaluate('document.body.innerText'),/Static preview unavailable/);
     assert.equal(evaluate('getComputedStyle(document.body).backgroundColor'),'rgb(28, 28, 26)');
-    run('set','media','light');
+    await run('set','media','light');
     assert.equal(evaluate('getComputedStyle(document.body).backgroundColor'),'rgb(251, 251, 250)');
     // Preferences must survive actual navigation, not just an injected data attribute.
     for(const width of [1440,390]) for(const theme of ['light','dark','system']) {
-      run('set','viewport',String(width),'1000');run('set','media','dark');
-      run('open',base+'/?q=Parity+browser&sort=name');wait('.artifact-title');
-      if(width===390) click('#nav-toggle');
+      await run('set','viewport',String(width),'1000');await run('set','media','dark');
+      await run('open',base+'/?q=Parity+browser&sort=name');await wait('.artifact-title');
+      if(width===390) await click('#nav-toggle');
       assert.ok(evaluate('(()=>{const a=document.querySelector(".account").getBoundingClientRect(),s=document.querySelector(".sidebar").getBoundingClientRect();return Math.abs(a.left-s.left)<=1 && Math.abs(a.right-s.right)<=1})()'),'account divider spans the sidebar');
-      click('#account-menu-button');wait('#account-menu:not([hidden])');run('select','#theme',theme);run('press','Escape');
+      await click('#account-menu-button');await wait('#account-menu:not([hidden])');await run('select','#theme',theme);await run('press','Escape');
       const expected=theme==='light'?'light':'dark';
       assert.equal(evaluate('getComputedStyle(document.documentElement).colorScheme'),expected);
-      selectQA();run('screenshot',join(output,`selects-library-${theme}-${width}.png`));
-      click('.artifact-title');wait('#frame');
+      selectQA();await run('screenshot',join(output,`selects-library-${theme}-${width}.png`));
+      await click('.artifact-title');await wait('#frame');
       // The frame is static shell markup; toolbar actions need loaded artifact metadata.
-      wait('#bar:not([hidden])');
+      await wait('#bar:not([hidden])');
       assert.equal(evaluate('getComputedStyle(document.documentElement).colorScheme'),expected);
       assert.equal(evaluate('document.getElementById("viewer-theme").value'),theme);
-      click('#moreBtn');selectQA();
-      run('screenshot',join(output,`selects-viewer-${theme}-${width}.png`));run('press','Escape');
+      await click('#moreBtn');selectQA();
+      await run('screenshot',join(output,`selects-viewer-${theme}-${width}.png`));await run('press','Escape');
       if(width===390) {
         assert.notEqual(evaluate('getComputedStyle(document.querySelector("#shareBtn .label")).display'),'none');
         assert.ok(evaluate('document.getElementById("bar").getBoundingClientRect().height<=112'),'phone viewer controls fit two rows');
       }
-      click('#backLibrary');wait('.artifact-title');
+      await click('#backLibrary');await wait('.artifact-title');
       assert.equal(evaluate('getComputedStyle(document.documentElement).colorScheme'),expected);
     }
-    requests.clear();run('open',base+'/?q=Parity+browser&sort=name');wait('.artifact-title');wait('.artifact-preview iframe');run('wait','--load','networkidle');
+    requests.clear();await run('open',base+'/?q=Parity+browser&sort=name');await wait('.artifact-title');await wait('.artifact-preview iframe');await run('wait','--load','networkidle');
     // Phones get previews too: two columns of cards, each preview a sandboxed static document.
     assert.equal(evaluate('getComputedStyle(document.querySelector(".artifact-grid")).gridTemplateColumns.split(" ").length'),2,'phone grid has two columns');
     assert.equal(evaluate('[...document.querySelectorAll(".artifact-preview iframe")].every(e=>e.getAttribute("sandbox")==="")'),true,'phone previews are sandboxed');
     assert.equal(evaluate('document.documentElement.scrollWidth>innerWidth'),false,'phone cards do not overflow');
-    run('screenshot',join(output,'parity-phone.png'));
-    run('set','viewport','1440','1000');run('wait','.artifact-preview iframe');
-    click('[data-layout="list"]');wait('.artifact-row');
+    await run('screenshot',join(output,'parity-phone.png'));
+    await run('set','viewport','1440','1000');await run('wait','.artifact-preview iframe');
+    await click('[data-layout="list"]');await wait('.artifact-row');
     assert.equal(evaluate('document.querySelectorAll(".artifact-preview iframe").length'),0,'list removes frames');
-    click('[data-layout="grid"]');wait('.artifact-card');
+    await click('[data-layout="grid"]');await wait('.artifact-card');
     // Signed-out screens follow the system without discarding the in-app choice.
-    run('cookies','clear');
+    await run('cookies','clear');
     for(const width of [1440,390]) for(const system of ['light','dark']) {
       const saved=system==='light'?'dark':'light';
-      run('set','viewport',String(width),width===390?'844':'1000');run('set','media',system);
+      await run('set','viewport',String(width),width===390?'844':'1000');await run('set','media',system);
       evaluate(`localStorage.setItem('artifact-library-preferences',JSON.stringify({...JSON.parse(localStorage.getItem('artifact-library-preferences')||'{}'),theme:${JSON.stringify(saved)}}))`);
-      run('open',base+'/login');wait('#login:not([hidden])');
+      await run('open',base+'/login');await wait('#login:not([hidden])');
       assert.equal(evaluate('document.getElementById("login-theme")'),null);
       assert.equal(evaluate('getComputedStyle(document.documentElement).colorScheme'),system);
       assert.equal(evaluate('JSON.parse(localStorage.getItem("artifact-library-preferences")).theme'),saved);
       evaluate('window.dispatchEvent(new StorageEvent("storage",{key:"artifact-library-preferences"}))');
       assert.equal(evaluate('getComputedStyle(document.documentElement).colorScheme'),system,'storage changes cannot override login appearance');
-      run('open',base+'/');wait('#login:not([hidden])');
+      await run('open',base+'/');await wait('#login:not([hidden])');
       assert.equal(evaluate('getComputedStyle(document.documentElement).colorScheme'),system,'signed-out homepage follows system too');
-      run('screenshot',join(output,`login-system-${system}-${width}.png`));
+      await run('screenshot',join(output,`login-system-${system}-${width}.png`));
     }
-    run('cookies','set','artifact_session',browserOwner.cookie.split('=')[1],'--url',base,'--httpOnly','--sameSite','Lax');
-    run('open',base+'/');wait('.artifact-title');
+    await run('cookies','set','artifact_session',browserOwner.cookie.split('=')[1],'--url',base,'--httpOnly','--sameSite','Lax');
+    await run('open',base+'/');await wait('.artifact-title');
     assert.equal(evaluate('getComputedStyle(document.documentElement).colorScheme'),'light','sign-in restores the saved choice despite a dark system');
     assert.equal(evaluate('document.getElementById("theme").value'),'light');
     assert.equal(evaluate('document.querySelector(".preview-label")'),null,'cards carry no caption');

@@ -81,6 +81,8 @@ export async function viewerWorkspaceQA({ base, output, api, account, artifact, 
     await signInAs(account);
     await run('set', 'viewport', '1440', '900');
     await run('open', `${base}/v/${artifact.id}`);
+    await run('tab', 't1');
+    await run('wait', '--fn', `document.visibilityState === 'visible'`);
     await wait('#bar:not([hidden])');
     await wait('#navBtn:not([hidden])');
     await run('wait', '--fn', `document.getElementById('recentList').children.length > 0`);
@@ -103,6 +105,39 @@ export async function viewerWorkspaceQA({ base, output, api, account, artifact, 
     await run('click', '#renameForm button[type=submit]');
     await run('wait', '--fn', `!document.getElementById('renameDialog').open`);
     assert.equal((await api(`/api/artifacts/${artifact.id}`, { cookie: account.cookie })).json.title, 'Renamed in the workspace', 'the owner renames with the account cookie alone');
+
+    stage = 'management-dialog-contrast';
+    for (const theme of ['dark', 'light']) {
+      await run('tab', 't1');
+      await run('wait', '--fn', `document.visibilityState === 'visible'`);
+      await json(`document.documentElement.dataset.theme = ${JSON.stringify(theme)}`);
+      await run('click', '#titleBtn');
+      await run('click', '#expirationBtn');
+      await wait('#expirationDialog[open]');
+      const contrast = () => json(`(() => {
+        const button = document.querySelector('#expirationForm [type=submit]');
+        const rgb = s => s.match(/[\\d.]+/g).slice(0, 3).map(Number);
+        const lum = c => c.map(v => { v /= 255; return v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4; }).reduce((n, v, i) => n + v * [.2126, .7152, .0722][i], 0);
+        const style = getComputedStyle(button), surface = rgb(getComputedStyle(document.getElementById('expirationDialog')).backgroundColor), opacity = Number(style.opacity);
+        const blend = s => rgb(s).map((v, i) => opacity * v + (1 - opacity) * surface[i]);
+        const a = lum(blend(style.color)), b = lum(blend(style.backgroundColor));
+        const focus = getComputedStyle(document.getElementById('expiryMode'));
+        const ring = rgb(focus.outlineColor), f = lum(ring), ground = lum(surface);
+        return { text: (Math.max(a, b) + .05) / (Math.min(a, b) + .05), focus: (Math.max(f, ground) + .05) / (Math.min(f, ground) + .05), ringChroma: Math.max(...ring) - Math.min(...ring), outlineWidth: focus.outlineWidth };
+      })()`);
+      await run('screenshot', join(output, `expiration-${theme}.png`));
+      const enabled = await contrast();
+      assert.ok(enabled.text >= 4.5, JSON.stringify({ theme, enabled }));
+      assert.ok(enabled.focus >= 3 && enabled.ringChroma <= 15 && enabled.outlineWidth === '2px', JSON.stringify({ theme, enabled }));
+      await json(`document.querySelector('#expirationForm [type=submit]').disabled = true`);
+      const disabled = await contrast();
+      writeFileSync(join(output, `expiration-${theme}-contrast.json`), JSON.stringify({ theme, enabled, disabled }, null, 2));
+      await run('screenshot', join(output, `expiration-${theme}-saving.png`));
+      assert.ok(disabled.text >= 4.5, JSON.stringify({ theme, disabled }));
+      await json(`document.querySelector('#expirationForm [type=submit]').disabled = false`);
+      await run('press', 'Escape');
+      await run('wait', '--fn', `!document.getElementById('expirationDialog').open`);
+    }
 
     stage = 'grants';
     // ── Named access: every change lands in the UI and on the server ──────
@@ -245,7 +280,13 @@ export async function viewerWorkspaceQA({ base, output, api, account, artifact, 
     // account UI without a reload: the link still opens the content, but it was
     // never evidence that the cookie owner is signed in.
     assert.equal(await json(`!document.getElementById('navBtn').hidden`), true, 'a signed-in owner has the library toggle');
+    // Revalidation deliberately ignores hidden pages. Activate this test's
+    // original tab before simulating a return, rather than dispatching an event
+    // whose visible-state precondition is false.
+    await run('tab', 't1');
+    await run('wait', '--fn', `document.visibilityState === 'visible'`);
     await run('cookies', 'clear');
+    assert.equal(await json(`fetch('/api/session', { cache: 'no-store' }).then(r => r.json()).then(data => data.user)`), null, 'clearing cookies removes the account session');
     await json(`(document.dispatchEvent(new Event('visibilitychange')), true)`);
     await run('wait', '--fn', `document.getElementById('navBtn').hidden`);
     assert.equal(await json(`document.getElementById('navBtn').hidden`), true, 'observed identity loss hides the library toggle');
@@ -296,6 +337,8 @@ export async function viewerWorkspaceQA({ base, output, api, account, artifact, 
     await run('open', `${base}/v/${artifact.id}?holdLibrary=1`);
     await wait('#bar:not([hidden])');
     await run('wait', '--fn', `window.__libraryHeld === true`);
+    await run('tab', 't1');
+    await run('wait', '--fn', `document.visibilityState === 'visible'`);
     await signInAs(secondAccount);
     await json(`(document.dispatchEvent(new Event('visibilitychange')), true)`);
     await run('wait', '--fn', `document.getElementById('recentList').textContent.includes('Only the second account has this')`);

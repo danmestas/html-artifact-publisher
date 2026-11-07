@@ -4,7 +4,7 @@
 
 :root {
   --ground: #F3F2EF; --bar: #FBFBFA; --surface: #FFFFFF; --sidebar: #F7F6F3; --wash: #EFEEE9;
-  --line: #E3E2DE; --line-strong: #DCDAD5;
+  --line: #E3E2DE; --line-strong: #DCDAD5; --focus: #77746F;
   --ink: #1C1C1A; --ink-2: #3A3936; --muted: #5F5E5A;
   --accent: #8F430B; --accent-ink: #6E3208; --accent-soft: #F6EBDD; --accent-wash: #FBF1E4; --accent-edge: #D9B48A;
   --ok-ink: #2F5E3A; --ok-soft: #E6F0E7; --danger: #A12A1D; --danger-wash: #F8E6E3;
@@ -16,7 +16,7 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --ground: #151514; --bar: #1C1C1A; --surface: #232321; --sidebar: #191918; --wash: #252523;
-    --line: #33322F; --line-strong: #3E3D39;
+    --line: #33322F; --line-strong: #3E3D39; --focus: #8F8C85;
     --ink: #EDEBE6; --ink-2: #D4D2CC; --muted: #A3A19B;
     --accent: #E39A5B; --accent-ink: #F0B582; --accent-soft: #3A2A1C; --accent-wash: #2C2219; --accent-edge: #6B4A2C;
     --ok-ink: #9BD3A6; --ok-soft: #1F3324; --danger: #F08C80; --danger-wash: #3B1F1C;
@@ -26,7 +26,7 @@
 }
 :root[data-theme="dark"] {
   --ground: #151514; --bar: #1C1C1A; --surface: #232321; --sidebar: #191918; --wash: #252523;
-  --line: #33322F; --line-strong: #3E3D39;
+  --line: #33322F; --line-strong: #3E3D39; --focus: #8F8C85;
   --ink: #EDEBE6; --ink-2: #D4D2CC; --muted: #A3A19B;
   --accent: #E39A5B; --accent-ink: #F0B582; --accent-soft: #3A2A1C; --accent-wash: #2C2219; --accent-edge: #6B4A2C;
   --ok-ink: #9BD3A6; --ok-soft: #1F3324; --danger: #F08C80; --danger-wash: #3B1F1C;
@@ -38,7 +38,7 @@
 html, body { height: 100%; margin: 0; }
 body { display: flex; flex-direction: column; overflow: hidden; background: var(--ground); color: var(--ink); font: 14px/1.45 var(--sans); }
 button { font: inherit; color: inherit; cursor: pointer; }
-button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
 [hidden] { display: none !important; }
 .mono { font-family: var(--mono); font-size: 12.5px; }
 .muted { color: var(--muted); }
@@ -390,7 +390,8 @@ dialog.manage-dialog::backdrop { background: var(--overlay); }
 .manage-dialog select { width: 100%; }
 .dialog-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 18px; }
 .dialog-actions button { min-height: 40px; padding: 0 14px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface); font-weight: 500; }
-.dialog-actions .primary { border-color: var(--ink); }
+.dialog-actions .primary { background: var(--ink); color: var(--bar); border-color: var(--ink); }
+.primary:disabled { background: var(--wash); color: var(--muted); border-color: var(--line-strong); opacity: 1; cursor: default; }
 
 #toast {
   position: fixed; left: 50%; bottom: max(20px, env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); z-index: 20;

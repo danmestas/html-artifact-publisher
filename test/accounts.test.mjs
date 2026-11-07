@@ -291,6 +291,35 @@ if (process.env.ACCOUNTS_BROWSER_QA_EXPIRATION === '1') test('real browser: expi
   await expirationQA({base,api,run,evaluate,wait,click,output,artifact:{id:artifact.id,cookie:creator.cookie}});
 });
 
+if (process.env.LIBRARY_SIDEBAR_QA === '1') test('real browser: long recent titles fit the library sidebar', {timeout:120000}, async()=>{
+  const owner=await login('owner@example.com');
+  const titles=['Mesh Health Design','SaurOn — ways to see problems far beyond the visible navigation edge','Artifact workspace'];
+  for(const title of titles) await create({cookie:owner.cookie},{title});
+  const { browserDriver }=await import('./library-browser.mjs');
+  const {run,evaluate,wait}=browserDriver('library-sidebar-qa-'+process.pid,{asyncCommands:true});
+  try {
+    await run('cookies','set','artifact_session',owner.cookie.split('=')[1],'--url',base,'--httpOnly','--sameSite','Lax');
+    await run('set','viewport','1440','900');
+    await run('open',base+'/');
+    await wait('#recent-list a');
+    for(const width of [1440,1024,761]) for(const theme of ['light','dark']) {
+      await run('set','viewport',String(width),'900');
+      await evaluate(`document.documentElement.dataset.theme=${JSON.stringify(theme)}`);
+      const layout=await evaluate(`(()=>{const sidebar=document.querySelector('.sidebar').getBoundingClientRect();return {sidebarWidth:sidebar.width,rows:[...document.querySelectorAll('#recent-list a')].map(a=>{const r=a.getBoundingClientRect(),s=a.lastElementChild,t=s.getBoundingClientRect(),cs=getComputedStyle(s);return {title:a.title,right:r.right,sidebarRight:sidebar.right,labelRight:t.right,labelWidth:s.clientWidth,textWidth:s.scrollWidth,ellipsis:cs.textOverflow,decoration:getComputedStyle(a).textDecorationLine}})}})()`);
+      await run('screenshot',join(tmpdir(),'library-sidebar-'+process.pid+'-'+theme+'-'+width+'.png'));
+      assert.equal(layout.sidebarWidth,230,JSON.stringify(layout));
+      assert.equal(layout.rows.length,3);
+      for(const row of layout.rows) {
+        assert.ok(row.right<=row.sidebarRight-12 && row.labelRight<=row.right-9,JSON.stringify(row));
+        assert.equal(row.decoration,'none','recent links use the same unadorned navigation style');
+        assert.equal(row.ellipsis,'ellipsis');
+      }
+      const long=layout.rows.find(row=>row.title===titles[1]);
+      assert.ok(long.textWidth>long.labelWidth,'long titles truncate inside their label');
+    }
+  } finally {await run('close');}
+});
+
 if (process.env.ACCOUNTS_BROWSER_QA === '1' || process.env.LIBRARY_IDENTITY_QA === '1') test('real browser: account transitions reject stale sidebar responses',async()=>{
   try { registrySQL('DELETE FROM rate_limits RETURNING key'); } catch { /* standalone run */ }
   const owner=await login('owner@example.com');

@@ -35,6 +35,10 @@ const FIXTURES = {
     html: 'background: #fbfaf8; color: #1d1c1a; color-scheme: light;',
     extra: '@media (prefers-color-scheme: dark) { :root { background: #141517; color: #e8e6e2; color-scheme: dark; } }',
   }),
+  followsAppearance: page({
+    html: 'background: #fbfaf8; color: #1d1c1a;',
+    extra: ':root[data-theme="dark"] { background: #141517; color: #e8e6e2; }',
+  }),
   // A translucent canvas is not a canvas: it lets the viewer ground through, so
   // mirroring it behind the page would composite the same layer twice.
   partialHtml: page({ html: 'background: rgba(255, 0, 0, 0.5); color-scheme: dark;' }),
@@ -86,6 +90,27 @@ export async function backdropQA({ base, owner, api, output }) {
   };
   let failure;
   try {
+    // Explicit reader choices must cross the opaque-origin boundary. Safari
+    // does not reliably propagate iframe color-scheme into the blob document.
+    await open(artifacts.followsAppearance, 'light', 'light');
+    assert.ok(await evaluate(`document.getElementById('titleBtn').getBoundingClientRect().width >= 300`), 'phone title gets a readable row rather than the space left by a version hash');
+    assert.equal(await evaluate(`getComputedStyle(document.getElementById('versionHash')).display`), 'none', 'the full hash is not permanent phone chrome');
+    assert.equal(await evaluate(`getComputedStyle(document.getElementById('readCue')).display`), 'none', 'phone chrome does not repeat the read-only cue');
+    await evaluate(`(window.__appearanceFrame = document.getElementById('frame').contentWindow, true)`);
+    await run('select', '#viewer-theme', 'dark');
+    await run('wait', '--fn', `getComputedStyle(document.getElementById('frame')).backgroundColor === 'rgb(20, 21, 23)'`);
+    assert.equal((await frame()).bg, 'rgb(20, 21, 23)', 'Dark reaches an artifact that implements data-theme');
+    assert.equal(await evaluate(`window.__appearanceFrame === document.getElementById('frame').contentWindow`), true, 'appearance changes do not reload the artifact');
+    await run('select', '#viewer-theme', 'light');
+    await run('wait', '--fn', `getComputedStyle(document.getElementById('frame')).backgroundColor === 'rgb(251, 250, 248)'`);
+    const appearance = await frameEval((await run('get', 'cdp-url')).trim());
+    try {
+      assert.equal(await appearance.eval(`document.documentElement.dataset.theme`), 'light');
+      await run('select', '#viewer-theme', 'system');
+      await run('wait', '100');
+      assert.equal(await appearance.eval(`document.documentElement.hasAttribute('data-theme')`), false, 'System removes the explicit override');
+    } finally { await appearance.close(); }
+
     // A dark page owns its canvas: the frame is backed by that colour, not white.
     await open(artifacts.opaqueDark, 'dark', 'dark');
     assert.equal((await frame()).bg, DARK, 'the frame is backed by an opaque dark page canvas');

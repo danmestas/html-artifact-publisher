@@ -272,7 +272,7 @@ test('a creator who is a member manages only what their own cookie authorizes', 
 
 if (process.env.VIEWER_WORKSPACE_QA === '1') test('real browser: the viewer workspace, inspector and account boundary', { timeout: 180000 }, async () => {
   const { viewerWorkspaceQA } = await import('./viewer-workspace-browser.mjs');
-  const output = join(work, 'browser');
+  const output = process.env.VIEWER_WORKSPACE_QA_OUTPUT || join(work, 'browser');
   const stamp = Date.now();
   await withWorker({}, async ({ base, owner, send, signIn, account }) => {
     // Owner account, one artifact the owner manages, a named editor, an

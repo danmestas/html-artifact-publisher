@@ -4,7 +4,7 @@
 
 :root {
   --ground: #F3F2EF; --bar: #FBFBFA; --surface: #FFFFFF; --sidebar: #F7F6F3; --wash: #EFEEE9;
-  --line: #E3E2DE; --line-strong: #DCDAD5;
+  --line: #E3E2DE; --line-strong: #DCDAD5; --focus: #77746F;
   --ink: #1C1C1A; --ink-2: #3A3936; --muted: #5F5E5A;
   --accent: #8F430B; --accent-ink: #6E3208; --accent-soft: #F6EBDD; --accent-wash: #FBF1E4; --accent-edge: #D9B48A;
   --ok-ink: #2F5E3A; --ok-soft: #E6F0E7; --danger: #A12A1D; --danger-wash: #F8E6E3;
@@ -16,7 +16,7 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --ground: #151514; --bar: #1C1C1A; --surface: #232321; --sidebar: #191918; --wash: #252523;
-    --line: #33322F; --line-strong: #3E3D39;
+    --line: #33322F; --line-strong: #3E3D39; --focus: #8F8C85;
     --ink: #EDEBE6; --ink-2: #D4D2CC; --muted: #A3A19B;
     --accent: #E39A5B; --accent-ink: #F0B582; --accent-soft: #3A2A1C; --accent-wash: #2C2219; --accent-edge: #6B4A2C;
     --ok-ink: #9BD3A6; --ok-soft: #1F3324; --danger: #F08C80; --danger-wash: #3B1F1C;
@@ -26,7 +26,7 @@
 }
 :root[data-theme="dark"] {
   --ground: #151514; --bar: #1C1C1A; --surface: #232321; --sidebar: #191918; --wash: #252523;
-  --line: #33322F; --line-strong: #3E3D39;
+  --line: #33322F; --line-strong: #3E3D39; --focus: #8F8C85;
   --ink: #EDEBE6; --ink-2: #D4D2CC; --muted: #A3A19B;
   --accent: #E39A5B; --accent-ink: #F0B582; --accent-soft: #3A2A1C; --accent-wash: #2C2219; --accent-edge: #6B4A2C;
   --ok-ink: #9BD3A6; --ok-soft: #1F3324; --danger: #F08C80; --danger-wash: #3B1F1C;
@@ -38,7 +38,7 @@
 html, body { height: 100%; margin: 0; }
 body { display: flex; flex-direction: column; overflow: hidden; background: var(--ground); color: var(--ink); font: 14px/1.45 var(--sans); }
 button { font: inherit; color: inherit; cursor: pointer; }
-button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
 [hidden] { display: none !important; }
 .mono { font-family: var(--mono); font-size: 12.5px; }
 .muted { color: var(--muted); }
@@ -95,6 +95,7 @@ input[type=text], input[type=datetime-local], textarea {
 .version-button:hover, .version-button[aria-expanded="true"] { background: var(--wash); color: var(--ink); }
 .version-button.old { color: var(--accent-ink); }
 #versionTag { font: 11px var(--sans); }
+.phone-history { display: none; }
 .tag { font-size: 10px; font-weight: 400; }
 .tag.latest { color: var(--muted); }
 
@@ -389,7 +390,8 @@ dialog.manage-dialog::backdrop { background: var(--overlay); }
 .manage-dialog select { width: 100%; }
 .dialog-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 18px; }
 .dialog-actions button { min-height: 40px; padding: 0 14px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface); font-weight: 500; }
-.dialog-actions .primary { border-color: var(--ink); }
+.dialog-actions .primary { background: var(--ink); color: var(--bar); border-color: var(--ink); }
+.primary:disabled { background: var(--wash); color: var(--muted); border-color: var(--line-strong); opacity: 1; cursor: default; }
 
 #toast {
   position: fixed; left: 50%; bottom: max(20px, env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); z-index: 20;
@@ -409,11 +411,24 @@ dialog.manage-dialog::backdrop { background: var(--overlay); }
   .nav-scrim { display: none !important; }
 }
 @media (max-width: 640px) {
-  #bar { gap: 2px; padding-inline: max(6px, env(safe-area-inset-left, 0px)) max(6px, env(safe-area-inset-right, 0px)); }
+  /* Give the title its own row. The second row replaces the old read-only
+     strip, so readable controls cost no additional artifact height. */
+  #bar { display: grid; grid-template-columns: 44px minmax(0, 1fr) 44px auto 44px; grid-template-rows: 44px 44px; height: 89px; gap: 0 4px; padding-inline: max(6px, env(safe-area-inset-left, 0px)) max(6px, env(safe-area-inset-right, 0px)); }
+  #bar > .brand, #navBtn { grid-row: 1; grid-column: 1; }
+  #bar:has(#navBtn:not([hidden])) > .brand { display: none; }
+  .title-anchor { grid-row: 1; grid-column: 2 / -1; }
+  .top-spacer { display: none; }
+  #versionBtn { grid-row: 2; grid-column: 1 / 3; justify-self: start; font-family: var(--sans); }
+  #versionHash, #versionTag, #titleHint, #readCue { display: none; }
+  .phone-history { display: inline; }
+  #commentsBtn { grid-row: 2; grid-column: 3; }
+  .share-anchor { grid-row: 2; grid-column: 4; }
+  .appearance-anchor { grid-row: 2; grid-column: 5; }
+  #stage.readonly #frame { margin-top: 0; }
   .brand { padding: 0 2px; }
   .brand-name { display: none; }
-  #titleBtn { height: 44px; padding: 0 4px; gap: 4px; }
-  #title { font-size: 12.5px; }
+  #titleBtn { width: 100%; height: 44px; padding: 0 4px; gap: 4px; }
+  #title { font-size: 14px; }
   .icon-button { width: 44px; height: 44px; }
   #moreBtn { width: 44px; height: 44px; }
   #commentsBtn { min-width: 44px; padding: 0 6px; }
@@ -421,7 +436,7 @@ dialog.manage-dialog::backdrop { background: var(--overlay); }
   .primary-face { height: 32px; padding: 0 10px; }
   .version-button { height: 44px; padding: 0 4px; }
   #versionTag { display: none; }
-  .popover { position: fixed; top: 45px; left: 8px; right: 8px; width: auto; max-width: none; max-height: calc(100dvh - 55px); }
+  .popover { position: fixed; top: 89px; left: 8px; right: 8px; width: auto; max-width: none; max-height: calc(100dvh - 99px); }
   #titleMenu, #shareMenu, #moreMenu { left: 8px; right: 8px; width: auto; }
   .people-add, .person-row { grid-template-columns: minmax(0, 1fr) 104px auto; gap: 6px; }
   .artifact-actions button, .dialog-actions button, .share-row button, .share-row input { min-height: 44px; }

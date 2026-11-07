@@ -14,6 +14,7 @@ import { preparePublication } from './export.js';
 import { anchorFor, arrange, attachmentDisplay, controls, decodePointAnchor, encodePointAnchor, findQuotes, responderNote, responderProgress, thread } from './comments.js';
 import { typeOf } from './blobs.js';
 import { pagePins } from './page-pins.js';
+import { pageAppearance } from './page-appearance.js';
 import { backdropColor, pageBackdrop, chooseCanvas } from './backdrop.js';
 
 const $ = id => document.getElementById(id);
@@ -289,9 +290,12 @@ async function render() {
   for (const el of doc.querySelectorAll('script, style, link[rel~="stylesheet"]')) el.setAttribute('nonce', NONCE);
   const runtime = doc.createElement('script');
   runtime.setAttribute('nonce', NONCE);
-  runtime.textContent = RUNTIME;
+  // Carry the choice into the sandbox before paint, retaining the author's
+  // original root theme so System can restore it without changing saved files.
+  const theme = document.documentElement.dataset.theme;
+  const preference = theme === 'light' || theme === 'dark' ? theme : 'system';
+  runtime.textContent = `(${pageAppearance})(${JSON.stringify(preference)});\n${RUNTIME}`;
   doc.head.prepend(runtime);
-
   if (frameUrl) URL.revokeObjectURL(frameUrl);
   frameUrl = URL.createObjectURL(new Blob(['<!DOCTYPE html>\n' + doc.documentElement.outerHTML], { type: 'text/html' }));
   const frame = $('frame');
@@ -304,6 +308,7 @@ async function render() {
     $('shell').style.display = 'none';
     frame.style.display = 'block';
     frameReady = true;
+    sendAppearance();
     sendPins();
   };
   frame.src = frameUrl;
@@ -725,8 +730,13 @@ function setMarkerVisibility(visible) {
 }
 $('showCommentMarkers').addEventListener('click', () => setMarkerVisibility(!markersVisible));
 
-// The theme changed: redraw the pins in its colours.
-new MutationObserver(sendPins).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+function sendAppearance() {
+  if (frameReady) $('frame').contentWindow.postMessage({
+    __artifactAppearance: 1, theme: document.documentElement.dataset.theme || 'system',
+  }, '*');
+}
+// Keep the page instance, form state and scroll position while switching.
+new MutationObserver(() => { sendAppearance(); sendPins(); }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', sendPins);
 
 // The sandbox is untrusted. It can suggest a position, never post a comment,

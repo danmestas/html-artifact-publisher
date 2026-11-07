@@ -388,7 +388,7 @@ export async function viewerQA({ base, a, api, output, attach }) {
     const dropdown = await evaluate(`(() => { const p = document.getElementById('threadPanel'); const s = getComputedStyle(p); const r = p.getBoundingClientRect();
       return { position: s.position, top: r.top, bottom: r.bottom, width: r.width, overflow: document.documentElement.scrollWidth > innerWidth, toolbar: document.getElementById('bar').offsetHeight }; })()`);
     assert.equal(dropdown.position, 'absolute', JSON.stringify(dropdown));
-    assert.ok(dropdown.top >= 45 && dropdown.bottom <= 844 && dropdown.width <= 390 && !dropdown.overflow && dropdown.toolbar === 45, JSON.stringify(dropdown));
+    assert.ok(dropdown.top >= 89 && dropdown.bottom <= 844 && dropdown.width <= 390 && !dropdown.overflow && dropdown.toolbar === 89, JSON.stringify(dropdown));
     await run('screenshot', join(output, 'comment-link-phone-dropdown.png'));
     await run('click', '#threadClose');
     await settle();
@@ -450,7 +450,7 @@ export async function viewerQA({ base, a, api, output, attach }) {
     await settle();
     assert.equal(await evaluate(`document.getElementById('threadPanel').dataset.mode`), 'index', 'a read link cannot be made a composer by page messages');
     await run('set', 'viewport', '360', '780');
-    assert.equal(await evaluate(`document.getElementById('bar').offsetHeight === 45 && document.documentElement.scrollWidth <= innerWidth`), true, 'long title remains one row at 360px');
+    assert.equal(await evaluate(`document.getElementById('bar').offsetHeight === 89 && document.documentElement.scrollWidth <= innerWidth`), true, 'long title stays within the two-row phone header at 360px');
     await run('set', 'viewport', '1280', '900');
     await run('screenshot', join(output, 'read-link-desktop.png'));
 

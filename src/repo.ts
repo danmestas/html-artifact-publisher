@@ -428,10 +428,13 @@ export class Repo extends DurableObject<Env> {
    * Link a guest to a verified account. Only an existing, unexpired guest the
    * cookie names, actively unblocked, is linked; the email is never a match.
    */
-  async guestClaim(hash: string, accountId: string): Promise<'ok' | 'missing' | 'blocked'> {
-    const guest = await this.guestByToken(hash);
+  async guestClaim(hash: string, accountId: string): Promise<'ok' | 'missing' | 'blocked' | 'conflict'> {
+    // No await between reading the claim and writing it: competing accounts
+    // cannot both observe an unclaimed profile and overwrite one another.
+    const guest = hash ? this.guestRow('token_hash = ?', hash) : null;
     if (!guest) return 'missing';
     if (guest.blocked) return 'blocked';
+    if (guest.claimedAccountId && guest.claimedAccountId !== accountId) return 'conflict';
     this.ctx.storage.sql.exec('UPDATE _guest SET claimed_account_id = ?, updated_at = ? WHERE id = ?',
       accountId, Math.floor(Date.now() / 1000), guest.id);
     return 'ok';

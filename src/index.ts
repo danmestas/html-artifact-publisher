@@ -290,6 +290,7 @@ async function handleGuestClaim(req: Request, env: Env, id: string, who: Caller,
   const outcome = await repo(env, id).guestClaim(hash, signedIn.id);
   if (outcome === 'missing') return json({ error: 'No guest identity on this artifact; identify first' }, 403);
   if (outcome === 'blocked') return json({ error: 'This guest is blocked from discussing this artifact' }, 403);
+  if (outcome === 'conflict') return json({ error: 'This guest identity is already linked to another account. Use that account or start a separate browser identity.' }, 409);
   return json({ ok: true });
 }
 
@@ -300,6 +301,9 @@ async function handleGuestAdmin(req: Request, env: Env, id: string, rest: string
   if (!entry) return json({ error: 'not found', code: 'not_found' }, 404);
   if (!guestManager(actor, entry)) return json({ error: 'Artifact owner required', code: 'forbidden' }, 403);
   const url = new URL(req.url), stub = repo(env, id);
+  // Registry may still project an older deadline. Private participants follow
+  // the Repo's authoritative expiry, even while alarm/projection cleanup waits.
+  if (!(await stub.info())) return json({ error: 'not found', code: 'not_found' }, 404);
   if (rest === '/guests') {
     if (req.method !== 'GET') return json({ error: 'Method Not Allowed' }, 405);
     const raw = url.searchParams.get('limit') ?? '50';

@@ -89,6 +89,8 @@ before(async () => {
   server = spawn(join(root, 'node_modules/.bin/wrangler'), ['dev', '--port', String(port), '--ip', '127.0.0.1',
     '--persist-to', join(work, 'state'), '--var', `BEARER_TOKEN:${legacy}`, '--var', 'OWNER_EMAIL:owner@example.com',
     '--var', `APP_ORIGIN:${base}`, '--var', 'TEST_MAIL_TRANSPORT:loopback',
+    '--var', 'TEST_EXPIRATION_ALARM_HOLD_MS:5000', '--var', 'TEST_EXPIRATION_FAULT:throw',
+    '--var', 'TEST_EXPIRATION_RETRY_MS:10000',
     '--var', 'WAKE_SINK_KIND:webhook', '--var', `WAKE_SINK_URL:http://127.0.0.1:${hook.address().port}/wake`,
     '--var', `WAKE_SINK_SECRET:${wakeSecret}`, '--show-interactive-dev-session=false'],
   { cwd: root, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
@@ -302,6 +304,12 @@ test('owners review, block, claim and upgrade guests; named editors cannot', asy
   assert.equal((await api(path, { method: 'PUT', cookies: [member.cookie], body: commit })).status, 200);
   assert.ok((await api('/api/admin/activity', { cookies: [owner.cookie] })).json.events.some(e => e.action === 'guest_upgrade'), 'the grant is audited');
 
+  // Browser reuse must not rewrite a claim the owner already reviewed.
+  const relinked = await post({ cookies: [second.cookie, memberGuest] });
+  assert.equal(relinked.status, 409, 'another account cannot replace an existing claimant');
+  assert.equal((await api(`${path}/guests`, { bearer: legacy })).json.guests.find(g => g.id === memberGuestId).claimedAccountId, member.user.id);
+  assert.deepEqual((await post({ cookies: [member.cookie, memberGuest] })).json, { ok: true }, 'same-account claims remain idempotent');
+
   // A different cookie cannot claim the upgraded profile or borrow its role.
   const other = `hap_guest=${'e'.repeat(64)}`;
   assert.equal((await api(`${path}/guest/claim`, { method: 'POST', token: a.read, cookies: [second.cookie, other], body: {} })).status, 403);
@@ -313,6 +321,22 @@ test('owners review, block, claim and upgrade guests; named editors cannot', asy
   assert.equal((await api(`/api/artifacts/${own.id}/manage`, { method: 'PATCH', cookies: [owner.cookie], body: { ownerId: member.user.id } })).status, 200);
   assert.equal((await api(`/api/artifacts/${own.id}/guests`, { cookies: [second.cookie] })).status, 403, 'the former owner may no longer read guests');
   assert.equal((await api(`/api/artifacts/${own.id}/guests`, { cookies: [member.cookie] })).status, 200, 'the new owner may');
+});
+
+test('private participants become unavailable at expiry, before alarm cleanup', async () => {
+  const owner = await login('owner@example.com');
+  const a = await create();
+  const path = `/api/artifacts/${a.id}`;
+  const identified = await api(`${path}/guest`, { method: 'PUT', token: a.read, body: { name: 'Expiring guest', email: 'expires@example.com' } });
+  assert.equal(identified.status, 200);
+  const guestId = identified.json.guest.id;
+  assert.equal((await api(`${path}/guests`, { bearer: legacy })).status, 200);
+  // Leave Registry's projection stale while the authoritative Repo deadline passes.
+  const expiresAt = new Date(Date.now() + 2000).toISOString();
+  assert.equal((await api(`${path}/manage`, { method: 'PATCH', cookies: [owner.cookie], body: { expiresAt } })).status, 202);
+  await new Promise(resolve => setTimeout(resolve, Math.max(0, Date.parse(expiresAt) - Date.now()) + 100));
+  assert.equal((await api(`${path}/guests`, { bearer: legacy })).status, 404);
+  assert.equal((await api(`${path}/guests/${guestId}`, { method: 'PATCH', bearer: legacy, body: { blocked: true } })).status, 404);
 });
 
 test('guest posting is rate limited per identity, artifact and client address', async () => {

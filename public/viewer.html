@@ -84,6 +84,14 @@
           <p id="peopleStatus" class="hint" role="status" aria-live="polite"></p>
           <p id="peopleError" class="hint danger" role="alert" hidden></p>
         </section>
+        <section id="guestManagement" class="people-section" hidden aria-labelledby="guestManagementHeading">
+          <h2 id="guestManagementHeading">Guest participants</h2>
+          <p class="hint">Guest names and emails are self-identified, not verified. Emails are private to the guest and the artifact owner or instance owner. Named access is granted only after the guest signs in and claims this browser identity.</p>
+          <button id="refreshGuests" type="button">Refresh participants</button>
+          <div id="guestList"></div>
+          <button id="moreGuests" type="button" hidden>Load more participants</button>
+          <p id="guestManagementStatus" class="hint" role="status" aria-live="polite"></p>
+        </section>
         <section id="publicationSection" class="publication-section" hidden aria-labelledby="publicationHeading">
           <h2 id="publicationHeading">Public snapshot</h2>
           <p class="hint">A public, standalone copy of one version, with no sign-in required. Every file in this version becomes public, including images, scripts, and supporting files. Other versions, named access and private page data are not included.</p>
@@ -174,6 +182,22 @@
               <p id="markerStatus" role="status">Markers visible on the page</p>
             </div>
             <p id="responderNote" class="responder" role="status"><strong id="responderHead"></strong> <span id="responderName"></span> <span id="responderContact" class="muted"></span></p>
+            <section id="guestProfile" class="guest-profile" hidden aria-labelledby="guestProfileHeading">
+              <h2 id="guestProfileHeading">Your comment identity</h2>
+              <p class="hint">You can comment without an account. Your name is shown with your comments as unverified. Email is optional and visible only to you and the artifact owner or instance owner.</p>
+              <form id="guestProfileForm">
+                <label for="guestName">Name <span class="muted">(optional)</span></label>
+                <input id="guestName" name="guestName" type="text" maxlength="64" autocomplete="nickname">
+                <label for="guestEmail">Private email <span class="muted">(optional, unverified)</span></label>
+                <input id="guestEmail" name="guestEmail" type="email" maxlength="254" autocomplete="email" aria-describedby="guestContinuity">
+                <p id="guestContinuity" class="hint">Without a name, comments appear as Guest. This browser remembers your identity for up to 30 days. Clearing cookies loses that continuity. Your identity does not grant access without a valid artifact link.</p>
+                <button id="saveGuestProfile" type="submit">Save comment identity</button>
+              </form>
+              <p id="guestProfileStatus" class="hint" role="status" aria-live="polite"></p>
+              <button id="claimGuest" type="button">Link to my signed-in account</button>
+              <p class="hint">To request named access, ask the owner for an invitation, sign in, then return in this browser and link your identity. The owner must approve access separately.</p>
+              <p class="hint">Comments are shared discussion. They do not ask an agent to act.</p>
+            </section>
             <div class="comment-tools"><button id="placeComment" class="primary" type="button" hidden>Place a comment</button><button id="generalComment" type="button" hidden>General comment</button></div>
             <form id="commentForm" hidden>
               <label for="commentText">New comment</label>

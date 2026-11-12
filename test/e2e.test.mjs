@@ -488,9 +488,9 @@ test('comment link: tickets through the API, a stock fossil clone and a terminal
 
   // What the viewer shows each link, from the same replies.
   const shows = async token => controls((await api(`/api/artifacts/${a.id}`, { token })).json);
-  assert.deepEqual(await shows(a.comment), { threads: true, commentBox: true, edit: false, publish: false, commentLink: false });
-  assert.deepEqual(await shows(a.read), { threads: true, commentBox: false, edit: false, publish: false, commentLink: false });
-  assert.deepEqual(await shows(a.write), { threads: true, commentBox: true, edit: true, publish: false, commentLink: true });
+  assert.deepEqual(await shows(a.comment), { threads: true, commentBox: true, moderate: true, attach: true, edit: false, publish: false, commentLink: false });
+  assert.deepEqual(await shows(a.read), { threads: true, commentBox: true, moderate: false, attach: false, edit: false, publish: false, commentLink: false });
+  assert.deepEqual(await shows(a.write), { threads: true, commentBox: true, moderate: true, attach: true, edit: true, publish: false, commentLink: true });
 
   const opened = await post(a.comment, { text: 'The heading reads oddly.\nCan it be shorter?', anchor: 'intro', author: 'mallory', user: 'mallory' });
   assert.equal(opened.status, 400, 'the body cannot name the author');
@@ -517,15 +517,16 @@ test('comment link: tickets through the API, a stock fossil clone and a terminal
   assert.equal(t.fields.subsystem, 'intro', 'the anchor');
   assert.equal(t.fields.type, 'Comment');
   assert.deepEqual(t.changes.map(c => c.user), ['comment-link', 'edit-link', 'comment-link']);
+  assert.deepEqual(t.changes.map(c => c.fields.authority), ['edit', 'edit', 'edit'], 'privileged API changes have server-owned provenance for responder progress');
   assert.equal(t.changes[1].comment, 'Shortened in the next version.');
   assert.equal(t.changes[2].fields.status, 'Closed');
   assert.equal((await tickets(a.comment)).status, 200, 'the comment link reads threads');
   assert.deepEqual(thread(t), {
     uuid: t.uuid, title: 'The heading reads oddly.', status: 'Closed', resolved: true, anchor: 'intro', version: a.tip, checkins: [],
     messages: [
-      { user: 'comment-link', time: t.changes[0].time, text: 'The heading reads oddly.\nCan it be shorter?', status: '', change: t.changes[0].artifact },
-      { user: 'edit-link', time: t.changes[1].time, text: 'Shortened in the next version.', status: '', change: t.changes[1].artifact },
-      { user: 'comment-link', time: t.changes[2].time, text: '', status: 'Closed', change: t.changes[2].artifact },
+      { user: 'comment-link', time: t.changes[0].time, text: 'The heading reads oddly.\nCan it be shorter?', status: '', change: t.changes[0].artifact, authority: 'edit', intent: 'comment' },
+      { user: 'edit-link', time: t.changes[1].time, text: 'Shortened in the next version.', status: '', change: t.changes[1].artifact, authority: 'edit', intent: 'comment' },
+      { user: 'comment-link', time: t.changes[2].time, text: '', status: 'Closed', change: t.changes[2].artifact, authority: 'edit', intent: 'comment' },
     ],
   });
 
@@ -549,8 +550,13 @@ test('comment link: tickets through the API, a stock fossil clone and a terminal
   assert.match(stock('sql', '-R', clone, "SELECT status||' '||subsystem FROM ticket").out, /Closed intro/);
   assert.match(stock('sql', '-R', clone, 'SELECT foundin FROM ticket').out, new RegExp(a.tip), 'stock fossil reads the version as foundin');
 
-  // A ticket made in a terminal and pushed appears with no Worker step.
-  const added = stock('ticket', 'add', 'title', 'From the terminal', 'status', 'Open', 'type', 'Comment', '-R', clone);
+  // A terminal can import arbitrary ticket fields, but cannot supply server provenance.
+  for (const field of ['authority', 'intent', 'guest']) {
+    const altered = stock('sql', '-R', clone, `ALTER TABLE ticket ADD COLUMN ${field} TEXT`);
+    assert.ok(altered.ok, altered.out);
+  }
+  const added = stock('ticket', 'add', 'title', 'From the terminal', 'status', 'Open', 'type', 'Comment',
+    'authority', 'edit', 'intent', 'ask', 'guest', 'forged-private-identity', '-R', clone);
   assert.ok(added.ok, added.out);
   const pushed = stock('push', a.cloneUrl, '-R', clone);
   assert.ok(pushed.ok, pushed.out);
@@ -558,6 +564,13 @@ test('comment link: tickets through the API, a stock fossil clone and a terminal
   const terminal = after.find(x => x.fields.title === 'From the terminal');
   assert.ok(terminal, JSON.stringify(after));
   assert.equal(terminal.changes[0].user, 'editor');
+  for (const field of ['authority', 'intent', 'guest']) {
+    assert.equal(terminal.fields[field], undefined, `imported thread ${field} is not trusted`);
+    assert.equal(terminal.changes[0].fields[field], undefined, `imported change ${field} is not trusted`);
+  }
+  // Private provenance survives a clone/push without letting raw fields replace it.
+  const original = after.find(x => x.uuid === first.json.ticketUuid);
+  assert.deepEqual(original.changes.map(c => c.fields.authority), ['edit', 'edit', 'edit']);
 
   // One capped read: the newest-changed threads, and whether there are more.
   const capped = await api(`/api/artifacts/${a.id}/tickets?limit=1`, { token: a.read });

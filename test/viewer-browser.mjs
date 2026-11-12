@@ -433,9 +433,9 @@ export async function viewerQA({ base, a, api, output, attach }) {
     await wait('#threadPanel .thread');
     await settle();
     const readOnly = await evaluate(`({ form: document.getElementById('commentForm').hidden, replies: document.querySelectorAll('#threadPanel .reply').length,
-      resolves: document.querySelectorAll('#threadPanel .resolve').length, threads: document.querySelectorAll('#threadPanel .thread').length,
+      resolves: document.querySelectorAll('#threadPanel .resolve:not([hidden])').length, threads: document.querySelectorAll('#threadPanel .thread').length,
       note: document.getElementById('commentsNote').textContent })`);
-    assert.deepEqual({ ...readOnly, threads: readOnly.threads > 0 }, { form: true, replies: 0, resolves: 0, threads: true, note: 'Read only' });
+    assert.deepEqual({ ...readOnly, replies: readOnly.replies > 0, threads: readOnly.threads > 0 }, { form: true, replies: true, resolves: 0, threads: true, note: '' });
     assert.ok((await pins()).length >= 3, 'readers see the pins');
     await press('#showCommentMarkers');
     await settle();
@@ -445,7 +445,7 @@ export async function viewerQA({ base, a, api, output, attach }) {
     await settle();
     assert.ok((await pins()).length >= 3, 'read-only viewers can restore markers');
     const cue = await evaluate(`(() => { const c = document.getElementById('readCue'), f = document.getElementById('frame'); return { visible: !c.hidden, clear: c.getBoundingClientRect().bottom <= f.getBoundingClientRect().top, placeHidden: document.getElementById('placeComment').hidden, sandbox: f.getAttribute('sandbox') }; })()`);
-    assert.ok(cue.visible && cue.clear && cue.placeHidden && !cue.sandbox.includes('allow-same-origin'), JSON.stringify(cue));
+    assert.ok(cue.visible && cue.clear && !cue.placeHidden && !cue.sandbox.includes('allow-same-origin'), JSON.stringify(cue));
     await inFrame(`(parent.postMessage({ __artifactPins: 1, type: 'point', anchor: ${JSON.stringify(blank.fields.subsystem)}, x: 20, y: 20 }, '*'), true)`);
     await settle();
     assert.equal(await evaluate(`document.getElementById('threadPanel').dataset.mode`), 'index', 'a read link cannot be made a composer by page messages');

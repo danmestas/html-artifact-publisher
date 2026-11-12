@@ -34,6 +34,25 @@ test('responderAuthor: the author the ticket route records for the attached resp
   assert.notEqual(responderAuthor('edit-link'), 'edit-link');
 });
 
+test('shared discussion does not promise an agent response without an explicit request', () => {
+  const discussion = ticket('discussion', [['Guest (guest)', 'A shared observation', 0]]);
+  const progress = responderProgress({ threads: [discussion], status: null, responder: NAME, now: T + 60000, guestDiscussion: true });
+  assert.equal(progress.get('discussion')?.receipt ?? null, null);
+  assert.equal(progress.get('discussion')?.activity ?? null, null);
+});
+
+test('privileged requests retain progress alongside guest discussion', () => {
+  const mixed = thread({
+    uuid: 'mixed', status: 'Open', fields: { title: 'Please update the heading' },
+    changes: [
+      { artifact: hash(1), user: 'edit-link', time: iso(0), comment: '', fields: { comment: 'Please update the heading', authority: 'edit', intent: 'comment' } },
+      { artifact: hash(2), user: 'Guest (guest)', time: iso(1), comment: 'An observation', fields: { authority: 'view', intent: 'comment' } },
+    ],
+  });
+  const progress = responderProgress({ threads: [mixed], status: null, responder: NAME, now: T + 5000, guestDiscussion: true });
+  assert.equal(progress.get('mixed').receipt.change, mixed.messages[0].change);
+});
+
 test('clock: m:ss, never negative', () => {
   assert.equal(clock(0), '0:00');
   assert.equal(clock(48_900), '0:48');

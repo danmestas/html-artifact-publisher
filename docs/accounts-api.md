@@ -7,7 +7,7 @@ Reference for account sign-in, library queries and instance administration. Arti
 - Accounts are invite-only. An account has `id`, `email`, `name`, role (`owner` or `member`) and status (`active`, `invited` or `disabled`).
 - The instance owner can inspect and manage every artifact, including private and archived work. The stable owner ID is `instance-owner`; legacy artifacts without an owner belong to that account.
 - Account endpoints require an account identity: the `artifact_session` cookie or a personal bearer credential. The legacy instance bearer retains artifact/CLI compatibility but does not itself identify an account for these endpoints.
-- A creator or instance owner manages named sharing, title, expiration, archive and deletion. A named editor can edit content but cannot manage access, ownership or deletion. Read grants do not permit mutations.
+- A creator or instance owner manages named sharing, title, expiration, archive and deletion. A named editor can edit content but cannot manage access, ownership or deletion. Read grants do not permit content mutations or comment moderation. With guest discussion enabled, readers may identify separately and post text-only discussion.
 - Account responses never expose artifact capability tokens. Existing read, edit and comment links remain separate access mechanisms.
 - JSON responses are private/no-store. Errors use `{error:string}`. A supplied Origin must match the request origin; browser writes without an explicit credential require that matching Origin. Explicit authenticated CLI clients remain supported.
 
@@ -76,6 +76,25 @@ The sharing response supplies eligible people without giving members access to t
 `expiresAt` is a real future UTC ISO instant ending in `Z`, within `MAX_TTL_SECONDS`, or null for never. Omission preserves the deadline. A date that does not exist is rejected, not normalized. Changing expiration preserves the artifact ID, content, tip and history. A pending response means the deadline is stored but its library projection is unconfirmed; retries are automatic, and refreshing confirms convergence. Expiration permanently removes private content and history; it is not an archive or restore facility.
 
 Archive only changes organization and does not revoke access. Transfer clears named grants but leaves capability links valid. Deletion is permanent. Independent public copies remain until explicitly unpublished, including after source deletion or expiry.
+
+## Guest discussion
+
+A valid read link or named read grant permits text-only discussion without granting the broader comment role. Guest names are self-identified and marked unverified. Optional email is private to that browser identity, the artifact owner and instance owner; it is not included in Fossil tickets or shared discussion responses.
+
+| Route | Body/result | Access |
+| --- | --- | --- |
+| `GET /api/artifacts/:id/guest` | `{guest,canComment,canManage}`; guest is null before identification | Current artifact reader; does not create an identity |
+| `PUT /api/artifacts/:id/guest` | `{name,email}` → own private guest profile | Current artifact reader; matching Origin required |
+| `POST /api/artifacts/:id/guest/claim` | `{}` → identity claim, not an access grant | Guest cookie plus independent verified active account session and current artifact access |
+| `GET /api/artifacts/:id/guests` | `{guests,nextCursor}` | Artifact owner or instance owner only |
+| `PATCH /api/artifacts/:id/guests/:guestId` | `{blocked:boolean}` | Artifact owner or instance owner only |
+| `POST /api/artifacts/:id/guests/:guestId/upgrade` | `{permission:'read'\|'write'}` | Owner approval of an already claimed, active verified account |
+
+The guest cookie is opaque, HttpOnly, SameSite=Lax, Secure on HTTPS and scoped to `/api/artifacts/`. Its continuity lasts at most 30 days, enforced by the server; clearing it loses continuity. It never grants artifact access by itself. Blank name and email are supported. Neither a matching claimed email nor a display name proves an account identity. A claimed guest identity cannot be relinked to a different account; repeating the claim as the same account is safe. An upgrade grants named access to the verified account, not to the shared capability link, and does not rewrite historical comment authors.
+
+Guest posting cannot resolve/reopen threads, attach files, edit content, publish or delete. Owner blocks apply to the current guest identity; clearing cookies can create a different identity, so blocking is not a verified-person ban. Posting is limited over five-minute windows to 10 posts per guest identity, 60 per artifact and 30 per client address. Profile changes and identity claims have separate limits. Rejected writes return 429 with Retry-After; client addresses are hashed rather than stored raw. Ordinary discussion does not request agent execution. Explicit agent Q&A and independent share-link expiration/revocation are separate capabilities; artifact expiration still permanently deletes content as described above.
+
+**Rollout prerequisite:** guest discussion must not be deployed alongside a responder that treats every unanswered comment as an editing request. The responder must enforce server-owned per-change authority and intent, fail closed on unmarked discussion-enabled artifacts, and use a separately scoped Q&A path before an Ask action is exposed.
 
 ## Activity
 

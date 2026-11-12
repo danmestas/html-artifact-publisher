@@ -4,6 +4,7 @@ export type TicketWriter =
   | { kind: 'account'; name: string }
   | { kind: 'owner' }
   | { kind: 'edit' }
+  | { kind: 'guest'; name: string }
   | { kind: 'responder'; name: string };
 
 /**
@@ -31,6 +32,10 @@ export function ticketAuthor(writer: TicketWriter): string {
       return 'owner';
     case 'edit':
       return 'edit-link';
+    case 'guest':
+      // An unverified self-chosen name; the suffix keeps it from passing for
+      // the owner, an account, or a responder.
+      return `${authorName(writer.name).slice(0, 52)} (guest)`;
     case 'responder':
       // The name is attached.json's, which an edit link can already set;
       // the suffix keeps it from passing for the owner or an account.

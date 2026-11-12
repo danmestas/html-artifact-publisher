@@ -158,6 +158,13 @@ export class Artifact {
   /** Open a thread ({ text, anchor? }) or change one ({ ticketUuid, text?, status? }). */
   comment(change) { return call(`${this.base}/tickets`, { method: 'POST', auth: this.auth, body: change }); }
 
+  /** The caller's private guest profile; a guest cookie never grants artifact access. */
+  guest() { return call(`${this.base}/guest`, { auth: this.auth }); }
+  identifyGuest({ name = '', email = '' } = {}) {
+    return call(`${this.base}/guest`, { method: 'PUT', auth: this.auth, body: { name, email } });
+  }
+  claimGuest() { return call(`${this.base}/guest/claim`, { method: 'POST', auth: this.auth, body: {} }); }
+
   /** A thread's attachments: { attachments: [{ name, size, type, external, sha256?, user, time, url?, missing? }] }. */
   attachments(ticketUuid) { return call(`${this.base}/attachments?target=${encodeURIComponent(ticketUuid)}`, { auth: this.auth }); }
 

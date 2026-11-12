@@ -6,9 +6,11 @@
 
 import { DurableObject } from 'cloudflare:workers';
 import { run, type FossilReply, type FossilRequest } from './fossil';
-import { b64encode, genToken, sha256hex, timingSafeEqual } from './util';
+import { b64encode, genId, genToken, sha256hex, timingSafeEqual } from './util';
 import { WAKE_FANOUT, ticketKind, type WakeKind } from './wake';
 import { RESPONDER_STATUS_FILE, applyStatus, resolveChange, statusFrom, type StatusRequest } from './responder-status';
+import { GUEST_DISCUSSION, GUEST_TTL, guestAuthor } from './guest';
+import { ticketTitle } from './ticket-body';
 
 /** A ticket change a push stored: its ticket, its artifact hash, who made it and what it was. */
 export interface PushedTicket {
@@ -27,6 +29,14 @@ interface TicketChange {
 /** Each role can do everything the ones before it can. */
 export type Role = 'read' | 'comment' | 'write';
 const RANK: Record<Role, number> = { read: 0, comment: 1, write: 2 };
+
+/** A guest listing cursor: the last row's [createdAt, id]; unreadable values seek from the newest. */
+function cursorAt(cursor: string): number {
+  try { const v = JSON.parse(cursor) as [number, string]; return Number.isSafeInteger(v[0]) ? v[0] : 0; } catch { return 0; }
+}
+function cursorId(cursor: string): string {
+  try { const v = JSON.parse(cursor) as [number, string]; return typeof v[1] === 'string' ? v[1] : ''; } catch { return ''; }
+}
 
 /** Who is asking: the owner (bearer token), or the holder of a link token. */
 export interface Caller {
@@ -52,6 +62,34 @@ export interface Meta {
   title: string;
   createdAt: number;
   expiresAt: number | null;
+}
+
+/** A guest's private profile on one artifact; never part of the Fossil repository. */
+export interface GuestRow {
+  id: string;
+  name: string;
+  email: string;
+  blocked: boolean;
+  claimedAccountId: string | null;
+  permission: Role | null;
+  createdAt: number;
+}
+
+/** What a guest may read of its own profile: no hash, and a claim is only a request. */
+export interface GuestProfile {
+  id: string;
+  name: string;
+  email: string;
+  claimedAccountId?: string;
+}
+
+/** A guest write a caller asked for: its text and the thread's anchor/version for a new thread. */
+export interface GuestPost {
+  text: string;
+  ticketUuid: string;
+  anchor: string;
+  version: string;
+  status: '' | 'Open' | 'Closed';
 }
 
 /** The ops a caller may run, by the role they need. */
@@ -158,7 +196,54 @@ export class Repo extends DurableObject<Env> {
     if (RANK[role] < RANK[need]) {
       return { error: role === 'read' ? 'this link is read-only' : 'this link can only comment', code: 'forbidden' };
     }
-    return run<unknown>(this.ctx.storage, request);
+    if (request.op === 'ticketAdd' || request.op === 'ticketSet') {
+      this.provenanceTable();
+      return run<{ artifact: string }>(this.ctx.storage, request, undefined, result => {
+        if (result?.artifact) this.markChange(result.artifact, 'edit');
+      });
+    }
+    const reply = run<unknown>(this.ctx.storage, request);
+    if (reply.ok && request.op === 'ticketChanges') this.decorateChanges(reply.result as TicketChange[]);
+    if (reply.ok && request.op === 'ticketThreads') {
+      const result = reply.result as { tickets: { fields?: Record<string, string>; changes: TicketChange[] }[] };
+      for (const ticket of result.tickets) {
+        this.stripAuthority(ticket.fields);
+        this.decorateChanges(ticket.changes);
+      }
+    }
+    return reply;
+  }
+
+  /** Authority is private server state, never a field supplied by a Fossil client. */
+  private provenanceTable(): void {
+    this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS _ticket_provenance (
+      artifact TEXT PRIMARY KEY, authority TEXT NOT NULL, guest TEXT NOT NULL DEFAULT '')`);
+  }
+
+  private markChange(artifact: string, authority: 'edit' | 'view', guest = ''): void {
+    this.ctx.storage.sql.exec('INSERT OR IGNORE INTO _ticket_provenance (artifact, authority, guest) VALUES (?, ?, ?)', artifact, authority, guest);
+  }
+
+  private stripAuthority(fields?: Record<string, string>): void {
+    if (!fields) return;
+    delete fields.authority;
+    delete fields.intent;
+    delete fields.guest;
+  }
+
+  private decorateChanges(changes: TicketChange[]): void {
+    this.provenanceTable();
+    for (const change of changes) {
+      this.stripAuthority(change.fields);
+      const proof = this.ctx.storage.sql.exec<{ authority: string; guest: string }>(
+        'SELECT authority, guest FROM _ticket_provenance WHERE artifact = ?', change.artifact,
+      ).toArray()[0];
+      if (!proof || (proof.authority !== 'edit' && proof.authority !== 'view')) continue;
+      change.fields ??= {};
+      change.fields.authority = proof.authority;
+      change.fields.intent = 'comment';
+      if (proof.authority === 'view' && proof.guest) change.fields.guest = proof.guest;
+    }
   }
 
   /**
@@ -280,6 +365,153 @@ export class Repo extends DurableObject<Env> {
 
   async rename(title: string): Promise<void> {
     this.ctx.storage.sql.exec(`UPDATE _artifact SET title = ?`, title);
+  }
+
+  // ─── Guests ────────────────────────────────────────────────────────────────
+  //
+  // A guest identity belongs to one artifact's repository object and lives
+  // beside the Fossil tables, never in them: no clone, ticket field, timeline
+  // entry or wake carries its email or token. Every method here runs inside
+  // the object, so the role check and the write it authorizes cannot be
+  // separated by another request.
+
+  private guestTable(): void {
+    this.ensureTable();
+    this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS _guest (
+      id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, name TEXT NOT NULL, email TEXT NOT NULL DEFAULT '',
+      blocked INTEGER NOT NULL DEFAULT 0, claimed_account_id TEXT, permission TEXT, created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)`);
+  }
+
+  private guestRow(where: string, arg: string): GuestRow | null {
+    this.guestTable();
+    const r = this.ctx.storage.sql.exec<{
+      id: string; name: string; email: string; blocked: number; claimed_account_id: string | null;
+      permission: string | null; created_at: number;
+    }>(`SELECT id, name, email, blocked, claimed_account_id, permission, created_at FROM _guest WHERE ${where} AND expires_at > ?`, arg, Math.floor(Date.now() / 1000)).toArray()[0];
+    return r ? {
+      id: r.id, name: r.name, email: r.email, blocked: !!r.blocked, claimedAccountId: r.claimed_account_id,
+      permission: r.permission === 'read' || r.permission === 'write' ? r.permission : null, createdAt: r.created_at,
+    } : null;
+  }
+
+  /** The guest the cookie token names on this artifact, or null (an unknown, expired or spoofed token). */
+  async guestByToken(hash: string): Promise<GuestRow | null> {
+    return hash ? this.guestRow('token_hash = ?', hash) : null;
+  }
+
+  async guest(id: string): Promise<GuestRow | null> {
+    return this.guestRow('id = ?', id);
+  }
+
+  /**
+   * The profile `hash` names, or a new identity when there is none. `create`
+   * reports whether the caller must be given its cookie. Expired rows are
+   * cleared first, so an expired token can never revive.
+   */
+  async guestIdentify(hash: string, name: string, email: string): Promise<{ guest: GuestRow; create: boolean }> {
+    this.guestTable();
+    const now = Math.floor(Date.now() / 1000);
+    this.ctx.storage.sql.exec('DELETE FROM _guest WHERE expires_at <= ?', now);
+    const found = hash ? this.guestRow('token_hash = ?', hash) : null;
+    if (found) {
+      this.ctx.storage.sql.exec('UPDATE _guest SET name = ?, email = ?, updated_at = ? WHERE id = ?', name, email, now, found.id);
+      return { guest: { ...found, name, email }, create: false };
+    }
+    const id = genId();
+    this.ctx.storage.sql.exec('INSERT INTO _guest (id, token_hash, name, email, created_at, updated_at, expires_at) VALUES (?,?,?,?,?,?,?)',
+      id, hash, name, email, now, now, now + GUEST_TTL);
+    return { guest: { id, name, email, blocked: false, claimedAccountId: null, permission: null, createdAt: now }, create: true };
+  }
+
+  /**
+   * Link a guest to a verified account. Only an existing, unexpired guest the
+   * cookie names, actively unblocked, is linked; the email is never a match.
+   */
+  async guestClaim(hash: string, accountId: string): Promise<'ok' | 'missing' | 'blocked' | 'conflict'> {
+    // No await between reading the claim and writing it: competing accounts
+    // cannot both observe an unclaimed profile and overwrite one another.
+    const guest = hash ? this.guestRow('token_hash = ?', hash) : null;
+    if (!guest) return 'missing';
+    if (guest.blocked) return 'blocked';
+    if (guest.claimedAccountId && guest.claimedAccountId !== accountId) return 'conflict';
+    this.ctx.storage.sql.exec('UPDATE _guest SET claimed_account_id = ?, updated_at = ? WHERE id = ?',
+      accountId, Math.floor(Date.now() / 1000), guest.id);
+    return 'ok';
+  }
+
+  /** Block or unblock a guest; the next post it makes is refused or allowed. */
+  async guestBlock(id: string, blocked: boolean): Promise<boolean> {
+    this.guestTable();
+    return this.ctx.storage.sql.exec('UPDATE _guest SET blocked = ?, updated_at = ? WHERE id = ?',
+      blocked ? 1 : 0, Math.floor(Date.now() / 1000), id).rowsWritten > 0;
+  }
+
+  /** Record the owner's upgrade request on the guest row; the grant itself lives in the Registry. */
+  async guestPermission(id: string, permission: Role): Promise<boolean> {
+    this.guestTable();
+    return this.ctx.storage.sql.exec('UPDATE _guest SET permission = ?, updated_at = ? WHERE id = ?',
+      permission, Math.floor(Date.now() / 1000), id).rowsWritten > 0;
+  }
+
+  /** A bounded page of guests, newest first; a cursor is the last row's [createdAt, id]. */
+  async guests(limit: number, cursor: string): Promise<{ guests: GuestRow[]; nextCursor: string | null }> {
+    this.guestTable();
+    const rows = this.ctx.storage.sql.exec<{
+      id: string; name: string; email: string; blocked: number; claimed_account_id: string | null;
+      permission: string | null; created_at: number;
+    }>(`SELECT id, name, email, blocked, claimed_account_id, permission, created_at FROM _guest
+      WHERE expires_at > ? AND (? = '' OR created_at < ? OR (created_at = ? AND id < ?))
+      ORDER BY created_at DESC, id DESC LIMIT ?`,
+    Math.floor(Date.now() / 1000), cursor, cursorAt(cursor), cursorAt(cursor), cursorId(cursor), limit + 1).toArray();
+    const page = rows.slice(0, limit), last = page.at(-1);
+    return {
+      guests: page.map(r => ({
+        id: r.id, name: r.name, email: r.email, blocked: !!r.blocked, claimedAccountId: r.claimed_account_id,
+        permission: r.permission === 'read' || r.permission === 'write' ? r.permission : null, createdAt: r.created_at,
+      })),
+      nextCursor: rows.length > limit && last ? JSON.stringify([last.created_at, last.id]) : null,
+    };
+  }
+
+  /**
+   * Post discussion as guest `guest` for a caller holding `role` on this
+   * artifact. Reads and licenses the write on this object in one call: the
+   * profile must exist, be the caller's, be unexpired and unblocked, and the
+   * caller must still hold read authority. A guest may open a thread or reply
+   * to one; it may not set status, act as the responder, or name any other
+   * field. The change carries the server-selected discussion marker.
+   */
+  async guestPost(
+    caller: Caller, hash: string, req: GuestPost,
+  ): Promise<FossilReply<{ ticketUuid: string; artifact: string }>> {
+    const role = await this.role(caller);
+    if (!role) return { error: 'not found', code: 'not_found' };
+    if (RANK[role] >= RANK.comment) return { error: 'this credential may comment directly', code: 'forbidden' };
+    const guest = await this.guestByToken(hash);
+    if (!guest) return { error: 'identify before posting: set your name with PUT …/guest', code: 'forbidden' };
+    if (guest.blocked) return { error: 'this guest is blocked from discussing this artifact', code: 'forbidden' };
+    if (req.status) return { error: 'guest discussion cannot change a thread\'s status', code: 'forbidden' };
+    const body = req.text.trim();
+    if (!body) return { error: 'text is required', code: 'bad_request' };
+    const user = guestAuthor(guest.name);
+    this.provenanceTable();
+    const record = (result: { artifact: string } | undefined) => {
+      if (result?.artifact) this.markChange(result.artifact, 'view', guest.id);
+    };
+    const marked = { severity: GUEST_DISCUSSION };
+    if (!req.ticketUuid) {
+      const fields: Record<string, string> = {
+        title: ticketTitle(body), comment: body, status: 'Open', type: 'Comment',
+        subsystem: req.anchor, ...(req.version ? { foundin: req.version } : {}), ...marked,
+      };
+      const r = run<{ ticketUuid: string; artifact: string }>(this.ctx.storage, { op: 'ticketAdd', fields, user, comment: '' }, undefined, record);
+      return r.ok ? { ok: true, result: r.result } : { error: r.error, code: r.code };
+    }
+    const known = run<unknown[]>(this.ctx.storage, { op: 'ticketChanges', ticketUuid: req.ticketUuid });
+    if (!known.ok) return { error: known.error, code: known.code };
+    const r = run<{ artifact: string }>(this.ctx.storage, { op: 'ticketSet', ticketUuid: req.ticketUuid, fields: marked, user, comment: body }, undefined, record);
+    return r.ok ? { ok: true, result: { ticketUuid: req.ticketUuid, artifact: r.result!.artifact } } : { error: r.error, code: r.code };
   }
 
   /**

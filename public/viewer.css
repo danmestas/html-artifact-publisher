@@ -55,9 +55,25 @@ select {
 }
 @media (forced-colors: active) { select { appearance: auto; background-image: none; } }
 input, textarea { font: inherit; color: var(--ink); }
-input[type=text], input[type=datetime-local], textarea {
+input[type=text], input[type=email], input[type=datetime-local], textarea {
   width: 100%; min-height: 40px; padding: 9px 10px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--bar);
 }
+
+/* Guest identity stays outside the sandbox and separate from account access. */
+.guest-profile { padding: 16px; border-bottom: 1px solid var(--line); }
+.guest-profile h2 { margin: 0; font-size: 14px; }
+.guest-profile form { display: grid; gap: 8px; }
+.guest-profile p, .guest-participant p { overflow-wrap: anywhere; }
+.guest-profile button, #guestManagement button, #guestManagement select { min-height: 44px; }
+.guest-profile button, #guestManagement button {
+  padding: 9px 12px; border: 1px solid var(--line-strong); border-radius: 7px;
+  background: var(--bar); color: var(--ink); text-align: left;
+}
+.guest-profile button:hover, #guestManagement button:hover { background: var(--wash); }
+#guestList { min-width: 0; }
+.guest-participant { display: flex; flex-wrap: wrap; gap: 8px; padding: 16px 0; border-top: 1px solid var(--line); }
+.guest-participant strong, .guest-participant p { flex-basis: 100%; min-width: 0; margin: 0; }
+.guest-participant button, .guest-participant select { max-width: 100%; white-space: normal; }
 
 /* ── The single bar ───────────────────────────────────────────────────── */
 #bar {

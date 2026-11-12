@@ -12,6 +12,7 @@ import { setArtifactFavicon } from './icons.js';
 setArtifactFavicon('document');
 import { preparePublication } from './export.js';
 import { anchorFor, arrange, attachmentDisplay, controls, decodePointAnchor, encodePointAnchor, findQuotes, responderNote, responderProgress, thread } from './comments.js';
+import { guestPanel } from './guest-panel.js';
 import { typeOf } from './blobs.js';
 import { pagePins } from './page-pins.js';
 import { pageAppearance } from './page-appearance.js';
@@ -121,6 +122,7 @@ function forgetAccount() {
   $('peopleSection').hidden = true;
   $('publicationSection').hidden = true;
   $('peopleList').replaceChildren();
+  guestUI.resetManagement();
   $('recentList').replaceChildren();
   $('recentStatus').textContent = '';
   // The content role came from the link and still stands; management came from
@@ -356,6 +358,7 @@ function renderChrome() {
   $('artifactDetails').textContent = info.title || 'Untitled';
   $('titleBtn').title = info.title || 'Untitled';
   $('readCue').hidden = info.role !== 'read';
+  $('readCue').setAttribute('aria-label', can.commentBox ? 'Page is view only; comments are available in the discussion panel' : 'View only');
   $('stage').classList.toggle('readonly', info.role === 'read');
   $('versionHash').textContent = shortId(shown.checkin);
   $('versionTag').textContent = latest ? 'Latest' : current ? ago(current.time) : '';
@@ -474,7 +477,7 @@ function attachmentItem(t, a, can) {
     }
   }
   // A comment link may remove only what comment links attached (src/index.ts, Attachments).
-  if (can.edit || (can.commentBox && a.user === 'comment-link')) {
+  if (can.edit || (can.attach && a.user === 'comment-link')) {
     const remove = el('button', { type: 'button', className: 'detach', textContent: 'Remove' });
     remove.setAttribute('aria-label', `Remove ${a.name}`);
     remove.addEventListener('click', async () => {
@@ -560,6 +563,8 @@ function threadView(t, can) {
   if (reply) {
     reply.querySelector('textarea').setAttribute('aria-label', `Reply to ${t.title}`);
     reply.querySelector('.resolve').textContent = t.resolved ? 'Reopen' : 'Resolve';
+    reply.querySelector('.resolve').hidden = !can.moderate;
+    reply.querySelector('.attach').hidden = !can.attach;
   }
   view.dataset.label = String(t.label);
   view.dataset.anchored = anchored(t);
@@ -602,6 +607,7 @@ function replyForm(t) {
     commentBusy = resolve.disabled = send.disabled = text.readOnly = true;
     showPosting(status, doing, !!body.text);
     try {
+      if (body.text) await guestUI.ensureProfile();
       await art.comment({ ticketUuid: t.uuid, ...body });
       if (body.text) { drafts.delete(t.uuid); text.value = ''; }
       if (body.status) expanded.delete(t.uuid);
@@ -825,6 +831,7 @@ function revalidateAccount() {
     // account chrome or inventory yet: build both, never reuse the old ones.
     if (sidebarUnavailable) { showAccountChrome(); loadLibrary(); }
     else if (navOpen) loadLibrary();
+    if (!$('shareMenu').hidden && !$('guestManagement').hidden) guestUI.loadGuests(false, { revalidateOnly: true });
   });
 }
 setInterval(revalidateAccount, SESSION_WATCH_MS);
@@ -892,7 +899,7 @@ function rowNode(r) {
  */
 function paintProgress() {
   const name = info?.attached?.responder;
-  const progress = responderProgress({ threads, status: responderStatus, responder: typeof name === 'string' ? name : '', now: Date.now() });
+  const progress = responderProgress({ threads, status: responderStatus, responder: typeof name === 'string' ? name : '', now: Date.now(), guestDiscussion: !!info.guestDiscussion });
   for (const [uuid, view] of views) {
     const p = progress.get(uuid);
     const body = view.querySelector('.thread-body');
@@ -1096,6 +1103,7 @@ $('commentForm').addEventListener('submit', async e => {
   commentBusy = button.disabled = $('commentText').readOnly = true;
   showPosting($('commentStatus'), 'Posting…', true);
   try {
+    await guestUI.ensureProfile();
     // The version on screen, so a responder can read the page as the reader saw it.
     const result = await art.comment({ text, ...(anchor ? { anchor } : {}), ...(shown?.checkin ? { version: shown.checkin } : {}) });
     $('commentText').value = '';
@@ -1567,6 +1575,7 @@ function renderShare() {
   const can = controls(info);
   // Named access and public snapshots belong to signed-in management only.
   $('peopleSection').hidden = !info.canManage;
+  guestUI.render();
   $('publicationSection').hidden = !info.canManage;
   $('publishPublic').disabled = publicationBusy;
   $('publishPublic').textContent = publicationBusy ? 'Working…' : `Publish version ${shortId(shown.checkin)}`;
@@ -1620,6 +1629,7 @@ for (const [btn, menu] of popovers) {
       shareTab('share');
       loadPublications();
       loadPeople();
+      guestUI.loadGuests();
     }
   });
   $(menu).addEventListener('click', e => e.stopPropagation());
@@ -2007,6 +2017,16 @@ async function reload(show) {
   }
 }
 
+const guestUI = guestPanel({
+  artifact: () => art,
+  info: () => info,
+  account: () => confirmAccount({ fresh: true }),
+  current: async expected => (await confirmAccount({ fresh: true })) === expected,
+  manage: manageRequest,
+  path: managePath,
+  refresh: () => loadPeople(true),
+});
+
 async function main() {
   const m = /^\/v\/([A-Za-z0-9_-]{1,64})$/.exec(location.pathname);
   if (!m || !NONCE) return fail('Open an artifact link: /v/<id>#<token>');
@@ -2017,6 +2037,7 @@ async function main() {
   }
   art = new Artifact(location.origin, m[1], link.token);
   await reload(true);
+  await guestUI.loadProfile();
   await loadThreads();
   startSidebar();
 }

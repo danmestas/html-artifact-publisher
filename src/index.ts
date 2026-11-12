@@ -58,6 +58,10 @@ import { ticketAuthor } from './ticket-author';
 import type { Caller, Role } from './repo';
 import { TICKET_BODY, ticketChange } from './ticket-body';
 import { ticketKind, wake, wakeKind, type WakeKind } from './wake';
+import {
+  GUEST_ARTIFACT_POSTS, GUEST_BODY, GUEST_CLAIM_IP, GUEST_CLAIM_ID, GUEST_IP_POSTS, GUEST_POSTS,
+  GUEST_PROFILE_ID, GUEST_PROFILE_IP, GUEST_WINDOW, guestCookie, guestInput, guestToken, rateWait, type RateKey,
+} from './guest';
 
 export { Repo, Registry };
 
@@ -81,10 +85,10 @@ function corsHeaders(): Record<string, string> {
   };
 }
 
-function json(data: unknown, status = 200): Response {
+function json(data: unknown, status = 200, extra: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...corsHeaders(), ...secHeaders() },
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...corsHeaders(), ...secHeaders(), ...extra },
   });
 }
 
@@ -160,6 +164,197 @@ function changeAuthor(role: Role | null, actor: Actor): string {
   return ticketAuthor(role === 'comment' ? { kind: 'comment' }
     : actor.user ? { kind: 'account', name: actor.user.name }
     : actor.legacy ? { kind: 'owner' } : { kind: 'edit' });
+}
+
+/**
+ * A read credential's POST …/tickets: shared discussion from an identified
+ * guest. The Repo rechecks the read role, the guest profile and its block in
+ * one call, so a credential revoked between the route's check and the write
+ * cannot post. Wakes nobody: ordinary discussion is not agent work, and the
+ * upstream responder gates on the marker this writes.
+ */
+async function guestDiscussion(
+  req: Request, env: Env, id: string, who: Caller, change: NonNullable<ReturnType<typeof ticketChange>>,
+): Promise<Response> {
+  // Responder identity is the edit link's alone; a guest cannot claim it.
+  if (change.asResponder) return json({ error: 'asResponder needs the edit link' }, 403);
+  const tokenIn = guestToken(req);
+  // No token is no identity: an empty token must never hash into one.
+  const hash = tokenIn ? await sha256hex(tokenIn) : '';
+  const reg = registry(env);
+  const ip = await clientKey(req, 'guest-post', GUEST_IP_POSTS);
+  const keys: RateKey[] = [
+    [`guest-post-artifact:${id}`, GUEST_ARTIFACT_POSTS],
+    ip,
+    ...(hash ? [[`guest-post:${hash}`, GUEST_POSTS] as RateKey] : []),
+  ];
+  if (!(await guestRates(reg, keys))) return rateLimited(env, keys);
+  const r = await repo(env, id).guestPost(who, hash, {
+    text: change.ticketUuid ? change.comment : change.fields.comment ?? '',
+    ticketUuid: change.ticketUuid, anchor: change.fields.subsystem ?? '',
+    version: change.fields.foundin ?? '',
+    // A new thread's Open status is the schema's, not the client's; only a
+    // reply can carry a status the client chose.
+    status: change.ticketUuid && (change.fields.status === 'Open' || change.fields.status === 'Closed') ? change.fields.status : '',
+  });
+  if (!r.ok || !r.result) return reply(r);
+  return json(r.result, change.ticketUuid ? 200 : 201);
+}
+
+// ─── Guest discussion ────────────────────────────────────────────────────────
+//
+// A read-link holder (or an account with only read access) identifies with a
+// display name and discusses in the ordinary thread view. The profile lives in
+// the artifact's Repo, never in Fossil: a ticket change carries only the
+// server-derived display name and the discussion marker, so no email, token or
+// hash reaches a clone, a timeline, a wake or another reader.
+
+/** A 429 for a refused write, with the longest wait among the keys that refused. */
+async function rateLimited(env: Env, keys: RateKey[]): Promise<Response> {
+  const retryAfter = Math.max(1, Math.ceil(await rateWait(registry(env), keys)));
+  return json({ error: 'too many requests: wait a few minutes', code: 'rate_limited', retryAfter }, 429, { 'Retry-After': String(retryAfter) });
+}
+/** Count one attempt against each key's own limit. */
+function guestRates(reg: ReturnType<typeof registry>, keys: RateKey[]): Promise<boolean> {
+  return reg.rate(keys, 0, GUEST_WINDOW);
+}
+
+/** The client address, hashed before it is counted or stored. */
+async function clientKey(req: Request, kind: string, limit: number): Promise<RateKey> {
+  return [`${kind}-ip:${await sha256hex(req.headers.get('CF-Connecting-IP') ?? 'local')}`, limit];
+}
+
+/** Whether `caller` may manage this artifact's guests: the owner, or the instance owner. */
+function guestManager(actor: Actor, entry: { ownerId?: string } | null): boolean {
+  return actor.legacy || !!(actor.user && (actor.user.role === 'owner' || entry?.ownerId === actor.user.id));
+}
+
+function guestProfile(guest: { id: string; name: string; email: string; claimedAccountId: string | null }) {
+  return {
+    id: guest.id, name: guest.name, email: guest.email,
+    ...(guest.claimedAccountId ? { claimedAccountId: guest.claimedAccountId } : {}),
+  };
+}
+
+/** GET/PUT /api/artifacts/:id/guest — the caller's own profile on this artifact. */
+async function handleGuest(req: Request, env: Env, id: string, who: Caller, actor: Actor, canManage: boolean): Promise<Response> {
+  const role = await repo(env, id).role(who);
+  if (!role) return json({ error: 'not found', code: 'not_found' }, 404);
+  const stub = repo(env, id), tokenIn = guestToken(req);
+  // No token is no identity: an empty token must never hash into one.
+  const hash = tokenIn ? await sha256hex(tokenIn) : '';
+  if (req.method === 'GET') {
+    const guest = await stub.guestByToken(hash);
+    // A manager sees only its own profile here; every guest is a separate review path.
+    return json({ guest: guest ? guestProfile(guest) : null, canComment: role !== 'read' || !guest?.blocked, canManage });
+  }
+  if (req.method !== 'PUT') return json({ error: 'Method Not Allowed' }, 405);
+  if (!csrf(req)) return json({ error: 'Matching Origin required' }, 403);
+  const input = guestInput(await readBody(req, 4096));
+  if (!input) return json({ error: GUEST_BODY }, 400);
+  // One address may create identities; each existing identity may update itself.
+  const keys: RateKey[] = [await clientKey(req, 'guest-profile', GUEST_PROFILE_IP)];
+  if (hash) keys.unshift([`guest-profile:${hash}`, GUEST_PROFILE_ID]);
+  if (!(await guestRates(registry(env), keys))) return rateLimited(env, keys);
+  if (!hash) {
+    // A new identity: mint a token, keep only its hash, and give the cookie now.
+    const token = genToken();
+    const { guest } = await stub.guestIdentify(await sha256hex(token), input.name, input.email);
+    return json({ guest: guestProfile(guest), canComment: true, canManage }, 200, { 'Set-Cookie': guestCookie(req, token) });
+  }
+  const { guest } = await stub.guestIdentify(hash, input.name, input.email);
+  return json({ guest: guestProfile(guest), canComment: role !== 'read' || !guest.blocked, canManage });
+}
+
+/** POST /api/artifacts/:id/guest/claim — link the cookie's guest to the signed-in account. */
+async function handleGuestClaim(req: Request, env: Env, id: string, who: Caller, actor: Actor): Promise<Response> {
+  if (req.method !== 'POST') return json({ error: 'Method Not Allowed' }, 405);
+  const b = await readBody(req, 1024);
+  if (!b || Object.keys(b).length) return json({ error: 'Body must be an empty JSON object: the guest cookie and the signed-in account are the proof' }, 400);
+  if (!(await repo(env, id).role(who))) return json({ error: 'not found', code: 'not_found' }, 404);
+  // An explicit Token header authorizes the artifact; the account identity must
+  // independently come from the session cookie, so a Token header cannot be
+  // mistaken for a verified sign-in (and an explicit Bearer cannot bypass it).
+  const session = /(?:^|;\s*)artifact_session=([a-f0-9]{64})(?:;|$)/.test(req.headers.get('Cookie') ?? '');
+  const signedIn = session
+    ? (await identity(new Request(req.url, { headers: new Headers([...req.headers].filter(([k]) => k.toLowerCase() !== 'authorization')) }), env)).user
+    : actor.user;
+  if (!signedIn) return json({ error: 'Sign in to a verified account before claiming' }, 401);
+  if (signedIn.status !== 'active') return json({ error: 'Only an active account may claim a guest profile' }, 403);
+  const tokenIn = guestToken(req);
+  const hash = tokenIn ? await sha256hex(tokenIn) : '';
+  if (!hash) return json({ error: 'No guest identity on this request' }, 403);
+  const ip = await clientKey(req, 'guest-claim', GUEST_CLAIM_IP);
+  const keys: RateKey[] = [[`guest-claim:${hash}`, GUEST_CLAIM_ID], ip];
+  if (!(await guestRates(registry(env), keys))) return rateLimited(env, keys);
+  const outcome = await repo(env, id).guestClaim(hash, signedIn.id);
+  if (outcome === 'missing') return json({ error: 'No guest identity on this artifact; identify first' }, 403);
+  if (outcome === 'blocked') return json({ error: 'This guest is blocked from discussing this artifact' }, 403);
+  if (outcome === 'conflict') return json({ error: 'This guest identity is already linked to another account. Use that account or start a separate browser identity.' }, 409);
+  return json({ ok: true });
+}
+
+/** GET /api/artifacts/:id/guests, PATCH …/guests/:guestId, POST …/guests/:guestId/upgrade — the owner's review. */
+async function handleGuestAdmin(req: Request, env: Env, id: string, rest: string, actor: Actor, entry: { ownerId?: string; title?: string } | null): Promise<Response | null> {
+  if (rest !== '/guests' && !rest.startsWith('/guests/')) return null;
+  // A deleted artifact has no owner to check against, and no Repo to page.
+  if (!entry) return json({ error: 'not found', code: 'not_found' }, 404);
+  if (!guestManager(actor, entry)) return json({ error: 'Artifact owner required', code: 'forbidden' }, 403);
+  const url = new URL(req.url), stub = repo(env, id);
+  // Registry may still project an older deadline. Private participants follow
+  // the Repo's authoritative expiry, even while alarm/projection cleanup waits.
+  if (!(await stub.info())) return json({ error: 'not found', code: 'not_found' }, 404);
+  if (rest === '/guests') {
+    if (req.method !== 'GET') return json({ error: 'Method Not Allowed' }, 405);
+    const raw = url.searchParams.get('limit') ?? '50';
+    if (!/^[1-9][0-9]{0,2}$/.test(raw) || Number(raw) > 100) return json({ error: 'limit must be 1 to 100' }, 400);
+    const cursor = url.searchParams.get('cursor') ?? '';
+    let decoded = '';
+    if (cursor) {
+      try {
+        const v: unknown = JSON.parse(cursor);
+        if (!Array.isArray(v) || v.length !== 2 || !Number.isSafeInteger(v[0]) || typeof v[1] !== 'string') return json({ error: 'Invalid cursor' }, 400);
+        decoded = cursor;
+      } catch { return json({ error: 'Invalid cursor' }, 400); }
+    }
+    const page = await stub.guests(Number(raw), decoded);
+    const guests = [];
+    for (const g of page.guests) {
+      // The claimed account is shown for review; its status is rechecked at upgrade time.
+      const account = g.claimedAccountId ? await registry(env).account(g.claimedAccountId) : null;
+      guests.push({
+        id: g.id, name: g.name, email: g.email, blocked: g.blocked,
+        claimedAccountId: g.claimedAccountId, claimedAccountName: account?.name ?? null,
+        claimedAccountEmail: account?.email ?? null, permission: g.permission, createdAt: isoOrNull(g.createdAt),
+      });
+    }
+    return json({ guests, nextCursor: page.nextCursor });
+  }
+  const match = /^\/guests\/([A-Za-z0-9_-]{1,64})(\/upgrade)?$/.exec(rest);
+  if (!match) return json({ error: 'Not Found' }, 404);
+  const guestId = match[1]!, upgrade = !!match[2];
+  const g = await stub.guest(guestId);
+  if (!g) return json({ error: 'not found', code: 'not_found' }, 404);
+  if (!upgrade) {
+    if (req.method !== 'PATCH') return json({ error: 'Method Not Allowed' }, 405);
+    const b = await readBody(req, 1024);
+    if (!b || Object.keys(b).length !== 1 || typeof b.blocked !== 'boolean') return json({ error: 'Body must be exactly {"blocked": true|false}' }, 400);
+    if (!(await stub.guestBlock(guestId, b.blocked))) return json({ error: 'not found', code: 'not_found' }, 404);
+    return json({ ok: true });
+  }
+  if (req.method !== 'POST') return json({ error: 'Method Not Allowed' }, 405);
+  const b = await readBody(req, 1024);
+  if (!b || Object.keys(b).length !== 1 || (b.permission !== 'read' && b.permission !== 'write')) {
+    return json({ error: 'Body must be exactly {"permission": "read"} or {"permission": "write"}' }, 400);
+  }
+  if (!g.claimedAccountId) return json({ error: 'The guest has not claimed a verified account' }, 400);
+  // Recheck at grant time: a disabled or withdrawn account gains nothing.
+  const account = await registry(env).account(g.claimedAccountId);
+  if (!account || account.status !== 'active') return json({ error: 'The claimed account is not active' }, 400);
+  await registry(env).grant(id, account.id, b.permission);
+  await stub.guestPermission(guestId, b.permission);
+  await registry(env).audit(actor.user?.id ?? 'instance-owner', 'guest_upgrade', id, entry?.title ?? null, `${account.id}:${b.permission}`);
+  return json({ ok: true });
 }
 
 // ─── Attachments ─────────────────────────────────────────────────────────────
@@ -445,6 +640,11 @@ async function handleArtifact(req: Request, env: Env, ctx: ExecutionContext, id:
       ]);
       return json({
         id, title: meta?.title, icon: entry?.icon ?? 'document', role, expiresAt: isoOrNull(meta?.expiresAt ?? null), ...r.result, canManage,
+        // A read-link holder (or a read-role account) may discuss as a guest;
+        // moderation stays with the existing comment and edit roles.
+        canComment: role !== 'read' || !(await stub.guestByToken(guestToken(req) ? await sha256hex(guestToken(req)) : ''))?.blocked,
+        canModerate: role === 'comment' || role === 'write',
+        guestDiscussion: true,
         attached: attachedFrom(flag.ok ? flag.result?.data : null),
         ...(readToken ? { readToken } : {}), ...(commentToken ? { commentToken } : {}),
       });
@@ -529,6 +729,14 @@ async function handleArtifact(req: Request, env: Env, ctx: ExecutionContext, id:
     });
   }
 
+  if ((rest === '/guest' || rest === '/guest/claim') && method !== 'GET' && !csrf(req)) {
+    return json({ error: 'Matching Origin required' }, 403);
+  }
+  if (rest === '/guest') return handleGuest(req, env, id, who, actor, canManage);
+  if (rest === '/guest/claim') return handleGuestClaim(req, env, id, who, actor);
+  const guestAdmin = await handleGuestAdmin(req, env, id, rest, actor, entry);
+  if (guestAdmin) return guestAdmin;
+
   if (rest === '/tickets' && method === 'GET') {
     // One engine call however many tickets there are: a comment link can add
     // tickets, and none can be deleted.
@@ -539,7 +747,7 @@ async function handleArtifact(req: Request, env: Env, ctx: ExecutionContext, id:
       stub.op(who, { op: 'uvGet', name: RESPONDER_STATUS_FILE }) as Promise<FossilReply<{ data: string | null }>>,
     ]);
     if (!r.ok || !r.result) return reply(r);
-    return json({ ...r.result, responder: statusFrom(status.ok ? status.result?.data : null) });
+    return json({ ...r.result, guestDiscussion: true, responder: statusFrom(status.ok ? status.result?.data : null) });
   }
   if (rest === '/responder-status' && method === 'PUT') {
     const change = statusRequest(await readBody(req, 1024));
@@ -553,6 +761,10 @@ async function handleArtifact(req: Request, env: Env, ctx: ExecutionContext, id:
     const change = b && ticketChange(b);
     if (!change) return json({ error: TICKET_BODY }, 400);
     const role = await stub.role(who);
+    // A read credential discusses only as an identified guest. The server
+    // decides the author and the discussion marker; the request cannot choose
+    // either, and no wake is sent for it.
+    if (role === 'read') return guestDiscussion(req, env, id, who, change);
     let user = changeAuthor(role, actor);
     if (change.asResponder) {
       // Only the edit link itself: attached.json is what it can already set.

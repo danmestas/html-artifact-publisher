@@ -1,6 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { anchorFor, arrange, attachmentDisplay, decodePointAnchor, encodePointAnchor, findQuotes, thread } from '../public/comments.js';
+import { anchorFor, arrange, attachmentDisplay, controls, decodePointAnchor, encodePointAnchor, findQuotes, thread } from '../public/comments.js';
+
+test('a guest discussion reader can comment without editing, moderation or attachment powers', () => {
+  const guest = controls({ role: 'read', canComment: true, canModerate: false });
+  assert.equal(guest.threads, true);
+  assert.equal(guest.commentBox, true);
+  assert.equal(guest.edit, false);
+  assert.equal(guest.publish, false);
+  assert.equal(guest.moderate, false);
+  assert.equal(guest.attach, false);
+  assert.equal(controls({ role: 'read', canComment: false }).commentBox, false);
+});
 
 test('point anchors have a bounded, exact wire format and round normalized positions', () => {
   const anchor = encodePointAnchor({ id: 'intro', path: [1, 0], x: .123456, y: 1 });

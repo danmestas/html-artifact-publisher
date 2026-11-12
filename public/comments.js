@@ -38,7 +38,9 @@ export function controls(info) {
   const role = info.role;
   return {
     threads: role === 'read' || role === 'comment' || role === 'write',
-    commentBox: role === 'comment' || role === 'write', // also reply, resolve and reopen
+    commentBox: info.canComment ?? (role === 'comment' || role === 'write'),
+    moderate: info.canModerate ?? (role === 'comment' || role === 'write'),
+    attach: role === 'comment' || role === 'write',
     edit: role === 'write', // upload, restore, delete
     publish: !!info.canManage, // public snapshots
     commentLink: role === 'write' && typeof info.commentToken === 'string',
@@ -70,7 +72,8 @@ export function thread(ticket) {
   const messages = ticket.changes.map((c, i) => {
     const text = c.comment || (i === 0 ? c.fields.comment ?? '' : '');
     const status = i === 0 ? '' : c.fields.status ?? '';
-    return { user: c.user, time: c.time, text, status, change: c.artifact };
+    return { user: c.user, time: c.time, text, status, change: c.artifact,
+      ...(c.fields.authority ? { authority: c.fields.authority, intent: c.fields.intent } : {}) };
   });
   const checkins = [...new Set(messages.slice(1).flatMap(m => [...m.text.matchAll(CHECKIN)].map(x => x[1])))];
   const status = ticket.status || 'Open';
@@ -148,14 +151,17 @@ function receipt(change, entry, name) {
  * ('' for none, which shows nothing), `now` epoch milliseconds. Resolved
  * threads show nothing. Pure, so the viewer can re-derive it every second.
  */
-export function responderProgress({ threads, status, responder, now }) {
+export function responderProgress({ threads, status, responder, now, guestDiscussion = false }) {
   const out = new Map();
   if (!responder) return out;
   const name = responder, author = responderAuthor(name);
   const entries = status && typeof status.threads === 'object' && status.threads !== null ? status.threads : {};
   const states = threads.filter(t => !t.resolved).map(t => {
     const answered = t.messages.findLastIndex(m => m.user === author);
-    const pending = t.messages.map((m, i) => i).filter(i => i > answered && t.messages[i].text && t.messages[i].user !== author);
+    // On discussion-enabled artifacts, unmarked history fails closed too.
+    // Only server-proven privileged requests participate in editor progress.
+    const pending = t.messages.map((m, i) => i).filter(i => i > answered && t.messages[i].text && t.messages[i].user !== author
+      && (!guestDiscussion || t.messages[i].authority === 'edit'));
     return { t, answered, pending, entry: entryFor(t, entries[t.uuid], pending) };
   });
   // Only a status that still speaks for an unanswered thread holds the others up.

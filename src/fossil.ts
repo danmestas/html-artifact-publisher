@@ -94,7 +94,7 @@ class Abort extends Error {}
  * Run one request against `storage`. A failed or rolled-back request leaves
  * the database exactly as it was.
  */
-export function run<T>(storage: DurableObjectStorage, request: FossilRequest, body?: Uint8Array): FossilReply<T> {
+export function run<T>(storage: DurableObjectStorage, request: FossilRequest, body?: Uint8Array, onSuccess?: (result: T | undefined) => void): FossilReply<T> {
   const fossil = boot();
   let reply: FossilReply<T> = {};
   try {
@@ -102,6 +102,8 @@ export function run<T>(storage: DurableObjectStorage, request: FossilRequest, bo
       current = storage.sql;
       reply = JSON.parse(fossil.call(JSON.stringify(request), body)) as FossilReply<T>;
       if (!reply.ok || reply.aborted) throw new Abort();
+      // Private server metadata must commit or roll back with the Fossil write.
+      onSuccess?.(reply.result);
     });
   } catch (e) {
     if (!(e instanceof Abort)) throw e;

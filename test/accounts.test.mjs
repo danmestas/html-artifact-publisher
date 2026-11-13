@@ -46,7 +46,7 @@ async function create(auth,extra={}) {
   assert.equal(r.status,201,r.text); return r.json;
 }
 before(async () => {
-  server=spawn(join(root,'node_modules/.bin/wrangler'),['dev','--port',String(port),'--ip','127.0.0.1','--persist-to',join(work,'state'),'--var',`BEARER_TOKEN:${legacy}`,'--var','OWNER_EMAIL:owner@example.com','--var',`APP_ORIGIN:${base}`,'--var','TEST_MAIL_TRANSPORT:loopback','--show-interactive-dev-session=false'],{cwd:root,stdio:['ignore','pipe','pipe'],detached:true});
+  server=spawn(join(root,'node_modules/.bin/wrangler'),['dev','--port',String(port),'--inspector-port','0','--ip','127.0.0.1','--persist-to',join(work,'state'),'--var',`BEARER_TOKEN:${legacy}`,'--var','OWNER_EMAIL:owner@example.com','--var',`APP_ORIGIN:${base}`,'--var','TEST_MAIL_TRANSPORT:loopback','--show-interactive-dev-session=false'],{cwd:root,stdio:['ignore','pipe','pipe'],detached:true});
   server.stdout.on('data',d=>{startupLog+=d;});server.stderr.on('data',d=>{startupLog+=d;});
   for (let i=0;i<120;i++) { try { if ((await fetch(base+'/healthz')).ok) return; } catch {} await new Promise(r=>setTimeout(r,1000)); }
   throw new Error(`Wrangler failed to start: ${startupLog}`);

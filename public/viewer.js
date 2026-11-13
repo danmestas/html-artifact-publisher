@@ -11,7 +11,7 @@ import { zip } from './zip.js';
 import { setArtifactFavicon } from './icons.js';
 setArtifactFavicon('document');
 import { preparePublication } from './export.js';
-import { anchorFor, arrange, attachmentDisplay, controls, decodePointAnchor, encodePointAnchor, findQuotes, responderNote, responderProgress, thread } from './comments.js';
+import { anchorFor, arrange, attachmentDisplay, bubblePlacement, controls, decodePointAnchor, encodePointAnchor, findQuotes, responderNote, responderProgress, thread } from './comments.js';
 import { guestPanel } from './guest-panel.js';
 import { typeOf } from './blobs.js';
 import { pagePins } from './page-pins.js';
@@ -303,6 +303,7 @@ async function render() {
   const frame = $('frame');
   closeInspector();
   setPlacement(false);
+  closeBubbleForPage();
   frameReady = false;
   pageCanvas = null; // the new page reports its own canvas once it loads
   paintBackdrop();
@@ -433,8 +434,11 @@ let placed = null;       // labels the page placed, or null before it answered
 let selection = '';      // the anchor of the reader's selection in the page
 let focused = '';        // uuid of the thread a pin opened
 let markersVisible = true; // local to this viewer; threads and anchors remain available
-let placing = false;     // explicit reader consent to pick a location
+let placing = false;     // the placement toggle: the page takes the next click
 let panelPoint = null;   // active anchor in the iframe's viewport coordinates
+let bubblePoint = null;  // where the comment bubble was opened, in iframe coordinates
+let bubbleAnchor = '';   // the bubble's own anchor, bound when it opens
+let bubbleVersion = '';  // the check-in the bubble's draft was started on
 let draftAnchor = '';    // a picked location survives closing the composer
 let commentBusy = false;
 let trackedAnchor = '';  // echoed by the page; stale position messages are ignored
@@ -680,9 +684,13 @@ function renderAnchor() {
   const anchor = draftAnchor || selection;
   $('commentAnchor').textContent = anchor ? `On ${anchorName(anchor)}` : 'Comment on the page, select text, or place a comment anywhere.';
   $('anchorClear').hidden = !anchor;
+  $('bubbleAnchor').textContent = anchorName(anchor) || 'This page location';
   $('placeComment').hidden = $('generalComment').hidden = !controls(info).commentBox;
+  $('commentsBtn').hidden = !controls(info).commentBox;
+  if (!controls(info).commentBox && placing) setPlacement(false);
   $('placeComment').textContent = draftAnchor ? 'Continue draft' : 'Place a comment';
   $('generalComment').textContent = selection ? 'Comment on selection' : 'General comment';
+  $('bubbleGeneral').hidden = !controls(info).commentBox;
 }
 
 /** A message to the page's pins (page-pins.js). The page's origin is opaque, so '*'. */
@@ -751,7 +759,7 @@ const pagePoint = d => Number.isFinite(d.x) && Number.isFinite(d.y)
   && Math.abs(d.x) <= 10_000_000 && Math.abs(d.y) <= 10_000_000 ? { x: d.x, y: d.y } : null;
 function isTyping() {
   const active = document.activeElement;
-  return active?.matches('#threadPanel textarea') && active.value.trim();
+  return active?.matches('#threadPanel textarea, #bubbleText') && active.value.trim();
 }
 addEventListener('message', e => {
   const d = e.data;
@@ -767,7 +775,9 @@ addEventListener('message', e => {
   } else if (d.type === 'open' && Number.isInteger(d.key)) {
     const t = threads.find(x => x.label === d.key);
     if (!t || isTyping() || commentBusy) return;
-    activateThread(t, pagePoint(d));
+    // A pin opens its thread where the reader clicked it, as an anchored card,
+    // and placement stays armed: the next blank-page click starts a new one.
+    activateThread(t, pagePoint(d) ?? { x: $('frame').clientWidth / 2, y: 40 }, { keepPlacement: true, card: true });
   } else if (d.type === 'selection' && typeof d.anchor === 'string' && controls(info).commentBox) {
     selection = Array.from(d.anchor).slice(0, 500).join('');
     renderAnchor();
@@ -775,20 +785,22 @@ addEventListener('message', e => {
     && decodePointAnchor(d.anchor)) {
     draftAnchor = d.anchor;
     selection = '';
-    setPlacement(false);
-    openInspector('comments', 'draft', pagePoint(d));
+    // Placement is a mode, not one shot: taking a point opens the bubble and
+    // leaves the toggle on, so another click moves the bubble without re-arming.
+    openBubble(pagePoint(d));
     renderAnchor();
     trackAnchor(draftAnchor);
-    $('commentText').focus();
   } else if (d.type === 'position' && !$('threadPanel').hidden && trackedAnchor && d.anchor === trackedAnchor) {
     if (d.unavailable === true) {
       panelPoint = null;
       $('commentsNote').textContent = 'Location not found';
     } else if (pagePoint(d)) {
       panelPoint = pagePoint(d);
+      placeInspector();
     }
   } else if (d.type === 'cancel' && placing) {
     setPlacement(false);
+    closeBubble(true);
     closeInspector(true);
   } else if (d.type === 'dismiss' && !placing && !isTyping() && !commentBusy) {
     closePopovers();
@@ -938,55 +950,196 @@ function renderResponder() {
 
 // ─── The inspector: version history or comments, one at a time ─────────────
 //
-// Docked beside the page on wide screens, an overlay on narrow ones. Opening,
-// switching, closing or resizing it never reloads the page: the iframe keeps
-// its document, scroll position and selection, and the panel keeps its drafts
-// and expanded threads because they live in this module, not in the DOM.
+// Two comment shapes, one element. The discussion index overlays the page;
+// version history alone docks beside it on wide screens. A thread opened
+// from a pin is instead an anchored card: the
+// same panel, positioned by the click, clamped to the page area, and never
+// reshaping the iframe. Opening, switching, closing or resizing any of them
+// never reloads the page: the iframe keeps its document, scroll position and
+// selection, and the panel keeps its drafts and expanded threads because they
+// live in this module, not in the DOM.
+//
+// Comments are two different motions. The comments button is a placement
+// toggle: while it is on, a click on the page drops a comment bubble right
+// where the reader clicked, over the page, without opening the inspector or
+// reflowing anything. A click on an existing pin opens that thread's card at
+// the pin, and leaves the toggle alone.
 
 const inspectorQuery = matchMedia('(max-width: 1050px)');
 let inspectorMode = ''; // '' when closed, else 'comments' or 'history'
 let inspectorReturn = null; // the control that opened it, focused again on close
+let inspectorCard = false;  // a thread opened from a pin, anchored over the page
 
 function panelScroller() {
   return $('threadPanel').hidden ? ($('historyPanel').hidden ? null : $('historyPanel').querySelector('.panel-scroll')) : $('threadPanel').querySelector('.panel-scroll');
 }
 
+/** A thread opened from a pin reads as a card; the index and history do not. */
+const cardMode = () => inspectorCard && inspectorMode === 'comments' && $('threadPanel').dataset.mode === 'thread';
+
+const CARD_WIDE = 380, CARD_NARROW = 360, CARD_MAX_H = 640, CARD_HINT = 420;
+
 /**
- * The inspector is docked (wide) or a full-height overlay (narrow), so there is
- * no floating card to place. This only clears any stale inline geometry and,
- * while an anchor is tracked, keeps it out of the layout's way.
+ * The visible area an anchored card may occupy: the page's box, trimmed by the
+ * keyboard or URL bar the visual viewport reports. Position is fixed, so
+ * visualViewport offsets are added back to viewport coordinates.
  */
+function overlayBounds() {
+  const frame = pageBounds();
+  const vv = visualViewport;
+  if (!vv) return frame;
+  const left = Math.max(frame.left, vv.offsetLeft);
+  const top = Math.max(frame.top, vv.offsetTop);
+  const right = Math.min(frame.left + frame.width, vv.offsetLeft + vv.width);
+  const bottom = Math.min(frame.top + frame.height, vv.offsetTop + vv.height);
+  return { left, top, width: Math.max(0, right - left), height: Math.max(0, bottom - top) };
+}
+
+/** The panel's card geometry for the anchor at `point`, or null when it is not a card. */
+function cardPlacement(point) {
+  if (!cardMode() || !point) return null;
+  const bounds = overlayBounds();
+  const width = Math.min(innerWidth <= 640 ? CARD_NARROW : CARD_WIDE, Math.max(0, bounds.width));
+  const maxHeight = Math.min(CARD_MAX_H, Math.max(0, bounds.height - 24));
+  // A hidden panel has no height to measure; a card that is already showing
+  // gives its real one, so a flip decision matches what the reader sees.
+  const inspector = $('inspector');
+  const measured = inspector.hidden ? 0 : inspector.getBoundingClientRect().height;
+  const height = Math.min(maxHeight, measured > 0 ? measured : CARD_HINT);
+  const frame = pageBounds();
+  const origin = { x: frame.left + point.x, y: frame.top + point.y };
+  const spot = bubblePlacement(origin, { width, height }, bounds);
+  return { ...spot, width, maxHeight };
+}
+
+/** Place the card, or clear stale geometry when the panel is docked. Also keeps the bubble in view. */
 function placeInspector() {
-  if (!inspectorMode) return;
-  const panel = $('threadPanel');
-  panel.style.removeProperty('top');
-  panel.style.removeProperty('left');
-  panel.style.removeProperty('right');
-  panel.style.removeProperty('margin-top');
-  panel.style.removeProperty('max-height');
+  const card = cardPlacement(panelPoint);
+  const inspector = $('inspector');
+  inspector.classList.toggle('card', !!card);
+  for (const property of ['top', 'left', 'width', 'max-height']) inspector.style.removeProperty(property);
+  if (card) {
+    // Fixed in viewport coordinates: the card stands over the page and takes
+    // no room in the viewer's flex row, so the iframe keeps its width.
+    Object.assign(inspector.style, {
+      top: `${card.y}px`, left: `${card.x}px`, width: `${card.width}px`, maxHeight: `${card.maxHeight}px`,
+    });
+  }
+  if (bubbleVisible()) placeBubble();
+}
+
+/** Frame and keyboard changes move the card with the page; it never moves the page. */
+function placeOverlays() {
+  placeInspector();
+  if (bubbleVisible()) placeBubble();
+}
+new ResizeObserver(placeOverlays).observe($('frame'));
+visualViewport?.addEventListener('resize', placeOverlays);
+visualViewport?.addEventListener('scroll', placeOverlays);
+
+// ─── The comment bubble: an overlay at the reader's click ──────────────────
+//
+// The bubble is a card in the viewer, not the page: it floats over the page's
+// box and never changes the iframe's size, so the page itself does not reflow
+// when someone comments. Posting still uses the same ticket route; the anchor
+// is the clicked location, already decoded by the page and re-validated here.
+
+const bubble = () => $('commentBubble');
+
+function bubbleVisible() { return !!bubblePoint && !$('commentBubble').hidden; }
+
+/** The page's visible area in the viewer's viewport, as the bubble's bounds. */
+function pageBounds() {
+  const r = $('frame').getBoundingClientRect();
+  return { left: r.left, top: r.top, width: r.width, height: r.height };
+}
+
+function placeBubble() {
+  if (!bubbleVisible()) return;
+  const bounds = overlayBounds();
+  // A phone keyboard can leave less space than the composer's natural height.
+  // Bound the box first, then measure it; its contents remain scrollable.
+  bubble().style.maxHeight = `${Math.max(0, bounds.height - 16)}px`;
+  bubble().style.maxWidth = `${Math.max(0, bounds.width - 16)}px`;
+  const rect = bubble().getBoundingClientRect();
+  const size = { width: rect.width || 320, height: rect.height || 200 };
+  const frame = pageBounds();
+  const point = { x: frame.left + bubblePoint.x, y: frame.top + bubblePoint.y };
+  const spot = bubblePlacement(point, size, bounds);
+  bubble().style.left = `${spot.x}px`;
+  bubble().style.top = `${spot.y}px`;
+}
+
+function openBubble(point) {
+  bubblePoint = point;
+  bubbleAnchor = draftAnchor;
+  bubbleVersion = shown?.checkin ?? '';
+  $('bubbleStatus').textContent = '';
+  closeInspector();
+  $('commentBubble').hidden = false;
+  renderAnchor();
+  placeBubble();
+  requestAnimationFrame(placeBubble);
+  $('bubbleText').focus({ preventScroll: true });
+}
+
+/**
+ * Close the bubble. The words go to the panel draft for "Continue draft"
+ * only when no post is in flight: during a post they belong to the request,
+ * and copying them would leave a second, unsent comment behind.
+ * `keepAnchor` false is for a page swap, where the old anchor and version are
+ * meaningless; the words still survive as a draft.
+ */
+function closeBubble(restore = false, { keepPlacing = false, keepAnchor = true } = {}) {
+  if (!bubbleVisible()) return;
+  const text = $('bubbleText').value;
+  const panelDraft = $('commentText').value;
+  // Transfer into an empty panel draft, but keep a second draft in its own
+  // textarea when both contain different words. The next placed bubble resumes it.
+  const separateDraft = !commentBusy && text.trim() && panelDraft.trim() && text !== panelDraft;
+  if (!commentBusy && text.trim() && !panelDraft.trim()) $('commentText').value = text;
+  if (!keepAnchor) { draftAnchor = ''; bubbleVersion = ''; }
+  if (!separateDraft) $('bubbleText').value = '';
+  $('bubbleStatus').textContent = '';
+  bubblePoint = null;
+  bubbleAnchor = '';
+  $('commentBubble').hidden = true;
+  if (!keepPlacing) setPlacement(false);
+  if (restore) $('commentsBtn').focus({ preventScroll: true });
+}
+
+/** A new check-in replaces the page under the bubble: keep the words, drop its location. */
+function closeBubbleForPage() {
+  closeBubble(false, { keepPlacing: false, keepAnchor: false });
 }
 
 /** Ask the page to accept a comment location, or stop asking. */
 function setPlacement(active) {
   placing = active && !commentBusy && !!info && controls(info).commentBox;
+  $('commentsBtn').setAttribute('aria-pressed', String(placing));
+  $('commentsBtn').setAttribute('aria-label', placing ? 'Stop placing comments' : 'Place comments on the page');
+  $('commentsBtn').title = placing ? 'Stop placing comments' : 'Place comments on the page';
   $('placementHint').hidden = !placing;
   $('cancelPlacement').hidden = !placing;
   post({ type: 'placement', active: placing });
 }
 
-function openInspector(mode, threadMode = 'index', point = null) {
+function openInspector(mode, threadMode = 'index', point = null, { keepPlacement = false, card = false } = {}) {
   const wasOpen = !!inspectorMode;
   // The control that opened the inspector is where focus returns on close.
   const returnTo = wasOpen ? inspectorReturn : document.activeElement;
-  closePopovers('inspector');
-  setPlacement(false);
+  closePopovers('inspector', { keepPlacement });
+  if (!keepPlacement) setPlacement(false);
+  closeBubble(false, { keepPlacing: keepPlacement });
   inspectorReturn = returnTo;
   inspectorMode = mode;
+  inspectorCard = card && !!point;
+  $('inspector').classList.toggle('comments-overlay', mode === 'comments');
   $('inspector').hidden = false;
   $('threadPanel').hidden = mode !== 'comments';
   $('historyPanel').hidden = mode !== 'history';
   $('versionBtn').setAttribute('aria-expanded', String(mode === 'history'));
-  $('commentsBtn').setAttribute('aria-expanded', String(mode === 'comments'));
+  $('discussionsBtn').setAttribute('aria-expanded', String(mode === 'comments'));
   if (mode === 'comments') {
     const panel = $('threadPanel');
     panel.dataset.mode = threadMode;
@@ -999,6 +1152,8 @@ function openInspector(mode, threadMode = 'index', point = null) {
       for (const view of views.values()) view.classList.remove('focus');
       trackAnchor('');
     }
+    // The card's geometry is chosen in the same task as the unhide, before any
+    // paint, so a pin-opened thread never flashes the docked column.
     placeInspector();
     loadThreads(true);
     if (!wasOpen && threadMode === 'index') $('threadClose').focus({ preventScroll: true });
@@ -1011,11 +1166,14 @@ function openInspector(mode, threadMode = 'index', point = null) {
 function closeInspector(restore = false) {
   if (!inspectorMode) return;
   inspectorMode = '';
+  inspectorCard = false;
   $('inspector').hidden = true;
+  $('inspector').classList.remove('card');
+  for (const property of ['top', 'left', 'width', 'max-height']) $('inspector').style.removeProperty(property);
   $('threadPanel').hidden = true;
   $('historyPanel').hidden = true;
   $('versionBtn').setAttribute('aria-expanded', 'false');
-  $('commentsBtn').setAttribute('aria-expanded', 'false');
+  $('discussionsBtn').setAttribute('aria-expanded', 'false');
   panelPoint = null;
   trackAnchor('');
   const back = restore ? inspectorReturn : null;
@@ -1023,21 +1181,34 @@ function closeInspector(restore = false) {
   if (back?.isConnected && typeof back.focus === 'function') back.focus({ preventScroll: true });
 }
 
-function activateThread(t, point = null) {
+function activateThread(t, point = null, { keepPlacement = false, card = false } = {}) {
   const view = views.get(t.uuid);
   if (!view) return;
   focused = t.uuid;
   expanded.set(t.uuid, true);
   for (const other of views.values()) other.classList.toggle('focus', other === view);
   view.open = true;
-  openInspector('comments', 'thread', point || { x: $('frame').clientWidth / 2, y: 40 });
+  openInspector('comments', 'thread', point, { keepPlacement, card });
   $('panelTitle').textContent = `Comment ${t.label}`;
   trackAnchor(t.anchor);
   const target = views.get(t.uuid);
-  target?.scrollIntoView({ block: 'nearest' });
+  if (target && panelScroller()) panelScroller().scrollTop = 0;
+  requestAnimationFrame(() => { placeInspector(); target?.scrollIntoView({ block: 'nearest' }); });
 }
 
+/** The placement toggle: on asks the page for the next click; off stops asking. */
 $('commentsBtn').addEventListener('click', e => {
+  e.stopPropagation();
+  if (commentBusy || !info || !controls(info).commentBox) return;
+  if (placing) { setPlacement(false); return; }
+  if (!markersVisible) setMarkerVisibility(true);
+  closePopovers('inspector');
+  closeBubble();
+  closeInspector();
+  setPlacement(true);
+  $('frame').focus();
+});
+$('discussionsBtn').addEventListener('click', e => {
   e.stopPropagation();
   if (inspectorMode === 'comments' && $('threadPanel').dataset.mode === 'index') closeInspector(true);
   else openInspector('comments');
@@ -1081,7 +1252,37 @@ $('placeComment').addEventListener('click', () => {
   setPlacement(true);
   $('frame').focus();
 });
-$('cancelPlacement').addEventListener('click', e => { e.stopPropagation(); setPlacement(false); openInspector('comments'); });
+$('cancelPlacement').addEventListener('click', e => {
+  e.stopPropagation();
+  setPlacement(false);
+  $('commentsBtn').focus({ preventScroll: true });
+});
+$('bubbleClose').addEventListener('click', () => { if (!commentBusy) closeBubble(true); });
+$('bubbleCancel').addEventListener('click', () => {
+  if (commentBusy) return;
+  $('bubbleText').value = '';
+  selection = draftAnchor = '';
+  closeBubble(true);
+  renderAnchor();
+});
+$('bubbleGeneral').addEventListener('click', () => {
+  if (commentBusy || !controls(info).commentBox) return;
+  const text = $('bubbleText').value;
+  const panelDraft = $('commentText').value;
+  if (panelDraft.trim() && panelDraft !== text) {
+    $('bubbleStatus').textContent = 'Another draft is in Discussions. Post or cancel it before moving this comment.';
+    return;
+  }
+  closeBubble();
+  selection = draftAnchor = '';
+  $('bubbleText').value = '';
+  openInspector('comments', 'draft');
+  // The bubble is gone, so closing the panel returns to the control that
+  // still exists rather than to a hidden form.
+  inspectorReturn = $('discussionsBtn');
+  $('commentText').value = text;
+  $('commentText').focus();
+});
 $('cancelComment').addEventListener('click', () => {
   if (commentBusy) return;
   $('commentText').value = '';
@@ -1093,31 +1294,68 @@ $('cancelComment').addEventListener('click', () => {
 $('inspector').addEventListener('keydown', e => {
   if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeInspector(true); }
 });
+$('commentBubble').addEventListener('keydown', e => {
+  if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); if (!commentBusy) closeBubble(true); }
+});
+$('commentBubble').addEventListener('click', e => e.stopPropagation());
+addEventListener('resize', placeBubble);
 
-$('commentForm').addEventListener('submit', async e => {
-  e.preventDefault();
-  const text = $('commentText').value.trim();
+/** Post a comment from either composer. `fromBubble` keeps the bubble's flow. */
+async function postComment({ text, anchor, version, status, button, inputs, fromBubble }) {
   if (!text || commentBusy || !controls(info).commentBox) return;
-  const anchor = draftAnchor || selection, point = panelPoint;
-  const button = $('commentForm').querySelector('button[type=submit]');
-  commentBusy = button.disabled = $('commentText').readOnly = true;
-  showPosting($('commentStatus'), 'Posting…', true);
+  commentBusy = button.disabled = true;
+  for (const input of inputs) input.readOnly = true;
+  showPosting(status, 'Posting…', true);
+  let posted = null;
   try {
     await guestUI.ensureProfile();
     // The version on screen, so a responder can read the page as the reader saw it.
-    const result = await art.comment({ text, ...(anchor ? { anchor } : {}), ...(shown?.checkin ? { version: shown.checkin } : {}) });
-    $('commentText').value = '';
+    const result = await art.comment({ text, ...(anchor ? { anchor } : {}), ...(version ? { version } : {}) });
+    for (const input of inputs) input.value = '';
     selection = draftAnchor = '';
-    $('commentStatus').textContent = 'Posted.';
+    status.textContent = 'Posted.';
+    if (fromBubble) closeBubble(false, { keepPlacing: true });
     await loadThreads();
-    const posted = threads.find(t => t.uuid === result.ticketUuid);
-    if (posted && point) activateThread(posted, point);
-    else openInspector('comments');
+    posted = threads.find(t => t.uuid === result.ticketUuid);
+    if (fromBubble && posted) {
+      // The bubble is done; the posted thread is one click away in the panel.
+      if (markersVisible) post({ type: 'reveal', key: posted.label });
+      $('commentsBtn').focus({ preventScroll: true });
+      notice(`Comment ${posted.label} posted.`);
+    } else if (posted && panelPoint && !fromBubble) activateThread(posted, panelPoint);
+    else if (!fromBubble) openInspector('comments');
   } catch (err) {
-    $('commentStatus').textContent = `Could not post: ${err.message}`;
+    status.textContent = `Could not post: ${err.message}`;
   } finally {
-    commentBusy = button.disabled = $('commentText').readOnly = false;
+    commentBusy = button.disabled = false;
+    for (const input of inputs) input.readOnly = false;
   }
+}
+
+$('commentBubble').addEventListener('submit', e => {
+  e.preventDefault();
+  postComment({
+    text: $('bubbleText').value.trim(),
+    anchor: bubbleAnchor,
+    version: bubbleVersion,
+    status: $('bubbleStatus'),
+    button: $('commentBubble').querySelector('button[type=submit]'),
+    inputs: [$('bubbleText')],
+    fromBubble: true,
+  });
+});
+
+$('commentForm').addEventListener('submit', e => {
+  e.preventDefault();
+  postComment({
+    text: $('commentText').value.trim(),
+    anchor: draftAnchor || selection,
+    version: shown?.checkin,
+    status: $('commentStatus'),
+    button: $('commentForm').querySelector('button[type=submit]'),
+    inputs: [$('commentText')],
+    fromBubble: false,
+  });
 });
 
 function renderVersions() {
@@ -1609,9 +1847,9 @@ function renderShare() {
 
 // ─── Popovers: one open at a time; Escape or a click elsewhere closes it ────
 const popovers = [['titleBtn', 'titleMenu'], ['shareBtn', 'shareMenu'], ['moreBtn', 'moreMenu']];
-function closePopovers(except) {
+function closePopovers(except, { keepPlacement = false } = {}) {
   if (except !== 'inspector') closeInspector();
-  setPlacement(false);
+  if (!keepPlacement) setPlacement(false);
   for (const [btn, menu] of popovers) {
     if (menu === except) continue;
     $(menu).hidden = true;
@@ -1651,7 +1889,8 @@ document.addEventListener('click', () => closePopovers());
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     const open = popovers.find(([, menu]) => !$(menu).hidden);
-    if (open || inspectorMode || placing) e.preventDefault();
+    if (open || inspectorMode || placing || bubbleVisible()) e.preventDefault();
+    if (bubbleVisible() && !open) { if (!commentBusy) closeBubble(true); return; }
     closePopovers();
     if (open) $(open[0]).focus();
   }
@@ -1797,6 +2036,7 @@ inspectorQuery.addEventListener('change', placeInspector);
 function hasUnsavedWork() {
   if ($('renameDialog').open || $('expirationDialog').open) return true;
   if ($('commentText').value.trim()) return true;
+  if ($('bubbleText').value.trim()) return true;
   for (const value of drafts.values()) if (value && value.trim()) return true;
   if (peopleLoaded || !$('peopleForm').hidden) {
     if ($('peoplePick').value) return true;

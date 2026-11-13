@@ -85,7 +85,7 @@ async function start(args, origin, path, ready) {
     child.once('error',()=>{clearTimeout(timer);process.exit(1)});
     child.once('exit',code=>{clearTimeout(timer);process.exit(code??1)});
   `;
-  const server = spawn(process.execPath, ['-e', lease, join(root, 'node_modules/.bin/wrangler'), 'dev', ...args, '--ip', '127.0.0.1', '--persist-to', join(work, 'state'), '--show-interactive-dev-session=false'], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+  const server = spawn(process.execPath, ['-e', lease, join(root, 'node_modules/.bin/wrangler'), 'dev', ...args, '--inspector-port', '0', '--ip', '127.0.0.1', '--persist-to', join(work, 'state'), '--show-interactive-dev-session=false'], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
   servers.push(server);
   let log = '', exited = false;
   server.once('exit', () => { exited = true; });

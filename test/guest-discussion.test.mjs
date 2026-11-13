@@ -86,7 +86,7 @@ if (process.env.GUEST_BROWSER_QA === '1') test('real browser: guest comments are
 
 before(async () => {
   await new Promise(resolve => hook.listen(0, '127.0.0.1', resolve));
-  server = spawn(join(root, 'node_modules/.bin/wrangler'), ['dev', '--port', String(port), '--ip', '127.0.0.1',
+  server = spawn(join(root, 'node_modules/.bin/wrangler'), ['dev', '--port', String(port), '--inspector-port', '0', '--ip', '127.0.0.1',
     '--persist-to', join(work, 'state'), '--var', `BEARER_TOKEN:${legacy}`, '--var', 'OWNER_EMAIL:owner@example.com',
     '--var', `APP_ORIGIN:${base}`, '--var', 'TEST_MAIL_TRANSPORT:loopback',
     '--var', 'TEST_EXPIRATION_ALARM_HOLD_MS:5000', '--var', 'TEST_EXPIRATION_FAULT:throw',

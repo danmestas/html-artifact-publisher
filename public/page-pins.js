@@ -178,7 +178,7 @@ export function pagePins(findQuotes, anchorFor, encodePointAnchor, decodePointAn
     if (!r.width || !r.height) return;
     const clamp = n => Math.max(0, Math.min(1, n));
     const anchor = encodePointAnchor({ id: el === document.documentElement ? '' : el.id || '', path, x: clamp((x - r.left) / r.width), y: clamp((y - r.top) / r.height) });
-    if (anchor) { setPlacement(false); send({ type: 'point', anchor, x, y }); }
+    if (anchor) send({ type: 'point', anchor, x, y });
   }
 
   addEventListener('message', e => {

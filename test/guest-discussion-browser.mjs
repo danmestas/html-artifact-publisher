@@ -24,7 +24,7 @@ export async function guestDiscussionQA({ base, artifact: a, api }) {
     const [guest, reader] = sessions;
     await run(guest, 'open', `${base}/v/${a.id}#${a.read}`);
     await run(guest, 'wait', '#bar:not([hidden])');
-    await run(guest, 'click', '#commentsBtn');
+    await run(guest, 'click', '#discussionsBtn');
     await run(guest, 'wait', '#guestProfile:not([hidden])');
     await run(guest, 'fill', '#guestName', 'Browser Guest');
     await run(guest, 'fill', '#guestEmail', 'private-browser@example.com');
@@ -40,7 +40,7 @@ export async function guestDiscussionQA({ base, artifact: a, api }) {
     assert.equal(result.text.includes('private-browser@example.com'), false, 'private email is absent from shared threads');
     await run(reader, 'open', `${base}/v/${a.id}#${a.read}`);
     await run(reader, 'wait', '#bar:not([hidden])');
-    await run(reader, 'click', '#commentsBtn');
+    await run(reader, 'click', '#discussionsBtn');
     await run(reader, 'wait', '--text', 'A shared browser discussion');
     assert.equal(await evaluate(reader, `!!document.querySelector('#threadPanel .resolve:not([hidden]), #threadPanel .attach:not([hidden])')`), false, 'read viewers have no moderation or attachment controls');
     assert.equal(await evaluate(reader, `document.body.innerText.includes('private-browser@example.com')`), false, 'another browser cannot see the private email');

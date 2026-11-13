@@ -103,6 +103,107 @@ test('the shipped viewer shell keeps one bar, one inspector and honest boundarie
   });
 });
 
+test('comments are a placement toggle; the bubble and panel are separate overlays', () => {
+  const html = readFileSync(new URL('../public/viewer.html', import.meta.url), 'utf8');
+  const source = readFileSync(new URL('../public/viewer.js', import.meta.url), 'utf8');
+
+  // The comments button is a toggle with a pressed state, not a panel opener.
+  const toggle = /<button id="commentsBtn"[^>]*>/.exec(html)?.[0];
+  assert.ok(toggle, 'the bar has a comments button');
+  assert.match(toggle, /aria-pressed="false"/, 'the placement toggle declares its state');
+  assert.ok(!/aria-haspopup/.test(toggle), 'it no longer opens a dialog');
+  assert.match(html, /id="placementHint"/, 'the page says a click will place a comment');
+  // Discussion stays reachable on its own control, with the thread count.
+  const discussions = /<button id="discussionsBtn"[^>]*>/.exec(html)?.[0];
+  assert.ok(discussions, 'discussion has its own control');
+  assert.match(discussions, /aria-haspopup="dialog"/);
+  assert.match(discussions, /aria-controls="inspector"/);
+  assert.match(html, /<span id="commentCount"/);
+
+  // The bubble is a fixed overlay in the viewer with its own composer, so a
+  // placed comment never opens or resizes the inspector or the page.
+  assert.match(html, /<form id="commentBubble"[^>]*role="dialog"[^>]*hidden>/);
+  assert.match(html, /id="bubbleText"/);
+  assert.match(html, /<form id="commentBubble"[^>]*role="dialog"[^>]*hidden>[\s\S]*?<\/form>/, 'the bubble owns a form');
+  assert.match(source, /function openBubble\(point\) \{/, 'clicked points open the bubble');
+  assert.match(source, /openBubble\(pagePoint\(d\)\)/, 'the page’s point message opens a bubble, not the inspector');
+  assert.ok(!/openInspector\('comments', 'draft', pagePoint\(d\)\)/.test(source), 'placement no longer opens the panel');
+  assert.match(source, /const spot = bubblePlacement\(point, size, bounds\);/, 'the bubble stays inside the page area');
+  // Placement is a mode, not a one-shot pick: taking a point opens the bubble
+  // and leaves the toggle on, so a second click moves the bubble.
+  const pointBranch = /else if \(d\.type === 'point'[\s\S]*?trackAnchor\(draftAnchor\);/.exec(source)?.[0];
+  assert.ok(pointBranch, 'the viewer still handles the page’s point message');
+  assert.ok(!/setPlacement\(false\)/.test(pointBranch), 'taking a point does not end the placement mode');
+  const pagePins = readFileSync(new URL('../public/page-pins.js', import.meta.url), 'utf8');
+  assert.ok(!/setPlacement\(false\);\s*send\(\{ type: 'point'/.test(pagePins), 'the page keeps its placement layer after sending a point');
+  // The toggle owns the placement state and announces it.
+  assert.match(source, /\$\('commentsBtn'\)\.setAttribute\('aria-pressed', String\(placing\)\);/, 'the toggle reports its state');
+  assert.match(source, /\$\('commentsBtn'\)\.setAttribute\('aria-label', placing \? 'Stop placing comments'/, 'the on state is announced');
+  // The page sandbox is untouched by the interaction change.
+  assert.match(html, /sandbox="allow-scripts allow-forms allow-modals allow-popups"/);
+  assert.ok(!/sandbox="[^"]*allow-same-origin/.test(html));
+});
+
+test('bubble drafts stay bound to the page and version they belong to', () => {
+  const source = readFileSync(new URL('../public/viewer.js', import.meta.url), 'utf8');
+  const block = (start, end) => new RegExp(`${start}[\\s\\S]*?\\n${end}`).exec(source)?.[0];
+
+  // X or Escape during a post must not copy the in-flight words into the
+  // hidden general draft as a second, unsent comment.
+  const close = block('function closeBubble\\(', '\\}');
+  assert.ok(close, 'the viewer still has one closeBubble');
+  assert.match(close, /if \(!commentBusy &&/, 'an in-flight post owns its words; closing does not duplicate them');
+  assert.match(close, /\$\('bubbleStatus'\)\.textContent = ''/, 'closing clears the bubble’s status');
+
+  // A version switch replaces the page, so the bubble’s anchor and version
+  // cannot survive into the next check-in.
+  const render = block('async function render\\(\\)', '\\}');
+  assert.ok(render, 'render still swaps the page');
+  assert.match(render, /closeBubbleForPage\(\)/, 'switching versions closes the bubble');
+  const forPage = block('function closeBubbleForPage\\(', '\\}');
+  assert.ok(forPage, 'the version switch has its own bubble close');
+  assert.match(forPage, /keepAnchor: false/, 'the old page’s location and version are dropped');
+  assert.match(forPage, /closeBubble\(/, 'the words still go through the one close path');
+
+  // The bubble’s own cancel is not the panel’s cancel.
+  const cancel = block("\\$\\('bubbleCancel'\\)\\.addEventListener", '\\}\\);');
+  assert.ok(cancel, 'the bubble still has its own cancel');
+  assert.ok(!cancel.includes('commentText'), 'cancelling the bubble leaves the panel draft alone');
+  assert.ok(!cancel.includes('commentStatus'), 'cancelling the bubble leaves the panel status alone');
+
+  // Reopening starts a fresh status and a fresh version binding, not the last
+  // attempt’s.
+  const open = block('function openBubble\\(point\\)', '\\}');
+  assert.ok(open, 'clicked points still open the bubble');
+  assert.match(open, /\$\('bubbleStatus'\)\.textContent = ''/, 'a reopened bubble shows no stale status');
+  assert.match(open, /bubbleVersion = shown\?\.checkin/, 'the draft is bound to the version it was started on');
+  const submit = block("\\$\\('commentBubble'\\)\\.addEventListener\\('submit'", '\\}\\);');
+  assert.match(submit, /version: bubbleVersion/, 'the post carries the version the draft was started on');
+  assert.match(submit, /anchor: bubbleAnchor/, 'the post carries the bubble’s own location');
+});
+
+test('a thread opened from a pin is an anchored card, not the docked inspector', () => {
+  const source = readFileSync(new URL('../public/viewer.js', import.meta.url), 'utf8');
+
+  assert.match(source, /\.classList\.toggle\('card', \!\!card\)/, 'thread mode puts the inspector in card form');
+  const place = /function placeInspector\(\)[\s\S]*?\n\}/.exec(source)?.[0];
+  assert.ok(place, 'the overlays have one placement function');
+  assert.match(place, /cardPlacement\(/, 'the card is placed from its anchor');
+  const geometry = /function cardPlacement\(point\)[\s\S]*?\n\}/.exec(source)?.[0];
+  assert.ok(geometry, 'the card has one geometry function');
+  assert.match(geometry, /bubblePlacement\(/, 'the card is placed by the same clamped anchor rule as the bubble');
+  assert.match(geometry, /overlayBounds\(\)/, 'the card is clamped to the visible area');
+  assert.match(source, /const spot = bubblePlacement\(point, size, bounds\);/, 'the bubble clamps to the same visible area');
+  assert.match(source, /visualViewport\?\.addEventListener\('resize', placeOverlays\)/, 'the phone keyboard re-places the overlays');
+  assert.match(source, /new ResizeObserver\(placeOverlays\)/, 'a frame or sidebar resize re-places the overlays');
+
+  const open = /function openInspector\([\s\S]*?\n\}/.exec(source)?.[0];
+  assert.ok(open, 'the inspector still opens in one place');
+  assert.match(open, /keepPlacement/, 'a pin click does not end the placement mode');
+  assert.match(open, /keepPlacing: keepPlacement/, 'the pin opens a thread card without ending the bubble’s mode');
+  assert.match(source, /activateThread\(t, pagePoint\(d\) \?\? \{[^}]*\}, \{ keepPlacement: true, card: true \}\)/, 'a pin click opens its own anchored card');
+});
+
 test('dynamic viewer controls get their accessible names as attributes', () => {
   const source = readFileSync(new URL('../public/viewer.js', import.meta.url), 'utf8');
   // People rows are built at runtime; a hyphenated prop assigned as a JS field

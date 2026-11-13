@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { anchorFor, arrange, attachmentDisplay, controls, decodePointAnchor, encodePointAnchor, findQuotes, thread } from '../public/comments.js';
+import { anchorFor, arrange, attachmentDisplay, bubblePlacement, controls, decodePointAnchor, encodePointAnchor, findQuotes, thread } from '../public/comments.js';
 
 test('a guest discussion reader can comment without editing, moderation or attachment powers', () => {
   const guest = controls({ role: 'read', canComment: true, canModerate: false });
@@ -112,4 +112,29 @@ test('attachmentDisplay: only an editor’s raster image shows inline; everythin
   assert.deepEqual(attachmentDisplay(a({ user: 'comment-link' })), { inline: false, label: 'shot.png (2 KB)', missing: false });
   assert.deepEqual(attachmentDisplay(a({ size: 300, url: undefined, missing: true })), { inline: false, label: 'shot.png (300 B)', missing: true });
   assert.equal(attachmentDisplay(a({ size: 3_500_000 })).label, 'shot.png (3.3 MB)');
+});
+
+// A comment bubble opens at the reader's click, and stays inside the page
+// area: it hangs below-right of the point when there is room, flips to the
+// other side when there is not, and never leaves `bounds` (the viewer's page
+// area, not the whole window, so the docked inspector is never covered).
+test('bubblePlacement: beside the click, flipped to stay inside the page area', () => {
+  const bounds = { left: 0, top: 0, width: 1000, height: 800 };
+  const size = { width: 300, height: 240 };
+  // Room to the right and below: the bubble sits just past the click.
+  assert.deepEqual(bubblePlacement({ x: 100, y: 100 }, size, bounds), { x: 112, y: 112, flippedX: false, flippedY: false });
+  // Near the right edge it flips to the left of the point, still inside.
+  const nearRight = bubblePlacement({ x: 960, y: 100 }, size, bounds);
+  assert.equal(nearRight.flippedX, true);
+  assert.ok(nearRight.x + 300 <= 1000 && nearRight.x >= 0, JSON.stringify(nearRight));
+  // Near the bottom it flips above the point, still inside.
+  const nearBottom = bubblePlacement({ x: 100, y: 780 }, size, bounds);
+  assert.equal(nearBottom.flippedY, true);
+  assert.ok(nearBottom.y + 240 <= 800 && nearBottom.y >= 0, JSON.stringify(nearBottom));
+  // A page area smaller than the bubble clamps to its top-left corner, never negative.
+  assert.deepEqual(bubblePlacement({ x: 500, y: 500 }, size, { left: 20, top: 45, width: 200, height: 150 }),
+    { x: 20, y: 45, flippedX: true, flippedY: true });
+  // A missing or absurd point is treated as the top-left, never NaN.
+  assert.deepEqual(bubblePlacement(null, size, bounds), { x: 12, y: 12, flippedX: false, flippedY: false });
+  assert.deepEqual(bubblePlacement({ x: NaN, y: Infinity }, size, bounds), { x: 12, y: 12, flippedX: false, flippedY: false });
 });

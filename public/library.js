@@ -1,6 +1,6 @@
 import { encodeFiles, readFileList, withBlobs } from './client.js';
 import { isBlob } from './blobs.js';
-import { iconSvg } from './icons.js';
+import { iconSvg, resolveIcon } from './icons.js';
 
 const $ = id => document.getElementById(id);
 const BATCH = 12;          // artifacts and publications load this many at a time: divides evenly at 4, 3 and 2 columns
@@ -569,7 +569,7 @@ function renderRecent() {
   list.replaceChildren(...recentItems.map(item => {
     const link = node('a', { className: 'nav-button', href: viewerUrl(item), title: item.title || 'Untitled artifact' },
       node('span', { className: 'nav-icon', ariaHidden: 'true' }), node('span', { textContent: item.title || 'Untitled artifact' }));
-    link.firstChild.innerHTML = iconSvg(item.icon);
+    link.firstChild.innerHTML = iconSvg(resolveIcon(item.icon, item.title));
     link.addEventListener('click', rememberLibraryNavigation);
     return link;
   }));
@@ -900,7 +900,7 @@ function artifactEntries(items, inventory, grid) {
   for (const item of items) {
     const title = node('a', { className: 'artifact-title', href: viewerUrl(item), title: item.title, textContent: item.title || 'Untitled artifact' });
     const icon = node('span', { className: 'artifact-icon', ariaHidden: 'true' });
-    icon.innerHTML = iconSvg(item.icon);
+    icon.innerHTML = iconSvg(resolveIcon(item.icon, item.title));
     title.prepend(icon);
     const badge = node('span', { className: 'access-badge', textContent: item.accessLabel });
     // The list's quiet rows show a subtitle: owner when it is not yours, then

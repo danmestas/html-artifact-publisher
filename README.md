@@ -163,6 +163,8 @@ npm test                           # end-to-end: API, access, fossil clone/push,
 
 The end-to-end tests start their own `wrangler dev` with fresh state, and build `fossil/cmd/fsclient`, a minimal native Fossil client, for the clone and push tests.
 
+With `agent-browser` installed, `node test/share-previews-browser.mjs` checks the actual viewer title, server preview metadata, topic favicon and matching library icon in a browser. It uses an isolated local Worker and test-mail transport, not production accounts or artifacts.
+
 `npm test` also runs the built TinyGo engine in a subprocess capped at 128 MiB of WASM memory and asserts a 48 MiB high-water budget for a synthetic multi-file workload. It covers many tiny files, incompressible assets, repeated updates, a storage failure after partial writes, recovery, and alternating repositories in one runtime. It was added when SQL cleanup goroutines could pile up their fixed-size stacks under TinyGo's cooperative scheduler; the engine now builds without a scheduler, so those goroutines no longer exist (item 4 below). The cap measures WASM linear memory, not total Worker isolate memory, so the HTTP suite also exercises the actual Worker with asset updates, old versions and clone/push.
 
 ## Building the Fossil engine
@@ -209,12 +211,21 @@ node scripts/publish-html.mjs watch <edit-or-comment-url> [--since <hash>] [--in
 
 ### Artifact icons
 
-Publish with `--icon chart` (or `document`, `calendar`, `code`, `slides`,
-`checklist`, `notes`, `image`, `map`, `book`, `calculator`, `recipe`) for a stable,
-generic library icon and outer viewer tab favicon. Older artifacts default to
-`document`. The supplied HTML and its custom favicon are never rewritten.
-Updates without `--icon` preserve it; `--icon document` resets it. A different
-explicit icon can be saved with unchanged files without creating a check-in.
+Publish with `--icon chart` for an explicitly selected library icon, outer viewer
+favicon and shared-link preview image. The trusted icon set includes `document`,
+`chart`, `calendar`, `code`, `slides`, `checklist`, `notes`, `image`, `map`, `book`,
+`calculator`, `recipe`, `design`, `research`, `planning`, `architecture`, `security`,
+`finance`, `science`, `people`, `education`, `health`, `travel`, `music`, `game`
+and `tool`. Run the CLI's `--help` for the accepted list.
+
+Older artifacts and those with the default `document` icon automatically get a
+topic match from their title, without changing stored metadata. An explicit
+non-document icon takes precedence. Inference is local and deterministic; it
+never reads page contents or calls a model. Unknown topics use `document`.
+The supplied HTML and its custom favicon are never rewritten.
+Updates without `--icon` preserve the selection; `--icon document` resets it to
+automatic topic matching. A different explicit icon can be saved with unchanged
+files without creating a check-in.
 
 The HTTP create/update bodies and public client's `createArtifact` options and
 `Artifact.publish` fourth argument accept optional `icon` with the same names.
@@ -222,6 +233,30 @@ Omission preserves the icon on updates; JSON `null` clears it to `document`.
 Unknown names and non-string values other than null are rejected before mutation.
 GET artifact and list responses include `icon`; only authorized writers can
 change it. Icons are current metadata, not part of a selected file version.
+
+### Shared-link previews
+
+Viewer links (`/v/<id-or-slug>`) include the current artifact title in their
+initial HTML and Open Graph/social-card metadata, so messaging apps do not have
+to run JavaScript to display the correct title. The preview uses a 1200 × 630 PNG
+of the same trusted topic icon shown in the library and outer viewer favicon.
+
+**The title and topic icon are public preview information, even for private
+artifacts.** No screenshot, page excerpt, private file, discussion, participant
+identity, email, account information or capability token is included. The
+artifact itself still requires a valid link token or named account access.
+Preview URLs never contain a token, query parameters or a selected-version hash.
+Expired, deleted and nonexistent artifacts receive only generic metadata; the
+Repo's authoritative expiration is checked even if the Registry is stale.
+The viewer response is not cached, but messaging services can keep their own
+preview caches after a rename, expiration or deletion. Previously sent messages
+may retain their old preview; sharing the link again may request a fresh one.
+Standalone public snapshot HTML is unchanged by this viewer-link feature.
+
+PNG cards are pre-rendered, checked-in static assets. After changing trusted
+artwork, run `npm run build:previews`; `npm run check:previews` verifies them,
+and the ordinary test suite checks that the images stay synchronized. The
+pinned SVG rasterizer is a development dependency, never Worker runtime code.
 
 ### Output (`--json`)
 

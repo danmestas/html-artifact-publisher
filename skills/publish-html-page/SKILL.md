@@ -96,7 +96,7 @@ node scripts/publish-html.mjs list
 node scripts/publish-html.mjs delete <edit-url>
 
   --title <text>     Human-readable title (default: filename)
-  --icon <name>      document | chart | calendar | code | slides | checklist | notes | image | map | book | calculator | recipe
+  --icon <name>      Trusted topic icon (see the accepted names below)
   --ttl <duration>   1h | 6h | 24h | 7d | 30d | never  (default: 7d)
   --slug <slug>      Optional vanity slug
   --message <text>   Check-in comment (default: "Publish <name>" / "Update <name>")
@@ -108,11 +108,20 @@ node scripts/publish-html.mjs delete <edit-url>
   --help             Show full usage
 ```
 
+Accepted icon names: `document`, `chart`, `calendar`, `code`, `slides`,
+`checklist`, `notes`, `image`, `map`, `book`, `calculator`, `recipe`, `design`,
+`research`, `planning`, `architecture`, `security`, `finance`, `science`,
+`people`, `education`, `health`, `travel`, `music`, `game`, `tool`.
+
 The optional `--icon` is stable artifact metadata used by the outer viewer's
-browser tab and the library in both layouts. Default: `document`. Omit it on
-updates to preserve the existing icon; use `--icon document` to reset it.
+browser tab, library and shared-link preview image. Explicit non-document icons
+win; the default `document` enables bounded title-only topic matching, falling
+back to a document glyph for unknown topics. Omit it on updates to preserve the
+stored choice; use `--icon document` to reset to automatic matching.
 An explicit different icon can be saved with identical files without creating
 a new file version. The supplied HTML and any custom favicon remain untouched.
+Shared-link previews expose the artifact title and topic icon publicly, even
+for private artifacts; page content and access tokens stay protected.
 Examples (keep the edit URL private):
 
 ```bash

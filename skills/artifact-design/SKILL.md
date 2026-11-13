@@ -301,12 +301,18 @@ constructions, colon reveals, scare quotes, stock filler phrases.
 
 ## 5. Naming the artifact
 
-On initial publish choose and pass the closest generic icon with
-`--icon document|chart|calendar|code|slides|checklist|notes|image|map|book|calculator|recipe`.
-Use `document` if no better fit; do not randomize or re-pick on ordinary updates.
-Use a generic description, not a brand. This stable
-metadata controls the outer viewer tab favicon and decorative library icon;
-`document` is the default. Updates without `--icon` preserve the choice. The
+On initial publish choose the closest topic icon with `--icon`: `document`,
+`chart`, `calendar`, `code`, `slides`, `checklist`, `notes`, `image`, `map`,
+`book`, `calculator`, `recipe`, `design`, `research`, `planning`, `architecture`,
+`security`, `finance`, `science`, `people`, `education`, `health`, `travel`,
+`music`, `game`, or `tool`.
+Use a generic topic, not a brand. An explicit non-document icon controls the
+outer viewer tab favicon, library icon and shared-link preview artwork.
+The default `document` enables bounded title-only automatic matching, with a
+document glyph for unknown topics. Do not randomize or re-pick on ordinary
+updates; updates without `--icon` preserve the stored choice.
+Shared-link previews expose the title and topic icon publicly, even for private
+artifacts, but never the page content. The
 publisher does not alter the supplied HTML or its favicon. Keep any existing
 custom favicon; for a new standalone page, choose a matching simple symbol for
 a self-contained SVG favicon with browser-scheme-aware colors. The starter's

@@ -9,6 +9,8 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "build:wasm": "sh fossil/build.sh",
+    "build:previews": "node scripts/build-topic-previews.mjs",
+    "check:previews": "node scripts/build-topic-previews.mjs --check",
     "types": "wrangler types --env-file .dev.vars.example",
     "typecheck": "tsc --noEmit",
     "test": "node --test --test-concurrency=1 test/*.test.mjs",
@@ -16,6 +18,7 @@
     "deploy:prod": "doppler run --project html-artifact-publisher --config prd -- sh scripts/deploy.sh"
   },
   "devDependencies": {
+    "@resvg/resvg-js": "2.6.2",
     "@types/node": "^24.0.0",
     "binaryen": "132.0.0",
     "typescript": "^5.7.2",

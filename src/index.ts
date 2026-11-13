@@ -531,7 +531,7 @@ async function handleAttachmentLink(req: Request, env: Env, key: string): Promis
 
 // ─── Handlers ────────────────────────────────────────────────────────────────
 
-import { validIcon, ICON_NAMES } from '../public/icons.js';
+import { validIcon, ICON_NAMES, resolveIcon, iconSvg } from '../public/icons.js';
 
 interface CreateBody {
   icon?: string | null;
@@ -873,15 +873,49 @@ async function errorReply(message: string): Promise<Response> {
  * this CSP: only nonce-stamped scripts and styles run, nothing connects out.
  */
 async function handleViewer(req: Request, env: Env): Promise<Response> {
+  const url = new URL(req.url);
+  // Only the title and bounded, trusted topic artwork are public. Never read a
+  // bundle, credentials, guest information, or user-supplied preview URLs here.
+  const reg = registry(env);
+  const id = await reg.resolve(url.pathname.slice(3));
+  const entry = id ? await reg.get(id) : null;
+  // Repo owns expiration; a stale Registry projection must not expose metadata.
+  const meta = entry ? await repo(env, entry.id).info() : null;
+  const title = meta?.title || 'Artifact';
+  const icon = resolveIcon(meta ? entry?.icon : 'document', meta?.title);
+  const origin = env.APP_ORIGIN || url.origin;
+  const canonical = new URL(`/v/${meta && entry ? entry.slug ?? entry.id : url.pathname.slice(3)}`, origin).href;
+  const image = new URL(`/share-icons/${icon}.png`, origin).href;
+  const escape = (s: string) => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
+  const metadata = [
+    ['property', 'og:type', 'website'],
+    ['property', 'og:site_name', 'Artifacts'],
+    ['property', 'og:title', title],
+    ['property', 'og:description', 'An artifact shared with you.'],
+    ['property', 'og:url', canonical],
+    ['property', 'og:image', image],
+    ['property', 'og:image:type', 'image/png'],
+    ['property', 'og:image:width', '1200'],
+    ['property', 'og:image:height', '630'],
+    ['property', 'og:image:alt', `${icon} topic icon`],
+    ['name', 'twitter:card', 'summary_large_image'],
+    ['name', 'twitter:title', title],
+    ['name', 'twitter:description', 'An artifact shared with you.'],
+    ['name', 'twitter:image', image],
+    ['name', 'twitter:image:alt', `${icon} topic icon`],
+  ].map(([attribute, name, value]) => `<meta ${attribute}="${name}" content="${escape(value!)}">`).join('\n');
+  const favicon = 'data:image/svg+xml,' + encodeURIComponent(iconSvg(icon, true));
   // Pages may load blobs (images, media, fonts) through signed links, and nothing else.
-  const blobs = `${new URL(req.url).origin}/b/`;
+  const blobs = `${url.origin}/b/`;
   const shell = await env.ASSETS.fetch(new URL('/viewer', req.url));
   if (!shell.ok) return shell;
   const nonce = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(16))));
   const page = new HTMLRewriter()
     .on('meta[name="artifact-nonce"]', { element: el => void el.setAttribute('content', nonce) })
+    .on('title', { element: el => void el.setInnerContent(title) })
+    .on('head', { element: el => void el.append(`${metadata}\n<link rel="icon" type="image/svg+xml" href="${escape(favicon)}">`, { html: true }) })
     .transform(shell);
-  return new Response(page.body, {
+  return new Response(req.method === 'HEAD' ? null : page.body, {
     headers: {
       'Content-Type': 'text/html; charset=utf-8',
       'Cache-Control': 'no-store',
@@ -977,7 +1011,7 @@ export default {
       return handleSync(req, env, ctx, id);
     }
 
-    if (method === 'GET' && /^\/v\/[A-Za-z0-9_-]{1,64}$/.test(path)) return handleViewer(req, env);
+    if ((method === 'GET' || method === 'HEAD') && /^\/v\/[A-Za-z0-9_-]{1,64}$/.test(path)) return handleViewer(req, env);
 
     return env.ASSETS.fetch(req);
   },

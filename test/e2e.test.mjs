@@ -148,7 +148,7 @@ before(async () => {
 // Its own process group, so stopping it ends wrangler and workerd together.
 async function startServer() {
   const wakeVars = ['--var', 'WAKE_SINK_KIND:webhook', '--var', `WAKE_SINK_URL:http://127.0.0.1:${hook.address().port}/wake`, '--var', `WAKE_SINK_SECRET:${wakeSecret}`];
-  server = spawn(join(root, 'node_modules/.bin/wrangler'), ['dev', '--port', String(port), '--ip', '127.0.0.1', '--persist-to', join(work, 'state'),
+  server = spawn(join(root, 'node_modules/.bin/wrangler'), ['dev', '--port', String(port), '--inspector-port', '0', '--ip', '127.0.0.1', '--persist-to', join(work, 'state'),
     '--var', `BEARER_TOKEN:${owner}`, ...wakeVars, '--show-interactive-dev-session=false'], { cwd: root, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
   let log = '';
   server.stdout.on('data', d => { log += d; });

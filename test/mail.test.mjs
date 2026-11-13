@@ -10,7 +10,7 @@ async function withWorker(vars,check) {
   const work=mkdtempSync(join(tmpdir(),'artifact-mail-isolation-'));
   const port=24000+Math.floor(Math.random()*1000),base=`http://127.0.0.1:${port}`;
   const settings={BEARER_TOKEN:'local-mail-test',OWNER_EMAIL:'owner@example.com',EMAIL_FROM:'artifacts@example.com',APP_ORIGIN:base,TEST_MAIL_TRANSPORT:'',...vars};
-  const args=['dev','--port',String(port),'--ip','127.0.0.1','--persist-to',join(work,'state'),'--show-interactive-dev-session=false'];
+  const args=['dev','--port',String(port),'--inspector-port','0','--ip','127.0.0.1','--persist-to',join(work,'state'),'--show-interactive-dev-session=false'];
   for(const [key,value]of Object.entries(settings))args.push('--var',`${key}:${value}`);
   const child=spawn(join(root,'node_modules/.bin/wrangler'),args,{cwd:root,stdio:['ignore','pipe','pipe'],detached:true});
   // Drain logs, including Miniflare's local email sink. Never print mail bodies.

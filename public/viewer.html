@@ -49,10 +49,15 @@
     <span id="versionTag" class="tag"></span>
     <svg class="small-chevron" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
   </button>
-  <button id="commentsBtn" class="icon-button comment-trigger" type="button" aria-label="Comments" title="Comments" aria-haspopup="dialog" aria-expanded="false" aria-controls="inspector">
-    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 4h8a5 5 0 0 1 5 5v5a5 5 0 0 1-5 5H8l-5 3V9a5 5 0 0 1 5-5Z"/></svg>
-    <span id="commentCount" class="muted"></span>
-  </button>
+  <div class="comment-group">
+    <button id="commentsBtn" class="icon-button comment-trigger" type="button" aria-label="Place comments on the page" title="Place comments on the page" aria-pressed="false" hidden>
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21s6.5-5.2 6.5-10.5a6.5 6.5 0 1 0-13 0C5.5 15.8 12 21 12 21Z"/><circle cx="12" cy="10.5" r="2.2"/></svg>
+    </button>
+    <button id="discussionsBtn" class="icon-button comment-trigger" type="button" aria-label="Comments and discussion" title="Comments and discussion" aria-haspopup="dialog" aria-expanded="false" aria-controls="inspector">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 4h8a5 5 0 0 1 5 5v5a5 5 0 0 1-5 5H8l-5 3V9a5 5 0 0 1 5-5Z"/></svg>
+      <span id="commentCount" class="muted"></span>
+    </button>
+  </div>
   <div class="menu-anchor share-anchor">
     <button id="shareBtn" class="primary-target" aria-label="Share artifact" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="shareMenu">
       <span class="primary-face">
@@ -164,6 +169,24 @@
           referrerpolicy="no-referrer"
           title="Artifact"></iframe>
         <div id="placementHint" role="status" hidden><span>Click anywhere to place a comment</span><button id="cancelPlacement" type="button" hidden>Cancel</button></div>
+        <form id="commentBubble" role="dialog" aria-label="New comment" hidden>
+          <div class="bubble-head">
+            <strong>New comment</strong>
+            <button id="bubbleClose" class="icon" type="button" aria-label="Close comment">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
+            </button>
+          </div>
+          <p id="bubbleAnchor" class="hint"></p>
+          <label class="sr-only" for="bubbleText">Comment</label>
+          <textarea id="bubbleText" rows="3" maxlength="8000" required></textarea>
+          <div class="bubble-actions">
+            <button id="bubbleGeneral" type="button">Discuss instead</button>
+            <span class="bubble-spacer"></span>
+            <button id="bubbleCancel" type="button">Cancel</button>
+            <button class="primary" type="submit">Comment</button>
+          </div>
+          <p id="bubbleStatus" class="hint" role="status" aria-live="polite"></p>
+        </form>
       </div>
 
       <aside id="inspector" role="dialog" aria-label="Artifact inspector" hidden>

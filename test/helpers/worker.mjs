@@ -43,7 +43,9 @@ export async function startWorker(work, vars = {}, { port: wanted } = {}) {
   const owner = 'worker-helper-owner-token';
   const varArgs = Object.entries({ BEARER_TOKEN: owner, ...vars }).flatMap(([k, v]) => ['--var', `${k}:${v}`]);
   // Its own process group, so stop() ends wrangler and workerd together.
-  const server = spawn(join(root, 'node_modules/.bin/wrangler'), ['dev', '--port', String(port), '--ip', '127.0.0.1',
+  // The inspector port is ephemeral: wrangler's default is the fixed 9229, and
+  // a second Worker starting while the first still holds it dies on bind.
+  const server = spawn(join(root, 'node_modules/.bin/wrangler'), ['dev', '--port', String(port), '--inspector-port', '0', '--ip', '127.0.0.1',
     '--persist-to', join(work, 'state'), ...varArgs, '--show-interactive-dev-session=false'],
   { cwd: root, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
   let log = '';

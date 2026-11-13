@@ -227,6 +227,28 @@ export function findQuotes(texts, quotes) {
 }
 
 /**
+ * Where a comment bubble sits for a click at `point` in the page area
+ * `bounds` ({left, top, width, height}, in viewport coordinates). Inset by
+ * GAP from the click, below-right when there is room, flipped to the other
+ * side when there is not, and clamped so no part leaves the page area. The
+ * bubble is a floating overlay: it never changes the page's layout.
+ */
+export function bubblePlacement(point, size, bounds) {
+  const GAP = 12;
+  const x = Number.isFinite(point?.x) ? point.x : bounds.left;
+  const y = Number.isFinite(point?.y) ? point.y : bounds.top;
+  const maxX = bounds.left + Math.max(0, bounds.width - size.width);
+  const maxY = bounds.top + Math.max(0, bounds.height - size.height);
+  let left = x + GAP, top = y + GAP;
+  const flippedX = left > maxX;
+  if (flippedX) left = x - GAP - size.width;
+  const flippedY = top > maxY;
+  if (flippedY) top = y - GAP - size.height;
+  const clamp = (n, min, max) => Math.min(Math.max(n, min), Math.max(min, max));
+  return { x: clamp(left, bounds.left, maxX), y: clamp(top, bounds.top, maxY), flippedX, flippedY };
+}
+
+/**
  * The anchor for a selection: `id` when the selection is the whole text of
  * that element, else the quoted text, at most 500 code points (the ticket
  * route's limit), so a cut never splits a surrogate pair. '' for no text.

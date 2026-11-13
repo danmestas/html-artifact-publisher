@@ -39,13 +39,14 @@ export async function viewerQA({ base, a, api, output, attach }) {
       return result;
     } catch (e) {
       const command = args[0] === 'open' ? 'open [private fixture]' : args.join(' ');
-      throw new Error(`agent-browser ${command} (${e.code ?? e.status ?? 'failed'}, ${e.signal ?? 'no signal'}): ${e.stdout ?? ''}${e.stderr ?? ''}`.slice(0, 2000));
+      const diagnostic = `agent-browser ${command} (${e.code ?? e.status ?? 'failed'}, ${e.signal ?? 'no signal'}): ${e.stdout ?? ''}${e.stderr ?? ''}`;
+      throw new Error(diagnostic.replace(/\b[0-9a-f]{64}\b/gi, '[private capability]').slice(0, 2000));
     }
   };
   const evaluate = async source => {
     await run('frame', 'main');
     const result = JSON.parse(await run('--json', 'eval', `({ top: window === top, viewer: !!document.getElementById('bar'), protocol: location.protocol, value: (${source}) })`));
-    assert.equal(result.success, true, JSON.stringify(result));
+    assert.equal(result.success, true, String(result.error ?? 'browser evaluation failed'));
     assert.equal(result.data.result.top && result.data.result.viewer, true, JSON.stringify(result.data.result));
     return result.data.result.value;
   };
@@ -124,7 +125,7 @@ export async function viewerQA({ base, a, api, output, attach }) {
     await run('click', '#moreBtn');
     assert.equal(await evaluate(`document.getElementById('moreMenu').querySelectorAll('button').length`), 0, 'More owns appearance only');
     await run('press', 'Escape');
-    await run('click', '#commentsBtn');
+    await run('click', '#discussionsBtn');
     await wait('#threadPanel:not([hidden])');
     await wait('#threadPanel .thread[data-anchored="no"]');
     await settle();
@@ -167,8 +168,9 @@ export async function viewerQA({ base, a, api, output, attach }) {
     await press(`#threadList .thread[data-label="${heading}"] > summary`);
     assert.equal((await panel(heading)).focus, true, 'threads still open while markers are hidden');
     assert.equal((await pins()).length, 0, 'opening a thread does not restore markers');
-    await run('click', '#commentsBtn');
-    assert.equal(await evaluate(`getComputedStyle(document.getElementById('commentsBtn')).backgroundColor`), 'rgba(0, 0, 0, 0)', 'open Comments has no filled active highlight');
+    await run('click', '#discussionsBtn');
+    assert.equal(await evaluate(`getComputedStyle(document.getElementById('commentsBtn')).backgroundColor`), 'rgba(0, 0, 0, 0)', 'the idle placement toggle is not filled');
+    assert.equal(await evaluate(`document.getElementById('commentsBtn').getAttribute('aria-pressed')`), 'false', 'opening the discussion panel does not arm placement');
     assert.equal(await evaluate(`getComputedStyle(document.getElementById('commentCount')).position`), 'static', 'count is inline, not a badge');
     assert.equal(await evaluate(`document.getElementById('commentCount').textContent`), countBefore);
     await evaluate(`document.documentElement.dataset.theme = 'dark'`);
@@ -216,10 +218,14 @@ export async function viewerQA({ base, a, api, output, attach }) {
     assert.equal((await panel(gone)).focus, false, 'a forged pin click opens nothing');
     await inFrame(`(document.getElementById('nested').remove(), parent.postMessage({ __artifactPins: 1, type: 'selection', anchor: 'FROM THE PAGE' }, '*'), true)`);
     await run('wait', '--fn', `document.getElementById('commentAnchor').textContent.includes('FROM THE PAGE')`);
+    // The panel is a separate control from placement now, so open it to reach
+    // its draft actions; the page's selection is kept either way.
+    await run('click', '#discussionsBtn');
+    await wait('#threadPanel:not([hidden])');
     await run('click', '#generalComment');
     await run('click', '#anchorClear');
     await run('click', '#cancelComment');
-    await run('click', '#commentsBtn');
+    await run('click', '#discussionsBtn');
     await wait('#threadPanel .thread');
 
     // A page sending pin clicks never takes focus from a reply being written.
@@ -283,7 +289,7 @@ export async function viewerQA({ base, a, api, output, attach }) {
     assert.equal((await byTitle('About the fox')).status, 'Open');
 
     // A new comment on selected text anchors to the quote and gets a pin.
-    await run('click', '#commentsBtn');
+    await run('click', '#discussionsBtn');
     await inFrame(`(() => {
       const t = document.querySelector('p').lastChild;
       const r = document.createRange(); r.setStart(t, t.data.indexOf('lazy')); r.setEnd(t, t.data.indexOf('dog') + 3);
@@ -300,68 +306,216 @@ export async function viewerQA({ base, a, api, output, attach }) {
     assert.equal((await panel(dog)).anchored, 'yes');
     assert.ok((await pins()).some(p => p.label === dog));
 
-    // Explicit placement accepts blank space; writing and reopening use real tickets.
+    // Explicit placement is the toggle: a click on the page drops a bubble at
+    // that point, over the page. The inspector stays shut and the page's box
+    // keeps the width it had, so the artifact does not reflow.
     const frameBox = async () => evaluate(`(() => { const r = document.getElementById('frame').getBoundingClientRect(); return { x: r.left, y: r.top, width: r.width, height: r.height }; })()`);
     const mouseAt = async (x, y) => {
       const f = await frameBox();
       await run('mouse', 'move', String(Math.round(f.x + x)), String(Math.round(f.y + y)));
       await run('mouse', 'down'); await run('mouse', 'up');
     };
-    await press('#placeComment');
+    await run('click', '#threadClose');
+    await settle();
+    const widthBefore = (await frameBox()).width;
+    await press('#commentsBtn');
     await wait('#placementHint:not([hidden])');
-    await mouseAt(1000, 280);
-    await wait('#threadPanel[data-mode="draft"]:not([hidden])');
-    await run('fill', '#commentText', 'Comment in blank space');
+    assert.equal(await evaluate(`document.getElementById('commentsBtn').getAttribute('aria-pressed')`), 'true', 'the comments button is an on/off placement switch');
+    await mouseAt(900, 280);
+    await wait('#commentBubble:not([hidden])');
+    assert.equal(await evaluate(`document.getElementById('inspector').hidden`), true, 'placing a comment does not open the inspector');
+    assert.equal((await frameBox()).width, widthBefore, 'placing a comment does not reshape the page');
+    const bubble = await evaluate(`(() => {
+      const b = document.getElementById('commentBubble').getBoundingClientRect(), f = document.getElementById('frame').getBoundingClientRect();
+      return { inside: b.left >= f.left && b.top >= f.top && b.right <= f.right && b.bottom <= f.bottom, left: b.left, top: b.top, width: b.width };
+    })()`);
+    assert.ok(bubble.inside, JSON.stringify(bubble));
+    assert.equal(await evaluate(`document.getElementById('commentsBtn').getAttribute('aria-pressed')`), 'true', 'placement stays on after a point, so the mode is not one shot');
+    // A second click moves the bubble without re-arming the toggle.
+    await mouseAt(700, 420);
+    await wait('#commentBubble:not([hidden])');
+    assert.equal(await evaluate(`document.getElementById('commentsBtn').getAttribute('aria-pressed')`), 'true', 'the mode survives a second click');
+    assert.equal((await frameBox()).width, widthBefore, 'moving the bubble does not reshape the page');
+    await run('fill', '#bubbleText', 'Comment in blank space');
     await run('press', 'Escape');
-    await run('click', '#commentsBtn');
-    assert.equal(await evaluate(`document.getElementById('placeComment').textContent`), 'Continue draft');
+    assert.equal(await evaluate(`document.getElementById('commentBubble').hidden`), true, 'Escape closes the bubble');
+    assert.equal(await evaluate(`document.getElementById('commentsBtn').getAttribute('aria-pressed')`), 'false', 'Escape ends the placement mode');
+    await run('click', '#discussionsBtn');
+    assert.equal(await evaluate(`document.getElementById('placeComment').textContent`), 'Continue draft', 'the anchor survives closing the bubble');
+    // The discussion index overlays the page, including when resuming a draft.
+    const widthOpen = (await frameBox()).width;
     await press('#placeComment');
     assert.equal(await evaluate(`document.getElementById('commentText').value`), 'Comment in blank space', 'closing preserves a draft');
+    assert.equal((await frameBox()).width, widthOpen, 'reopening the draft does not reshape the page again');
     await run('click', '#commentForm button[type=submit]');
     await run('wait', '--fn', `document.getElementById('threadPanel').dataset.mode === 'thread'`);
+    assert.equal((await frameBox()).width, widthOpen, 'posting does not reshape the page');
     const blank = await byTitle('Comment in blank space');
     assert.ok(blank.fields.subsystem.startsWith('hap-point:'), 'a real location anchor is persisted');
     let blankLabel = await labelOf('Comment in blank space');
     await settle();
     assert.equal((await panel(blankLabel)).anchored, 'yes');
     assert.ok((await pins()).some(p => p.label === blankLabel), 'a marker remains at the posted location');
-    const popover = await evaluate(`(() => { const r = document.getElementById('threadPanel').getBoundingClientRect(); return { x: r.left, y: r.top, right: r.right, bottom: r.bottom }; })()`);
+    // Posting from the general composer keeps its overlay open. Pin clicks
+    // instead open a contextual card at the pin.
+    const popover = await evaluate(`(() => { const r = document.getElementById('threadPanel').getBoundingClientRect(); return { x: r.left, y: r.top, right: r.right, bottom: r.bottom, card: document.getElementById('inspector').classList.contains('card') }; })()`);
+    assert.equal(popover.card, false, 'a general reply stays in the discussion overlay');
     assert.ok(popover.x > 500 && popover.right <= 1280 && popover.y >= 45 && popover.bottom <= 900, JSON.stringify(popover));
     await run('click', '#threadClose');
-    await clickPin(blankLabel);
+    const pin = await clickPin(blankLabel);
     await wait('#threadPanel[data-mode="thread"]:not([hidden])');
     assert.ok((await panel(blankLabel)).text.includes('Comment in blank space'));
+    // A pin opens its thread as a card at the pin, over the page: the same
+    // click coordinates, near the pin, inside the page box, and the frame
+    // keeps the width it had with no panel open.
+    await settle();
+    const card = await evaluate(`(() => {
+      const r = document.getElementById('inspector').getBoundingClientRect(), f = document.getElementById('frame').getBoundingClientRect();
+      return { card: document.getElementById('inspector').classList.contains('card'), x: r.left, y: r.top, right: r.right, bottom: r.bottom, width: r.width,
+        frame: { x: f.left, y: f.top, right: f.right, bottom: f.bottom, width: f.width } };
+    })()`);
+    assert.equal(card.card, true, 'a thread from a pin is an anchored card');
+    assert.equal(card.frame.width, widthBefore, 'opening a pin thread does not reshape the page');
+    // Anchored at the pin: the card's near horizontal edge sits about one gap
+    // from the clicked pin, and its top is just under the pin's bottom edge,
+    // rather than parked at the screen's right edge.
+    const gapX = Math.min(Math.abs(card.x - (card.frame.x + pin.x)), Math.abs(card.right - (card.frame.x + pin.x)));
+    const gapY = card.y - (card.frame.y + pin.y + pin.h / 2);
+    assert.ok(gapX <= 30 && gapY >= -30 && gapY <= 100, JSON.stringify({ card, pin, gapX, gapY }));
+    assert.ok(card.x >= card.frame.x && card.y >= card.frame.y && card.right <= card.frame.right && card.bottom <= card.frame.bottom, JSON.stringify(card));
+    // A reply typed into the card stays there, and a page message cannot take it.
+    await run('fill', '#threadPanel .thread.focus .reply textarea', 'Card reply in progress');
+    await inFrame(`(parent.postMessage({ __artifactPins: 1, type: 'open', key: ${Number(blankLabel) + 1} }, '*'), parent.postMessage({ __artifactPins: 1, type: 'dismiss' }, '*'), true)`);
+    await settle();
+    assert.equal(await evaluate(`document.querySelector('#threadPanel .thread.focus .reply textarea')?.value`), 'Card reply in progress', 'a pin message cannot replace a reply being written');
+    assert.equal(await evaluate(`document.getElementById('inspector').classList.contains('card') && !document.getElementById('inspector').hidden`), true, 'the card stays open');
+    await run('fill', '#threadPanel .thread.focus .reply textarea', '');
+    await run('click', '#threadClose');
     await run('reload');
     await wait('#bar:not([hidden])');
-    await run('click', '#commentsBtn');
+    await run('click', '#discussionsBtn');
     await run('wait', '--fn', `[...document.querySelectorAll('#threadPanel summary .title')].some(e => e.textContent === 'Comment in blank space')`);
     blankLabel = await labelOf('Comment in blank space');
     await settle();
     assert.ok((await pins()).some(p => p.label === blankLabel), 'the marker survives reload');
 
-    // Page messages alone cannot start placement, and explicit cancel clears drafts.
+    // The discussion index is an overlay too: moving from it to a pin card
+    // must not widen the artifact, even for a reader who left the index open.
+    assert.equal((await frameBox()).width, widthBefore, 'the discussion index never narrows the page');
+    await clickPin(blankLabel);
+    await wait('#inspector.card:not([hidden])');
+    assert.equal((await frameBox()).width, widthBefore, 'index-to-pin navigation never reshapes the page');
+    await run('click', '#threadClose');
+
+    // Opening an existing pin while placement is armed keeps the mode on.
+    // Closing its card still lets the very next blank-page click place a bubble.
+    await press('#commentsBtn');
+    await clickPin(blankLabel);
+    await wait('#inspector.card:not([hidden])');
+    assert.equal(await evaluate(`document.getElementById('commentsBtn').getAttribute('aria-pressed')`), 'true', 'a pin click preserves the placement switch');
+    await run('click', '#threadClose');
+    await mouseAt(820, 360);
+    await wait('#commentBubble:not([hidden])');
+    await run('click', '#bubbleCancel');
+
+    // A bubble cannot overwrite an unrelated discussion draft. Both sets of
+    // words remain available when Discuss instead is refused, and closing the
+    // bubble preserves its own words as well.
+    await run('click', '#discussionsBtn');
+    await press('#generalComment');
+    await run('fill', '#commentText', 'Unrelated general draft');
+    await press('#commentsBtn');
+    await mouseAt(820, 360);
+    await wait('#commentBubble:not([hidden])');
+    await run('fill', '#bubbleText', 'Separate anchored draft');
+    await run('click', '#bubbleGeneral');
+    assert.deepEqual(await evaluate(`({ bubble: document.getElementById('bubbleText').value, general: document.getElementById('commentText').value, open: !document.getElementById('commentBubble').hidden })`), {
+      bubble: 'Separate anchored draft', general: 'Unrelated general draft', open: true,
+    }, 'Discuss instead preserves both independent drafts');
+    await run('click', '#bubbleClose');
+    await press('#commentsBtn');
+    await mouseAt(820, 360);
+    await wait('#commentBubble:not([hidden])');
+    assert.equal(await evaluate(`document.getElementById('bubbleText').value`), 'Separate anchored draft', 'closing a bubble does not lose its words when another draft exists');
+    await run('click', '#bubbleCancel');
+    await run('click', '#discussionsBtn');
+    await press('#generalComment');
+    assert.equal(await evaluate(`document.getElementById('commentText').value`), 'Unrelated general draft');
+    await run('click', '#cancelComment');
+
+    // A failed post keeps its text and visible error even if X or Escape is
+    // pressed while the request is in flight. Hold only this fixture request.
+    await press('#commentsBtn');
+    await mouseAt(820, 360);
+    await wait('#commentBubble:not([hidden])');
+    await run('fill', '#bubbleText', 'Keep these words if posting fails');
+    await evaluate(`(() => {
+      window.__originalCommentFetch = window.fetch;
+      window.fetch = function(input, init) {
+        if (String(input).includes('/tickets') && init?.method === 'POST') {
+          return new Promise((resolve, reject) => { window.__rejectCommentPost = () => reject(new Error('Fixture offline')); });
+        }
+        return window.__originalCommentFetch.call(this, input, init);
+      };
+    })()`);
+    await run('click', '#commentBubble button[type=submit]');
+    await run('wait', '--fn', `typeof window.__rejectCommentPost === 'function' && document.getElementById('bubbleText').readOnly`);
+    await run('click', '#bubbleClose');
+    assert.equal(await evaluate(`document.getElementById('commentBubble').hidden`), false, 'X cannot discard an in-flight comment');
+    await run('press', 'Escape');
+    await evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+    assert.equal(await evaluate(`document.getElementById('commentBubble').hidden`), false, 'neither Escape path discards an in-flight comment');
+    await evaluate(`(window.fetch = window.__originalCommentFetch, window.__rejectCommentPost(), true)`);
+    await run('wait', '--fn', `document.getElementById('bubbleStatus').textContent.includes('Could not post:')`);
+    assert.deepEqual(await evaluate(`({ open: !document.getElementById('commentBubble').hidden, text: document.getElementById('bubbleText').value, editable: !document.getElementById('bubbleText').readOnly })`), {
+      open: true, text: 'Keep these words if posting fails', editable: true,
+    }, 'a failed request leaves the comment visible and recoverable');
+    await run('click', '#bubbleCancel');
+
+    // Posting from the bubble ends that bubble but not the mode: the reader can
+    // place the next comment without arming the toggle again.
+    await press('#commentsBtn');
+    await mouseAt(820, 360);
+    await wait('#commentBubble:not([hidden])');
+    await run('fill', '#bubbleText', 'Second comment while placing');
+    await run('click', '#commentBubble button[type=submit]');
+    await run('wait', '--fn', `document.getElementById('commentBubble').hidden`);
+    assert.equal(await evaluate(`document.getElementById('commentsBtn').getAttribute('aria-pressed')`), 'true', 'posting from the bubble keeps placement on');
+    assert.equal((await frameBox()).width, widthBefore, 'posting from the bubble does not reshape the page');
+    await press('#commentsBtn');
+    assert.equal(await evaluate(`document.getElementById('commentsBtn').getAttribute('aria-pressed')`), 'false');
+    const second = await byTitle('Second comment while placing');
+    assert.ok(second.fields.subsystem.startsWith('hap-point:'), 'the second placed comment is anchored too');
+    await run('click', '#discussionsBtn');
+    await wait('#threadPanel .thread');
+    await settle();
     const beforePoint = (await tickets()).length;
     await inFrame(`(parent.postMessage({ __artifactPins: 1, type: 'point', anchor: ${JSON.stringify(blank.fields.subsystem)}, x: 20, y: 20 }, '*'), true)`);
     await settle();
-    assert.equal(await evaluate(`document.getElementById('threadPanel').dataset.mode`), 'index');
+    assert.equal(await evaluate(`document.getElementById('commentBubble').hidden`), true, 'a page message alone cannot open the bubble');
     assert.equal((await tickets()).length, beforePoint);
-    await press('#placeComment');
+    await press('#commentsBtn');
     await run('press', 'Enter');
-    await wait('#threadPanel[data-mode="draft"]:not([hidden])');
-    await run('fill', '#commentText', 'Discard this draft');
-    await run('click', '#cancelComment');
-    await run('click', '#commentsBtn');
+    await wait('#commentBubble:not([hidden])');
+    await run('fill', '#bubbleText', 'Discard this draft');
+    await run('click', '#bubbleCancel');
+    assert.equal(await evaluate(`document.getElementById('commentBubble').hidden`), true);
+    assert.equal(await evaluate(`document.getElementById('bubbleText').value`), '');
+    await run('click', '#discussionsBtn');
     assert.equal(await evaluate(`document.getElementById('commentText').value`), '');
     assert.equal((await tickets()).length, beforePoint);
 
     // An element location follows reflow, rather than staying at a viewport pixel.
-    await press('#placeComment');
+    await press('#commentsBtn');
     const headingBox = await inFrame(`(() => { const r = document.getElementById('intro').getBoundingClientRect(); return { x: r.left + 45, y: r.top + 12 }; })()`);
     await mouseAt(headingBox.x, headingBox.y);
-    await wait('#threadPanel[data-mode="draft"]:not([hidden])');
-    await run('fill', '#commentText', 'Location on heading');
-    await run('click', '#commentForm button[type=submit]');
-    await run('wait', '--fn', `document.getElementById('threadPanel').dataset.mode === 'thread'`);
+    await wait('#commentBubble:not([hidden])');
+    assert.equal(await evaluate(`document.getElementById('inspector').hidden`), true, 'the bubble stands in for the inspector');
+    await run('fill', '#bubbleText', 'Location on heading');
+    await run('click', '#commentBubble button[type=submit]');
+    await run('wait', '--fn', `document.getElementById('commentBubble').hidden`);
+    await run('wait', '--fn', `[...document.querySelectorAll('#threadPanel summary .title')].some(e => e.textContent === 'Location on heading')`);
+    assert.equal(await evaluate(`document.getElementById('inspector').hidden`), true, 'posting from the bubble leaves the page in place');
     const located = await byTitle('Location on heading');
     assert.equal(JSON.parse(located.fields.subsystem.slice('hap-point:'.length)).id, 'intro');
     const locatedLabel = await labelOf('Location on heading');
@@ -372,7 +526,7 @@ export async function viewerQA({ base, a, api, output, attach }) {
     const afterMove = (await pins()).find(p => p.label === locatedLabel);
     assert.ok(afterMove.y - beforeMove.y > 100, JSON.stringify({ beforeMove, afterMove }));
     await inFrame(`(document.getElementById('intro').style.marginTop = '', true)`);
-    await run('click', '#commentsBtn');
+    await run('click', '#discussionsBtn');
 
     // Dark theme: the panel follows the viewer's tokens.
     await evaluate(`document.documentElement.dataset.theme = 'dark'`);
@@ -392,9 +546,52 @@ export async function viewerQA({ base, a, api, output, attach }) {
     await run('screenshot', join(output, 'comment-link-phone-dropdown.png'));
     await run('click', '#threadClose');
     await settle();
+    // On a phone the bubble is still an overlay over the page: it fits the
+    // page's box, and neither placing nor cancelling resizes the iframe.
+    const phoneFrame = await frameBox();
+    await press('#commentsBtn');
+    await mouseAt(190, 300);
+    await wait('#commentBubble:not([hidden])');
+    const phoneBubble = await evaluate(`(() => {
+      const b = document.getElementById('commentBubble').getBoundingClientRect(), f = document.getElementById('frame').getBoundingClientRect();
+      return { inside: b.left >= f.left && b.top >= f.top && b.right <= f.right && b.bottom <= f.bottom,
+        overflow: document.documentElement.scrollWidth > innerWidth, width: b.width, frame: f.width, toolbar: document.getElementById('bar').offsetHeight };
+    })()`);
+    assert.ok(phoneBubble.inside && !phoneBubble.overflow, JSON.stringify(phoneBubble));
+    assert.equal(phoneBubble.frame, phoneFrame.width, 'a phone comment bubble does not reshape the page');
+    assert.equal(phoneBubble.toolbar, 89, 'the placement toggle fits the two-row phone header');
+    await run('screenshot', join(output, 'comment-link-phone-bubble.png'));
+    await run('fill', '#bubbleText', 'Typing with a short visible viewport');
+    // A keyboard-sized visible band must bound the composer and provide its
+    // own scrolling, rather than placing Comment below the visible page.
+    await run('set', 'viewport', '390', '280');
+    await settle();
+    const keyboardBubble = await evaluate(`(() => {
+      const b = document.getElementById('commentBubble'), r = b.getBoundingClientRect(), f = document.getElementById('frame').getBoundingClientRect();
+      b.scrollTop = b.scrollHeight;
+      const submit = b.querySelector('[type=submit]').getBoundingClientRect();
+      return { inside: r.top >= f.top && r.bottom <= f.bottom, scrollable: b.scrollHeight > b.clientHeight && getComputedStyle(b).overflowY === 'auto', submitVisible: submit.top >= r.top && submit.bottom <= r.bottom };
+    })()`);
+    assert.ok(keyboardBubble.inside && keyboardBubble.scrollable && keyboardBubble.submitVisible, JSON.stringify(keyboardBubble));
+    await run('set', 'viewport', '390', '844');
+    await run('press', 'Escape');
+    assert.equal(await evaluate(`document.getElementById('commentBubble').hidden`), true, 'Escape closes the phone bubble');
+    assert.equal((await frameBox()).width, phoneFrame.width, 'cancelling does not reshape the page');
     const headingNow = await labelOf('About the heading'); // labels moved: new threads come first
     await clickPin(headingNow);
     await wait(`#threadPanel .thread.focus[data-label="${headingNow}"]`);
+    await settle();
+    // On a phone the pin's card is bounded too: it fits the visible area, the
+    // frame keeps its width, and the header keeps one row count.
+    const phoneCard = await evaluate(`(() => {
+      const i = document.getElementById('inspector'), r = i.getBoundingClientRect(), f = document.getElementById('frame').getBoundingClientRect();
+      return { card: i.classList.contains('card'), inside: r.left >= f.left - 1 && r.top >= f.top - 1 && r.right <= f.right + 1 && r.bottom <= f.bottom + 1,
+        frame: f.width, height: r.height, overflow: document.documentElement.scrollWidth > innerWidth };
+    })()`);
+    assert.ok(phoneCard.height > 100, 'a phone thread card contains its visible content');
+    assert.equal(phoneCard.card, true, 'a phone pin opens an anchored card');
+    assert.ok(phoneCard.inside && !phoneCard.overflow, JSON.stringify(phoneCard));
+    assert.equal(phoneCard.frame, phoneFrame.width, 'a phone pin card does not reshape the page');
     await run('screenshot', join(output, 'comment-link-phone-pin.png'));
 
     // A reply from another client appears in the open thread, even while typing.
@@ -429,7 +626,7 @@ export async function viewerQA({ base, a, api, output, attach }) {
     await run('click', '#titleBtn');
     await download('#downloadFilesBtn');
     assert.equal(await evaluate(`document.getElementById('titleMenu').hidden`), true, 'downloading closes artifact details');
-    await run('click', '#commentsBtn');
+    await run('click', '#discussionsBtn');
     await wait('#threadPanel .thread');
     await settle();
     const readOnly = await evaluate(`({ form: document.getElementById('commentForm').hidden, replies: document.querySelectorAll('#threadPanel .reply').length,
@@ -444,8 +641,13 @@ export async function viewerQA({ base, a, api, output, attach }) {
     await press('#showCommentMarkers');
     await settle();
     assert.ok((await pins()).length >= 3, 'read-only viewers can restore markers');
-    const cue = await evaluate(`(() => { const c = document.getElementById('readCue'), f = document.getElementById('frame'); return { visible: !c.hidden, clear: c.getBoundingClientRect().bottom <= f.getBoundingClientRect().top, placeHidden: document.getElementById('placeComment').hidden, sandbox: f.getAttribute('sandbox') }; })()`);
-    assert.ok(cue.visible && cue.clear && !cue.placeHidden && !cue.sandbox.includes('allow-same-origin'), JSON.stringify(cue));
+    // Placement is offered exactly to readers who may comment. This read link
+    // may discuss as a guest, so both comment controls are positively present:
+    // the page stays view-only while the comment controls stand beside it.
+    const cue = await evaluate(`(() => { const c = document.getElementById('readCue'), f = document.getElementById('frame'); return { visible: !c.hidden, clear: c.getBoundingClientRect().bottom <= f.getBoundingClientRect().top, placeVisible: !document.getElementById('commentsBtn').hidden, generalVisible: !document.getElementById('placeComment').hidden, sandbox: f.getAttribute('sandbox') }; })()`);
+    assert.equal(cue.placeVisible, true, 'a guest reader can place comments');
+    assert.equal(cue.generalVisible, true, 'a guest reader can write a general comment');
+    assert.ok(cue.visible && cue.clear && !cue.sandbox.includes('allow-same-origin'), JSON.stringify(cue));
     await inFrame(`(parent.postMessage({ __artifactPins: 1, type: 'point', anchor: ${JSON.stringify(blank.fields.subsystem)}, x: 20, y: 20 }, '*'), true)`);
     await settle();
     assert.equal(await evaluate(`document.getElementById('threadPanel').dataset.mode`), 'index', 'a read link cannot be made a composer by page messages');
@@ -461,7 +663,7 @@ export async function viewerQA({ base, a, api, output, attach }) {
       attach(JSON.stringify({ responder: XSS.text.split('\n')[0], contact: XSS.author }));
       await run('reload');
       await wait('#bar:not([hidden])');
-      await run('click', '#commentsBtn');
+      await run('click', '#discussionsBtn');
       await wait('#responderNote[data-attached="true"]');
       assert.deepEqual(await banner(), { attached: 'true', text: `A responder is registered. Registration does not verify that it is online. ${XSS.text.split('\n')[0]} (${XSS.author})`, kids: 0 });
       assert.deepEqual(await evaluate('[window.__xss]'), [null], 'markup in the file never ran');
@@ -469,7 +671,7 @@ export async function viewerQA({ base, a, api, output, attach }) {
       attach(null);
       await run('reload');
       await wait('#bar:not([hidden])');
-      await run('click', '#commentsBtn');
+      await run('click', '#discussionsBtn');
       await wait('#responderNote[data-attached="false"]');
     }
     // Editors keep management in the title dropdown and can restore old versions.
@@ -515,7 +717,8 @@ export async function viewerQA({ base, a, api, output, attach }) {
     failure = error;
     try {
       await run('screenshot', join(output, 'failure.png'));
-      console.error(await run('--json', 'eval', `({ top: window === top, protocol: location.protocol, title: document.title, viewer: !!document.getElementById('bar'), panel: document.getElementById('threadPanel')?.hidden, threads: document.querySelectorAll('.thread').length, errors: window.__qaErrors })`));
+      const diagnostic = JSON.parse(await run('--json', 'eval', `({ top: window === top, protocol: location.protocol, viewer: !!document.getElementById('bar'), panel: document.getElementById('threadPanel')?.hidden, threads: document.querySelectorAll('.thread').length })`));
+      console.error(diagnostic.data?.result); // The CLI envelope contains the private fixture URL.
     } catch { /* preserve the original failure if the browser stopped responding */ }
     throw error;
   } finally {

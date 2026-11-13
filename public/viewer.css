@@ -45,6 +45,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .hint { color: var(--muted); font-size: 12.5px; line-height: 1.5; }
 .danger { color: var(--danger) !important; }
 button:disabled { cursor: wait; opacity: .6; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 
 select {
   appearance: none; min-height: 36px; max-width: 100%; padding: 0 32px 0 10px;
@@ -115,8 +116,11 @@ input[type=text], input[type=email], input[type=datetime-local], textarea {
 .tag { font-size: 10px; font-weight: 400; }
 .tag.latest { color: var(--muted); }
 
-#commentsBtn { display: inline-flex; align-items: center; gap: 5px; width: auto; min-width: 34px; padding: 0 6px; color: var(--ink-2); }
-#commentsBtn:hover, #commentsBtn[aria-expanded="true"] { background-color: transparent; color: var(--ink); }
+.comment-group { display: inline-flex; align-items: center; gap: 2px; flex: none; }
+#commentsBtn, #discussionsBtn { display: inline-flex; align-items: center; gap: 5px; width: auto; min-width: 34px; padding: 0 6px; color: var(--ink-2); }
+#commentsBtn:hover, #discussionsBtn:hover, #discussionsBtn[aria-expanded="true"] { background-color: transparent; color: var(--ink); }
+/* The placement toggle is a switch, so on must read as on: a filled, accented control. */
+#commentsBtn[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-ink); box-shadow: inset 0 0 0 1px var(--accent-edge); }
 #commentCount { font: 11px/1 var(--mono); color: var(--muted); position: static; }
 #commentCount:empty { display: none; }
 
@@ -258,6 +262,29 @@ input[type=text], input[type=email], input[type=datetime-local], textarea {
 }
 #cancelPlacement { flex: none; min-height: 28px; padding: 0 8px; border: none; background: transparent; color: inherit; font-size: 12px; }
 
+/* The comment bubble floats over the page: a card in the viewer, positioned by
+   viewer.js at the reader's click. It never resizes the iframe or the page. */
+#commentBubble {
+  position: fixed; z-index: 8; width: min(340px, calc(100vw - 24px));
+  display: flex; flex-direction: column; gap: 8px; padding: 12px;
+  overflow-y: auto; overscroll-behavior: contain;
+  background: var(--surface); color: var(--ink); border: 1px solid var(--line-strong);
+  border-radius: 10px; box-shadow: var(--shadow);
+}
+#commentBubble > * { flex-shrink: 0; }
+.bubble-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.bubble-head strong { font-size: 13px; }
+.bubble-head .icon { width: 30px; height: 30px; flex: none; }
+#bubbleAnchor { margin: 0; overflow-wrap: anywhere; }
+#bubbleText { width: 100%; padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--bar); color: var(--ink); font: inherit; resize: vertical; }
+.bubble-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.bubble-spacer { flex: 1; min-width: 0; }
+.bubble-actions button { min-height: 36px; padding: 0 12px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface); color: var(--ink); font-size: 12.5px; }
+.bubble-actions .primary { background: var(--ink); color: var(--bar); border-color: var(--ink); }
+#bubbleGeneral { border: 0; padding: 0; background: transparent; color: var(--muted); text-decoration: underline; text-underline-offset: 3px; }
+#bubbleStatus:empty { display: none; }
+#bubbleStatus { margin: 0; }
+
 /* ── Older check-in strip ─────────────────────────────────────────────── */
 #oldStrip {
   display: flex; align-items: center; gap: 8px; flex: none; height: 26px;
@@ -289,6 +316,27 @@ input[type=text], input[type=email], input[type=datetime-local], textarea {
 
 .marker-preference { padding: 10px 14px; border-bottom: 1px solid var(--line); }
 #threadPanel:not([data-mode="index"]) .marker-preference { display: none; }
+/* Every comment view overlays the page. Switching between the index, a draft
+   and a pin card must never add or remove a column in the stage's flex row. */
+#inspector.comments-overlay {
+  position: absolute; z-index: 8; top: 12px; right: 12px; bottom: 12px;
+  width: min(380px, calc(100% - 24px)); max-width: calc(100% - 24px);
+  border: 1px solid var(--line-strong); border-radius: 10px; box-shadow: var(--shadow);
+  overflow: hidden;
+}
+/* A thread opened from a pin is an anchored card over the page. Its position
+   is in viewport coordinates; reset index/phone insets before placing it. */
+#inspector.card {
+  position: fixed; right: auto; bottom: auto; height: auto; max-width: none;
+  z-index: 8; display: flex; flex-direction: column; flex: none;
+  min-height: 0; overflow: hidden; background: var(--surface); color: var(--ink);
+  border: 1px solid var(--line-strong); border-radius: 10px; box-shadow: var(--shadow);
+}
+#inspector.card #threadPanel {
+  position: relative; inset: auto;
+  flex: 1; min-height: 0; width: auto; max-height: 100%; border-radius: inherit;
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
 #showCommentMarkers { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; min-height: 36px; padding: 6px 0; border: 0; background: transparent; text-align: left; font-size: 12px; }
 .switch-track { position: relative; flex: none; width: 30px; height: 17px; border-radius: 9px; background: var(--muted); transition: background .15s; }
 .switch-track::after { content: ''; position: absolute; top: 3px; left: 3px; width: 11px; height: 11px; border-radius: 50%; background: var(--surface); transition: left .15s; }
@@ -429,7 +477,7 @@ dialog.manage-dialog::backdrop { background: var(--overlay); }
 @media (max-width: 640px) {
   /* Give the title its own row. The second row replaces the old read-only
      strip, so readable controls cost no additional artifact height. */
-  #bar { display: grid; grid-template-columns: 44px minmax(0, 1fr) 44px auto 44px; grid-template-rows: 44px 44px; height: 89px; gap: 0 4px; padding-inline: max(6px, env(safe-area-inset-left, 0px)) max(6px, env(safe-area-inset-right, 0px)); }
+  #bar { display: grid; grid-template-columns: 44px minmax(0, 1fr) auto auto 44px; grid-template-rows: 44px 44px; height: 89px; gap: 0 4px; padding-inline: max(6px, env(safe-area-inset-left, 0px)) max(6px, env(safe-area-inset-right, 0px)); }
   #bar > .brand, #navBtn { grid-row: 1; grid-column: 1; }
   #bar:has(#navBtn:not([hidden])) > .brand { display: none; }
   .title-anchor { grid-row: 1; grid-column: 2 / -1; }
@@ -437,7 +485,7 @@ dialog.manage-dialog::backdrop { background: var(--overlay); }
   #versionBtn { grid-row: 2; grid-column: 1 / 3; justify-self: start; font-family: var(--sans); }
   #versionHash, #versionTag, #titleHint, #readCue { display: none; }
   .phone-history { display: inline; }
-  #commentsBtn { grid-row: 2; grid-column: 3; }
+  .comment-group { grid-row: 2; grid-column: 3; }
   .share-anchor { grid-row: 2; grid-column: 4; }
   .appearance-anchor { grid-row: 2; grid-column: 5; }
   #stage.readonly #frame { margin-top: 0; }
@@ -447,7 +495,7 @@ dialog.manage-dialog::backdrop { background: var(--overlay); }
   #title { font-size: 14px; }
   .icon-button { width: 44px; height: 44px; }
   #moreBtn { width: 44px; height: 44px; }
-  #commentsBtn { min-width: 44px; padding: 0 6px; }
+  #commentsBtn, #discussionsBtn { min-width: 44px; padding: 0 6px; }
   #shareBtn { height: 44px; }
   .primary-face { height: 32px; padding: 0 10px; }
   .version-button { height: 44px; padding: 0 4px; }

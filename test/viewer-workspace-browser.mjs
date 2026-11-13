@@ -52,22 +52,39 @@ export async function viewerWorkspaceQA({ base, output, api, account, artifact, 
 })();\n`);
 
   const session = `viewer-workspace-qa-${process.pid}`;
+  let viewerTab = '';
   const run = async (...args) => {
-    const label = args.join(' ').slice(0, 90);
+    const exec = async (...command) => (await execFileAsync('agent-browser', ['--session', session, ...command], {
+      encoding: 'utf8', timeout: 45000,
+      env: { ...process.env, AGENT_BROWSER_IDLE_TIMEOUT_MS: '600000', AGENT_BROWSER_INIT_SCRIPTS: initScript },
+    })).stdout;
     try {
-      const { stdout } = await execFileAsync('agent-browser', ['--session', session, ...args], {
-        encoding: 'utf8', timeout: 45000,
-        env: { ...process.env, AGENT_BROWSER_IDLE_TIMEOUT_MS: '600000', AGENT_BROWSER_INIT_SCRIPTS: initScript },
-      });
+      // The CLI can select its initial blank tab after a fill. Keep every
+      // workspace action on the fixture, not whichever tab it made current.
+      if (viewerTab && !['open', 'close', 'tab', 'get'].includes(args[0])) await exec('tab', viewerTab);
+      const stdout = await exec(...args);
+      if (args[0] === 'open') {
+        const tabs = JSON.parse(await exec('--json', 'tab', 'list')).data.tabs;
+        viewerTab = tabs.find(t => t.url === args[1])?.tabId ?? '';
+        assert.ok(viewerTab, 'the fixture viewer has its own browser tab');
+        // Remove only the unused initial tab in this test's isolated session;
+        // it must never become the fallback target of a later command.
+        for (const tab of tabs) if (tab.tabId !== viewerTab && tab.url === 'about:blank') await exec('tab', 'close', tab.tabId);
+        await exec('--pin-tab', 'tab', viewerTab);
+      }
       return stdout;
     } catch (error) {
-      error.message = `${error.message}\n  during: ${label}`;
-      throw error;
+      const label = ['open', 'cookies'].includes(args[0]) ? `${args[0]} [private fixture]` : args.join(' ').slice(0, 90);
+      const diagnostic = `agent-browser ${label} (${error.code ?? 'failed'}): ${error.stdout ?? ''}${error.stderr ?? ''}`;
+      throw new Error(diagnostic.replace(/\b[0-9a-f]{64}\b/gi, '[private capability]'));
     }
   };
   const json = async source => {
+    // Interacting with the embedded page can change the CLI's frame context.
+    // Workspace assertions always refer to the parent viewer, never its iframe.
+    await run('frame', 'main');
     const result = JSON.parse(await run('--json', 'eval', source));
-    assert.equal(result.success, true, JSON.stringify(result));
+    assert.equal(result.success, true, String(result.error ?? 'browser evaluation failed'));
     return result.data.result;
   };
   const wait = selector => run('wait', selector);
@@ -81,7 +98,7 @@ export async function viewerWorkspaceQA({ base, output, api, account, artifact, 
     await signInAs(account);
     await run('set', 'viewport', '1440', '900');
     await run('open', `${base}/v/${artifact.id}`);
-    await run('tab', 't1');
+    await run('tab', viewerTab);
     await run('wait', '--fn', `document.visibilityState === 'visible'`);
     await wait('#bar:not([hidden])');
     await wait('#navBtn:not([hidden])');
@@ -108,7 +125,7 @@ export async function viewerWorkspaceQA({ base, output, api, account, artifact, 
 
     stage = 'management-dialog-contrast';
     for (const theme of ['dark', 'light']) {
-      await run('tab', 't1');
+      await run('tab', viewerTab);
       await run('wait', '--fn', `document.visibilityState === 'visible'`);
       await json(`document.documentElement.dataset.theme = ${JSON.stringify(theme)}`);
       await run('click', '#titleBtn');
@@ -170,14 +187,14 @@ export async function viewerWorkspaceQA({ base, output, api, account, artifact, 
 
     stage = 'inspector';
     // ── One inspector, never a reloaded page ──────────────────────────────
-    await run('click', '#commentsBtn');
+    await run('click', '#discussionsBtn');
     await wait('#threadPanel:not([hidden])');
     await run('wait', '--fn', `document.querySelectorAll('#threadPanel .thread').length > 0`);
     await json(`(window.__frame = document.getElementById('frame').contentWindow, true)`);
     await run('click', '#versionBtn');
     await wait('#historyPanel:not([hidden])');
     assert.equal(await json(`document.getElementById('threadPanel').hidden`), true, 'history and comments are exclusive');
-    await run('click', '#commentsBtn');
+    await run('click', '#discussionsBtn');
     await wait('#threadPanel:not([hidden])');
     assert.equal(await json(`document.getElementById('historyPanel').hidden`), true, 'switching back hides history');
     assert.equal(await json(`window.__frame === document.getElementById('frame').contentWindow`), true, 'switching panes keeps the same page instance');
@@ -187,12 +204,14 @@ export async function viewerWorkspaceQA({ base, output, api, account, artifact, 
     await run('click', '#threadPanel .thread:first-of-type summary');
     await run('wait', '--fn', `document.getElementById('threadPanel').dataset.mode === 'thread'`);
     await run('fill', '#threadPanel .thread.focus .reply textarea', 'An unfinished reply');
-    const label = await json(`document.querySelector('#threadPanel .thread.focus').dataset.label`);
+    const focusedThread = await json(`(() => { const t = document.querySelector('#threadPanel .thread.focus'); return { label: t?.dataset.label ?? null, mode: document.getElementById('threadPanel')?.dataset.mode ?? null, hidden: document.getElementById('inspector')?.hidden ?? null, top: window === top, path: location.pathname, reply: t?.querySelector('.reply textarea')?.value ?? null }; })()`);
+    assert.ok(focusedThread.label && focusedThread.reply === 'An unfinished reply', JSON.stringify(focusedThread));
+    const label = focusedThread.label;
     await run('click', '#threadClose');
     await run('wait', '--fn', `document.getElementById('inspector').hidden`);
     await run('click', '#versionBtn');
     await wait('#historyPanel:not([hidden])');
-    await run('click', '#commentsBtn');
+    await run('click', '#discussionsBtn');
     await wait('#threadPanel:not([hidden])');
     await run('click', `#threadList .thread[data-label="${label}"] summary`);
     await run('wait', '--fn', `document.getElementById('threadPanel').dataset.mode === 'thread'`);
@@ -211,7 +230,7 @@ export async function viewerWorkspaceQA({ base, output, api, account, artifact, 
 
     stage = 'leave';
     // ── Leaving by a recent row asks first; other doors do not ────────────
-    await run('click', '#commentsBtn');
+    await run('click', '#discussionsBtn');
     await wait('#threadPanel:not([hidden])');
     await run('click', `#threadList .thread[data-label="${label}"] summary`);
     await run('wait', '--fn', `document.getElementById('threadPanel').dataset.mode === 'thread'`);
@@ -235,7 +254,7 @@ export async function viewerWorkspaceQA({ base, output, api, account, artifact, 
     await wait('#commentForm:not([hidden])');
     await run('fill', '#commentText', 'A general draft that survives a history visit');
     await run('click', '#versionBtn');await wait('#historyPanel:not([hidden])');
-    await run('click', '#commentsBtn');await wait('#threadPanel:not([hidden])');
+    await run('click', '#discussionsBtn');await wait('#threadPanel:not([hidden])');
     assert.equal(await json(`document.getElementById('threadPanel').dataset.mode`), 'index');
     assert.equal(await json(`document.getElementById('commentText').value`), 'A general draft that survives a history visit');
     await json(`(() => { window.__confirmCalls=[];window.__cancelLeave=true;[...document.querySelectorAll('#recentList .recent-item')].find(a=>!a.hasAttribute('aria-current')).click();return true; })()`);
@@ -283,7 +302,7 @@ export async function viewerWorkspaceQA({ base, output, api, account, artifact, 
     // Revalidation deliberately ignores hidden pages. Activate this test's
     // original tab before simulating a return, rather than dispatching an event
     // whose visible-state precondition is false.
-    await run('tab', 't1');
+    await run('tab', viewerTab);
     await run('wait', '--fn', `document.visibilityState === 'visible'`);
     await run('cookies', 'clear');
     assert.equal(await json(`fetch('/api/session', { cache: 'no-store' }).then(r => r.json()).then(data => data.user)`), null, 'clearing cookies removes the account session');
@@ -337,7 +356,7 @@ export async function viewerWorkspaceQA({ base, output, api, account, artifact, 
     await run('open', `${base}/v/${artifact.id}?holdLibrary=1`);
     await wait('#bar:not([hidden])');
     await run('wait', '--fn', `window.__libraryHeld === true`);
-    await run('tab', 't1');
+    await run('tab', viewerTab);
     await run('wait', '--fn', `document.visibilityState === 'visible'`);
     await signInAs(secondAccount);
     await json(`(document.dispatchEvent(new Event('visibilitychange')), true)`);

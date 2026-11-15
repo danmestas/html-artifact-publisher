@@ -91,8 +91,15 @@ test('permission isolation, named grants, account metadata, archive, transfer an
   const grant=permission=>api(path+'/sharing',{method:'PUT',cookie:a.cookie,body:{userId:b.user.id,permission}});
   assert.equal((await grant('read')).status,200);
   let info=await api(path,{cookie:b.cookie}); assert.equal(info.status,200,info.text); assert.equal(info.json.role,'read'); assert.equal(info.json.readToken,undefined);
-  assert.equal((await api(path,{cookie:a.cookie})).json.readToken,undefined);
-  assert.equal((await api(path,{cookie:owner.cookie})).json.readToken,undefined);
+  const publicRead=artifact.viewerUrl.split('#')[1];
+  assert.ok((await api(path,{cookie:a.cookie})).json.readToken===publicRead,'artifact owner can copy the public read link while signed in');
+  assert.ok((await api(path,{cookie:owner.cookie})).json.readToken===publicRead,'instance owner can copy the public read link while signed in');
+  const sharedRead=await api(path,{token:publicRead});
+  assert.equal(sharedRead.status,200);
+  assert.equal(sharedRead.json.role,'read');
+  assert.equal(sharedRead.json.readToken,undefined,'the read link does not reveal another credential');
+  assert.equal((await api(path,{method:'DELETE',token:publicRead})).status,401,'deletion requires an owner credential, never a read link');
+  assert.equal((await api(path,{token:publicRead})).status,200,'the rejected deletion leaves the artifact available');
   const update={parent:artifact.tip,files:{'index.html':Buffer.from('<h1>Updated</h1>').toString('base64')}};
   assert.equal((await api(path,{method:'PUT',cookie:b.cookie,body:update})).status,403);
   assert.equal((await api(path+'/manage',{method:'PATCH',cookie:b.cookie,body:{title:'No'}})).status,403);
@@ -147,6 +154,17 @@ test('a signed-in editor gets a comment link that comments and cannot edit',asyn
   const commentToken=r=>r.json.commentToken;
   const owned=await api(path,{cookie:a.cookie});
   assert.equal(owned.json.role,'write');
+  assert.ok(/^[0-9a-f]{64}$/.test(owned.json.readToken),'owner of an account-created artifact can retrieve its read link');
+  const publicInfo=await api(path,{token:owned.json.readToken});
+  assert.equal(publicInfo.status,200);
+  assert.equal(publicInfo.json.role,'read','the copied link works without the owner session');
+  const forbiddenPublish=await api(path,{
+    method:'PUT',token:owned.json.readToken,
+    body:{parent:artifact.tip,files:{'index.html':Buffer.from('<h1>Forbidden</h1>').toString('base64')}},
+  });
+  assert.equal(forbiddenPublish.status,403,'the copied link cannot publish');
+  assert.equal(publicInfo.json.canManage,false);
+  assert.equal(publicInfo.json.readToken,undefined);
   assert.match(commentToken(owned),/^[0-9a-f]{64}$/,'an account editor is given the comment link');
   assert.equal((await api(path,{cookie:b.cookie})).status,404);
   assert.equal((await api(path+'/sharing',{method:'PUT',cookie:a.cookie,body:{userId:b.user.id,permission:'read'}})).status,200);

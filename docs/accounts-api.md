@@ -8,7 +8,7 @@ Reference for account sign-in, library queries and instance administration. Arti
 - The instance owner can inspect and manage every artifact, including private and archived work. The stable owner ID is `instance-owner`; legacy artifacts without an owner belong to that account.
 - Account endpoints require an account identity: the `artifact_session` cookie or a personal bearer credential. The legacy instance bearer retains artifact/CLI compatibility but does not itself identify an account for these endpoints.
 - A creator or instance owner manages named sharing, title, expiration, archive and deletion. A named editor can edit content but cannot manage access, ownership or deletion. Read grants do not permit content mutations or comment moderation. With guest discussion enabled, readers may identify separately and post text-only discussion.
-- Account responses never expose artifact capability tokens. Existing read, edit and comment links remain separate access mechanisms.
+- `GET /api/artifacts/:id` includes `readToken` for the artifact owner and instance owner so Share can offer a reusable read link without signing out. Named readers and editors do not receive that token through account access; edit tokens are never returned. A read link permits viewing and guest discussion, not page editing or deletion. Existing read, edit and comment links remain separate access mechanisms.
 - JSON responses are private/no-store. Errors use `{error:string}`. A supplied Origin must match the request origin; browser writes without an explicit credential require that matching Origin. Explicit authenticated CLI clients remain supported.
 
 ## Sign-in and invitations

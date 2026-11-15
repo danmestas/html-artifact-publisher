@@ -264,7 +264,7 @@ test('named access is cookie management; a capability link neither grants nor ma
     const writerInfo = await send(path, { cookie: writer.cookie });
     assert.equal(writerInfo.json.role, 'write');
     assert.equal(writerInfo.json.canManage, false);
-    assert.equal(writerInfo.json.readToken, undefined, 'a cookie session never receives a capability token');
+    assert.equal(writerInfo.json.readToken, undefined, 'a named editor does not receive the reusable read token');
     assert.equal((await send(`${path}/sharing`, { cookie: writer.cookie })).status, 403);
     assert.equal((await send(`${path}/manage`, { cookie: writer.cookie, method: 'PATCH', body: { archived: true } })).status, 403);
     const published = await send(path, {

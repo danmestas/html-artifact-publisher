@@ -1822,9 +1822,14 @@ function renderShare() {
       shareRow('libraryLink', 'Library link',
         'Only the owner, instance owner, and people with named access can open this link after signing in.',
         location.origin + location.pathname),
+      info.canManage && info.readToken
+        ? shareRow('readLink', 'Read link', 'Anyone with it can view every version and comment, but cannot edit.', linkWith(info.readToken))
+        : null,
       can.commentLink ? commentLinkRow() : null,
     ].filter(Boolean));
-    $('shareFoot').textContent = 'This link does not grant access on its own.';
+    $('shareFoot').textContent = info.canManage && info.readToken
+      ? (info.expiresAt ? `Expires ${new Date(info.expiresAt).toLocaleDateString(undefined, { dateStyle: 'medium' })}` : 'Does not expire')
+      : 'This link does not grant access on its own.';
     return;
   }
   const writer = can.edit;

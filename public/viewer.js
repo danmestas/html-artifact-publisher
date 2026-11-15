@@ -16,6 +16,7 @@ import { typeOf } from './blobs.js';
 import { pagePins } from './page-pins.js';
 import { pageAppearance } from './page-appearance.js';
 import { backdropColor, pageBackdrop, chooseCanvas } from './backdrop.js';
+import { safeReturnTo, signinUrl } from './auth-return.js';
 
 const $ = id => document.getElementById(id);
 const NONCE = document.querySelector('meta[name="artifact-nonce"]')?.content ?? '';
@@ -33,6 +34,72 @@ function libraryReturnLocation(value) {
   } catch { return '/'; }
 }
 $('backLibrary').href = libraryReturnLocation(new URLSearchParams(location.search).get('returnTo'));
+
+// ─── Sign-in from the viewer ─────────────────────────────────────────────────
+//
+// A reader without an account can sign in, but never in this document: the page
+// they are reading, its drafts and its frame stay exactly as they are. Sign-in
+// opens in a separate tab and asks the account for nothing beyond the account
+// itself. The destination is the artifact's pathname plus the version being
+// read — never a capability token, never a return query the login page could
+// replay into email or a URL.
+function signinDestination() {
+  const at = link?.at ? `#@${encodeURIComponent(link.at)}` : '';
+  return safeReturnTo(location.pathname + at);
+}
+let contentFailed = false;
+let failureMessage = '';
+let failureStatus = 0;
+let reauthNeeded = false; // a security change was refused for freshness, not for access
+// The same destination, plus an explicit request for fresh proof. /login must
+// not forward an existing session when reauth=1 is present.
+function reauthUrl() {
+  const url = new URL(signinUrl(signinDestination()), location.origin);
+  url.searchParams.set('reauth', '1');
+  return url.pathname + url.search;
+}
+// A signed-out reader with no capability link and a missing artifact is the
+// ordinary "open it from your library" case, not a broken link. Lead with a
+// neutral sign-in entry and say nothing about whether the artifact exists.
+function neutralEntry() {
+  return accountId === '' && contentFailed && !link?.token && failureStatus === 404;
+}
+function paintSignin() {
+  // A confirmed account sees its own navigation instead of a sign-in prompt.
+  const signedOut = accountId === '';
+  const destination = signinUrl(signinDestination());
+  // A refused security change offers an explicit fresh sign-in even though the
+  // account is still signed in. Drafts and this page stay where they are.
+  $('reauthAction').hidden = !reauthNeeded;
+  if (reauthNeeded) $('reauthAction').href = reauthUrl();
+  // One account action at a time: the fresh sign-in covers the signed-out case too.
+  $('signinAction').hidden = !signedOut || reauthNeeded;
+  if (signedOut) $('signinAction').href = destination;
+  const neutral = neutralEntry();
+  // The prompt is for the tokenless entry only; a capability link that fails
+  // keeps its own generic error, where signing in would grant nothing anyway.
+  $('shellSignin').hidden = !signedOut || !contentFailed || !!link?.token;
+  $('shellSignin').href = destination;
+  $('shellSigninHint').hidden = $('shellSignin').hidden;
+  $('shellSigninHint').textContent = neutral
+    ? 'Use the email address it was shared with. Signing in does not grant new access; the link may also be unavailable or expired.'
+    : 'Sign in to your account to continue. Signing in grants no access to a link you do not already hold.';
+  if (contentFailed) {
+    $('msg').textContent = neutral ? 'Sign in to continue' : failureMessage;
+    $('msg').className = neutral ? '' : 'err';
+  }
+}
+/** Say clearly that a gated write changed nothing and needs a fresh sign-in. */
+function requestFreshSignin() {
+  reauthNeeded = true;
+  paintSignin();
+  notice('Sign in again to confirm this change. Nothing was changed.');
+}
+// A new tab keeps this page and its drafts; noopener means it cannot reach back
+// into this document's state, and nothing about the link is handed to it.
+$('signinAction').target = $('shellSignin').target = $('reauthAction').target = '_blank';
+$('signinAction').rel = $('shellSignin').rel = $('reauthAction').rel = 'noopener';
+
 
 // Token links keep their original syntax. Session-only links may use #@<check-in>
 // for history, without minting or revealing capability tokens.
@@ -104,6 +171,7 @@ async function confirmAccount({ fresh = false } = {}) {
   }
   sessionCheckedAt = Date.now();
   sessionCheckedEpoch = identityEpoch;
+  paintSignin();
   return accountId || null;
 }
 
@@ -153,12 +221,21 @@ async function managementAuthorization() {
   return true;
 }
 
-function fail(message) {
+function fail(message, status = 0) {
+  contentFailed = true;
+  failureMessage = message;
+  failureStatus = status;
+  // Show the actual error until a signed-out, tokenless reader is confirmed;
+  // then paintSignin() replaces it with the neutral entry.
   $('msg').textContent = message;
   $('msg').className = 'err';
   $('ring').style.display = 'none';
   $('shell').style.display = '';
   $('frame').style.display = 'none';
+  paintSignin();
+  // A failed artifact still resolves who is reading: only a signed-out reader
+  // is offered sign-in, and that offer is generic, never evidence about it.
+  if (accountId === null) confirmAccount().then(paintSignin).catch(() => {});
 }
 
 // ─── Rendering ───────────────────────────────────────────────────────────────
@@ -847,6 +924,23 @@ function revalidateAccount() {
 }
 setInterval(revalidateAccount, SESSION_WATCH_MS);
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') revalidateAccount(); });
+// Coming back from the sign-in tab is the moment a new cookie is most likely.
+// confirmAccount coalesces and caches for a few seconds, and this is only a
+// re-read: it never consumes anything.
+addEventListener('focus', revalidateAccount);
+// A separate tab finished signing in. This is a hint only: it carries no token
+// and no destination, and this page re-reads the cookie itself before changing
+// anything. Signing in never replaces the content link or its role.
+try {
+  const signinChannel = new BroadcastChannel('artifact-signin');
+  signinChannel.addEventListener('message', event => {
+    if (event.data?.type !== 'signed-in') return;
+    revalidateAccount();
+    // This page cannot prove the cookie is fresh, only that it changed. The
+    // prompt stays until a gated write itself succeeds.
+    if (reauthNeeded && !$('shareMenu').hidden) notice('Signed in again in another tab. Retry the change you were making.');
+  });
+} catch { /* no BroadcastChannel: focus and polling still revalidate */ }
 // A page restored from the back/forward cache may hide a sign-out that happened
 // elsewhere; its account UI is revalidated before it is trusted again.
 addEventListener('pageshow', e => { if (e.persisted) revalidateAccount(); });
@@ -1395,8 +1489,32 @@ async function manageRequest(path, { method = 'GET', body } = {}) {
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const detail = response.status === 204 ? null : await response.json().catch(() => null);
+  if (detail?.reauthRequired === true) {
+    // The server changed nothing: the session is alive but too old to increase
+    // access. Offer a deliberate fresh sign-in; the write is never retried here.
+    requestFreshSignin();
+    const error = new Error(detail.error || 'Sign in again to confirm this change. Nothing was changed.');
+    error.reauthRequired = true;
+    throw error;
+  }
   if (!response.ok) throw new Error(typeof detail?.error === 'string' ? detail.error : `Request failed (HTTP ${response.status}).`);
+  // Only an authority-increasing action that the server accepted proves fresh
+  // auth. An ungated write (rename, revoke, archive) succeeds on an old session
+  // too, so it must not quietly clear the prompt.
+  if (reauthNeeded && isGatedWrite(path, method, body)) clearReauth();
   return detail;
+}
+/** The writes the server gates behind fresh authentication. */
+function isGatedWrite(path, method, body) {
+  if (method === 'GET' || method === 'DELETE') return false;
+  if (/\/sharing$/.test(path)) return body?.permission !== null && body?.permission !== undefined;
+  if (/\/guests\/[^/]+\/upgrade$/.test(path)) return true;
+  if (/\/manage$/.test(path)) return typeof body?.ownerId === 'string' && !!body.ownerId;
+  return false;
+}
+function clearReauth() {
+  reauthNeeded = false;
+  paintSignin();
 }
 const managePath = suffix => `/api/artifacts/${encodeURIComponent(art.id)}/${suffix}`;
 
@@ -1572,7 +1690,7 @@ function renderPeople() {
     remove.setAttribute('aria-label', `Remove access for ${personName(user)}`);
     remove.addEventListener('click', () => saveGrant(grant.userId, null, remove));
     return el('div', { className: 'person-row' },
-      el('span', { className: 'person-name' }, el('strong', { textContent: personName(user) }), el('small', { textContent: user.email && user.email !== personName(user) ? user.email : '' })),
+      el('span', { className: 'person-name' }, el('strong', { textContent: personName(user) }), el('small', { textContent: [user.email && user.email !== personName(user) ? user.email : '', user.status === 'invited' ? 'Invited — waiting for sign-in' : user.status === 'disabled' ? 'Suspended' : ''].filter(Boolean).join(' · ') })),
       permission, remove);
   }));
   if (!people.grants.length) $('peopleList').append(el('p', { className: 'hint', textContent: 'No one else has named access yet.' }));
@@ -1580,7 +1698,7 @@ function renderPeople() {
   // Only people who could actually be granted access, from the same endpoint.
   const granted = new Set(people.grants.map(g => g.userId));
   $('peoplePick').replaceChildren(el('option', { value: '', textContent: 'Choose a person…' }),
-    ...people.users.filter(u => !granted.has(u.id)).map(u => el('option', { value: u.id, textContent: personName(u) })));
+    ...people.users.filter(u => !granted.has(u.id)).map(u => el('option', { value: u.id, textContent: personName(u) + (u.status === 'invited' ? ' — Invited' : '') })));
   const eligible = people.users.some(u => !granted.has(u.id));
   $('peopleForm').hidden = !eligible;
   $('peoplePick').disabled = busy;
@@ -1623,7 +1741,7 @@ async function saveGrant(userId, permission, control) {
 /** The row state a confirmed grant change implies, shown before the refresh. */
 function applyGrant(userId, permission) {
   const user = people.users.find(u => u.id === userId) ?? people.grants.find(g => g.userId === userId);
-  const grant = { userId, permission, ...(user?.email ? { email: user.email } : {}), ...(user?.name ? { name: user.name } : {}) };
+  const grant = { userId, permission, ...(user?.email ? { email: user.email } : {}), ...(user?.name ? { name: user.name } : {}), ...(user?.status ? { status: user.status } : {}) };
   people = {
     ...people,
     grants: permission ? [...people.grants.filter(g => g.userId !== userId), grant] : people.grants.filter(g => g.userId !== userId),
@@ -1712,8 +1830,16 @@ async function publicationRequest(path, { method = 'GET', body } = {}) {
   });
   if (!response.ok) {
     const detail = await response.json().catch(() => null);
+    if (detail?.reauthRequired === true) {
+      requestFreshSignin();
+      const error = new Error(detail.error || 'Sign in again to confirm this change. Nothing was changed.');
+      error.reauthRequired = true;
+      throw error;
+    }
     throw new Error(typeof detail?.error === 'string' ? detail.error : `Publication request failed (HTTP ${response.status}).`);
   }
+  // Publishing is not a gated action, so a success says nothing about full
+  // freshness. The prompt stays until a gated write or sign-in itself succeeds.
   return response.status === 204 ? null : response.json();
 }
 
@@ -2013,6 +2139,7 @@ async function startSidebar() {
 function showAccountChrome() {
   sidebarUnavailable = false;
   $('navBtn').hidden = false;
+  paintSignin();
   if (matchMedia('(min-width: 1051px)').matches) setNav(true);
 }
 
@@ -2231,7 +2358,7 @@ setInterval(watch, WATCH_MS);
 $('toastShow').addEventListener('click', () => {
   $('toast').hidden = true;
   if (link.at) location.hash = fragment({ token: link.token });
-  else reload(true).catch(e => fail(e.message));
+  else reload(true).catch(e => fail(e.message, e.status ?? 0));
 });
 
 // ─── Start ──────────────────────────────────────────────────────────────────
@@ -2280,6 +2407,7 @@ async function main() {
     return fail(e.message);
   }
   art = new Artifact(location.origin, m[1], link.token);
+  paintSignin();
   await reload(true);
   await guestUI.loadProfile();
   await loadThreads();
@@ -2292,7 +2420,7 @@ addEventListener('hashchange', () => {
     if (art && next.token === link.token) {
       link = next;
       closePopovers();
-      reload(true).catch(e => fail(e.message));
+      reload(true).catch(e => fail(e.message, e.status ?? 0));
     } else {
       location.reload();
     }
@@ -2301,4 +2429,4 @@ addEventListener('hashchange', () => {
   }
 });
 
-main().catch(e => fail(e.status === 404 ? 'This artifact does not exist, has expired, or the link is wrong.' : String(e.message ?? e)));
+main().catch(e => fail(e.status === 404 ? 'This artifact does not exist, has expired, or the link is wrong.' : String(e.message ?? e), e.status ?? 0));

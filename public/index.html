@@ -18,7 +18,7 @@
     <div class="login-story"><div class="brand"><span class="mark" aria-hidden="true"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="4" y="5" width="16" height="3.2" rx="1.6" fill="currentColor"/><rect x="4" y="10.4" width="12" height="3.2" rx="1.6" fill="currentColor" opacity=".75"/><rect x="4" y="15.8" width="8" height="3.2" rx="1.6" fill="currentColor" opacity=".5"/></svg></span> <span class="brand-name">Artifacts</span></div></div>
     <div class="login-form"><div class="form-inner">
       <h2 id="login-title">Sign in to Artifacts</h2>
-      <p id="login-description" class="muted">We’ll email you a one-time link. No password.</p>
+      <p id="login-description" class="muted">We’ll email you a one-time link or an 8-digit code. No password.</p>
       <form id="login-form">
         <label for="login-email">Email address</label>
         <input id="login-email" type="email" autocomplete="email" placeholder="you@example.com" maxlength="254" required>
@@ -27,11 +27,21 @@
       <div id="sent-panel" class="sent" hidden>
         <div class="env" aria-hidden="true"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg></div>
         <p id="sent-text"></p>
-        <button id="resend-link" class="full" type="button">Resend link</button>
+        <form id="code-form" class="code-form">
+          <label for="login-code">Sign-in code</label>
+          <input id="login-code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]*" maxlength="8" placeholder="8-digit code" aria-describedby="code-help">
+          <p id="code-help" class="tiny muted">Enter the code from the email. It works once, for 10 minutes.</p>
+          <label class="check-label" for="code-remember"><input id="code-remember" type="checkbox"> Keep me signed in on this device for 30 days</label>
+          <p class="tiny muted">Otherwise this browser signs out after 7 days.</p>
+          <button id="code-submit" class="primary full" type="submit">Sign in with a code</button>
+        </form>
+        <button id="resend-link" class="full" type="button">Resend link and code</button>
         <button id="sent-different-email" class="linkish" type="button">Use a different email</button>
       </div>
       <div id="verify-panel" hidden>
         <p class="verify-note">Only continue if you asked for this link or were invited here.</p>
+        <label class="check-label" for="link-remember"><input id="link-remember" type="checkbox"> Keep me signed in on this device for 30 days</label>
+        <p class="tiny muted">Otherwise this browser signs out after 7 days.</p>
         <button id="verify-button" class="primary full" type="button">Continue to your library</button>
         <p class="verify-escape"><button id="different-email" class="linkish" type="button">This wasn’t me · use a different email</button></p>
       </div>

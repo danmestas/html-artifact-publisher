@@ -43,6 +43,14 @@
     </div>
   </div>
   <span class="top-spacer"></span>
+  <a id="signinAction" class="signin-action" hidden aria-label="Sign in to your account" title="Sign in">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M5 20a7 7 0 0 1 14 0"/></svg>
+    <span class="signin-label">Sign in</span>
+  </a>
+  <a id="reauthAction" class="signin-action reauth-action" hidden aria-label="Sign in again to confirm this change" title="Sign in again">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M5 20a7 7 0 0 1 14 0"/></svg>
+    <span class="signin-label">Sign in again</span>
+  </a>
   <button id="versionBtn" class="version-button" type="button" aria-label="Version history" aria-haspopup="dialog" aria-expanded="false" aria-controls="inspector">
     <span class="phone-history" aria-hidden="true">History</span>
     <span id="versionHash" class="mono"></span>
@@ -73,7 +81,7 @@
       <div id="sharePane" role="tabpanel" aria-labelledby="shareTab">
         <section id="peopleSection" class="people-section" hidden aria-labelledby="peopleHeading">
           <h2 id="peopleHeading">People with access</h2>
-          <p class="hint">Named access belongs to a signed-in account. It is separate from capability links and from public snapshots.</p>
+          <p class="hint">Named access belongs to a signed-in account. It is separate from capability links and from public snapshots. Invited people can be added now; their access becomes usable after sign-in.</p>
           <div id="peopleList"></div>
           <form id="peopleForm" hidden>
             <label for="peoplePick">Add a person</label>
@@ -164,6 +172,8 @@
         <div id="shell">
           <div id="ring"></div>
           <div id="msg">Loading…</div>
+          <a id="shellSignin" class="primary-link" href="/login" hidden>Sign in</a>
+          <p id="shellSigninHint" class="hint" hidden>Sign in to your account to continue. Signing in grants no access to a link you do not already hold.</p>
         </div>
         <iframe id="frame"
           sandbox="allow-scripts allow-forms allow-modals allow-popups"

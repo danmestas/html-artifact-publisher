@@ -43,7 +43,7 @@
 import { Repo } from './repo';
 import { preview } from './preview';
 import { publicationRoutes } from './publications';
-import { accountRoutes, artifactCaller, csrf, identity, readBody } from './accounts';
+import { accountRoutes, artifactCaller, csrf, identity, readBody, needsReauthentication, reauthenticationError } from './accounts';
 import { Registry, testHooks } from './registry';
 import {
   attachmentLink, blobKey, blobLinks, externalRef, getBlob, isSha, missingBlobs, pointersIn, putBlob,
@@ -351,6 +351,7 @@ async function handleGuestAdmin(req: Request, env: Env, id: string, rest: string
   // Recheck at grant time: a disabled or withdrawn account gains nothing.
   const account = await registry(env).account(g.claimedAccountId);
   if (!account || account.status !== 'active') return json({ error: 'The claimed account is not active' }, 400);
+  if (await needsReauthentication(req,env,actor)) return reauthenticationError();
   await registry(env).grant(id, account.id, b.permission);
   await stub.guestPermission(guestId, b.permission);
   await registry(env).audit(actor.user?.id ?? 'instance-owner', 'guest_upgrade', id, entry?.title ?? null, `${account.id}:${b.permission}`);

@@ -1,6 +1,7 @@
 import { encodeFiles, readFileList, withBlobs } from './client.js';
 import { isBlob } from './blobs.js';
 import { iconSvg, resolveIcon } from './icons.js';
+import { safeReturnTo } from './auth-return.js';
 
 const $ = id => document.getElementById(id);
 const BATCH = 12;          // artifacts and publications load this many at a time: divides evenly at 4, 3 and 2 columns
@@ -33,8 +34,13 @@ let shownCount = 0;
 let toastTimer;
 let searchTimer;
 let loginToken = '';
-let loginState = 'form'; // 'form' | 'sent' | 'expired'; a captured link shows the verify step instead
+// 'form' | 'sent' | 'expired' | 'reauth'; a captured link shows the verify step instead.
+// 'reauth' means the session is still alive but a security change needs fresh proof.
+let loginState = 'form';
 let sentEmail = '';
+let reauthPending = false; // a security change was refused; the reader must retry it
+let loginChallenge = '';  // 64-hex, generated before the request so the emailed code can be used here
+let loginReturnIsArtifact = false;  // copy only; the server stores and returns the real destination
 let resendTimer;
 let activityEvents = [];
 let publicationCleanupResult = '';
@@ -151,6 +157,18 @@ async function api(path, { method = 'GET', body } = {}) {
   // account. Callers that cache data also check again after their await.
   if (epoch !== accountEpoch) throw staleAccountRequest();
   if (!response.ok) {
+    // A remembered session may still be alive but too old for a security
+    // change. The server changed nothing. Ask for a fresh sign-in here, with
+    // the page's own destination kept, and never replay the refused action.
+    if (response.status === 403 && data?.reauthRequired === true && user) {
+      reauthPending = true;
+      loginToken = '';
+      loginState = 'reauth';
+      closeDialog();
+      rememberLoginReturn();
+      showLogin();
+      message('login-feedback', 'Sign in again to confirm this security change. Nothing was changed. Retry the change after signing in.');
+    }
     if (response.status === 401 && user) {
       user = null;
       adoptAccount(null);
@@ -167,8 +185,9 @@ async function api(path, { method = 'GET', body } = {}) {
   return data;
 }
 // Where to go after signing in: the library page sign-in interrupted, if any.
+// A page opened at /login?returnTo=… carries its own destination instead.
 function rememberLoginReturn() {
-  try { if (location.search) sessionStorage.setItem('artifact-login-return', location.search); } catch { /* optional */ }
+  try { if (location.pathname !== '/login' && location.search) sessionStorage.setItem('artifact-login-return', location.search); } catch { /* optional */ }
 }
 function takeLoginReturn() {
   try {
@@ -208,6 +227,22 @@ function adoptAccount(nextUser) {
   accountId = id;
   accountRole = role;
 }
+// The sign-in screen shows on /login and over a library page whose session has
+// ended. Either way the destination is a library location or one artifact, and
+// the server stores it when the link or code is issued and returns it after a
+// successful sign-in. Never a capability token: safeReturnTo drops those.
+function loginDestination() {
+  if (location.pathname === '/login') {
+    return safeReturnTo(new URLSearchParams(location.search).get('returnTo') ?? '/');
+  }
+  return safeReturnTo(location.pathname + location.search);
+}
+const destinationIsArtifact = destination => destination.startsWith('/v/');
+// The server keeps the code tied to a challenge this page generated, so a
+// code emailed for another browser cannot be entered here.
+function newChallenge() {
+  return [...crypto.getRandomValues(new Uint8Array(32))].map(b => b.toString(16).padStart(2, '0')).join('');
+}
 function showLogin() {
   document.documentElement.setAttribute('data-system-appearance', '');
   clearPreviews();
@@ -215,28 +250,41 @@ function showLogin() {
   $('boot').hidden = true;
   $('app').hidden = true;
   $('login').hidden = false;
+  loginReturnIsArtifact = destinationIsArtifact(loginDestination());
   const step = loginToken ? 'verify' : loginState;
-  const form = step === 'form' || step === 'expired';
+  const form = step === 'form' || step === 'expired' || step === 'reauth';
   $('login-form').hidden = !form;
   $('sent-panel').hidden = step !== 'sent';
   $('verify-panel').hidden = step !== 'verify';
   $('login-explain').hidden = !form;
-  $('login-title').textContent = step === 'verify' ? 'Finish signing in' : step === 'sent' ? 'Check your inbox' : step === 'expired' ? 'This link has expired' : 'Sign in to Artifacts';
+  $('login-title').textContent = step === 'verify' ? 'Finish signing in' : step === 'sent' ? 'Check your inbox' : step === 'expired' ? 'This link has expired' : step === 'reauth' ? 'Confirm it’s you' : 'Sign in to Artifacts';
   $('login-description').textContent = step === 'verify' ? `You opened a one-time sign-in link for ${location.host}.`
-    : step === 'expired' ? `Sign-in links work once and for ${LOGIN_MINUTES} minutes. Ask for a new one below.` : 'We’ll email you a one-time link. No password.';
+    : step === 'expired' ? `Sign-in links work once and for ${LOGIN_MINUTES} minutes. Ask for a new one below.`
+    : step === 'reauth' ? 'You’re still signed in, but this change needs a fresh sign-in. Nothing was changed. We’ll email you a one-time link or an 8-digit code.'
+    : loginReturnIsArtifact ? 'Sign in to continue to this artifact. We’ll email you a one-time link or an 8-digit code. No password.'
+    : 'We’ll email you a one-time link or an 8-digit code. No password.';
   $('login-description').hidden = step === 'sent';
   $('login-submit').textContent = step === 'expired' ? 'Email me a new link' : 'Email me a sign-in link';
-  if (step === 'expired' && !$('login-email').value) { try { $('login-email').value = sessionStorage.getItem('artifact-login-email') || ''; } catch { /* optional */ } }
+  $('verify-button').textContent = loginReturnIsArtifact ? 'Continue to your artifact' : 'Continue to your library';
+  if ((step === 'expired' || step === 'reauth') && !$('login-email').value) { try { $('login-email').value = sessionStorage.getItem('artifact-login-email') || ''; } catch { /* optional */ } }
   if (form) $('login-email').focus();
   else if (step === 'verify') $('verify-button').focus();
+  else if (step === 'sent') $('login-code').focus();
 }
 // The wording never says whether the address belongs to an account.
 async function requestLink(email) {
-  await api('/api/auth/request', { method: 'POST', body: { email } });
+  // Generate the candidate, send it, and keep this page's state only once the
+  // server accepted the request. A failed resend therefore leaves the existing
+  // challenge (and its still-usable code) and the destination intact.
+  const challenge = newChallenge();
+  const returnTo = loginDestination();
+  await api('/api/auth/request', { method: 'POST', body: { email, challenge, returnTo } });
+  loginChallenge = challenge;
   sentEmail = email;
   loginState = 'sent';
   try { sessionStorage.setItem('artifact-login-email', email); } catch { /* optional */ }
-  $('sent-text').replaceChildren('If ', node('strong', { textContent: email }), ` belongs to an invited account, a sign-in link is on its way. It works once, for ${LOGIN_MINUTES} minutes.`);
+  const back = loginReturnIsArtifact ? ' You’ll return to this artifact afterwards.' : '';
+  $('sent-text').replaceChildren('If ', node('strong', { textContent: email }), ` belongs to an invited account, a sign-in link and an 8-digit code are on their way.${back} The link works once, for ${LOGIN_MINUTES} minutes; the code for 10 minutes.`);
   startResendCountdown();
   showLogin();
 }
@@ -254,6 +302,7 @@ function startResendCountdown(seconds = 30) {
 function backToForm() {
   loginToken = '';
   loginState = 'form';
+  reauthPending = false;
   clearTimeout(resendTimer);
   message('login-feedback');
   showLogin();
@@ -275,23 +324,68 @@ $('resend-link').addEventListener('click', async () => {
   catch { message('login-feedback', 'The link could not be sent. Try again in a moment, or contact the person who invited you.', 'error'); $('resend-link').disabled = false; }
 });
 $('sent-different-email').addEventListener('click', backToForm);
+// The server stored the destination when it issued this link or code and
+// returns it after success. Use it. A link issued before destinations were
+// stored returns '/'; then the library page this sign-in interrupted is the
+// best recovery, from the same-tab note rememberLoginReturn kept.
+function finishSignin(data) {
+  loginToken = '';
+  loginChallenge = '';
+  user = data.user;
+  adoptAccount(user);
+  const server = safeReturnTo(data.returnTo);
+  const destination = server === '/' ? safeReturnTo('/' + takeLoginReturn()) : server;
+  // Another page (a viewer waiting for this sign-in) may listen for this hint.
+  // It carries nothing but "check your cookie again"; no token, no destination.
+  try { new BroadcastChannel('artifact-signin').postMessage({ type: 'signed-in' }); } catch { /* optional */ }
+  // A refused security change is retried by the reader, never by this code:
+  // the sign-in only earns a fresh session. The destination is the same either
+  // way, so a library tab returns to its view and an artifact tab opens the
+  // artifact it was reading.
+  reauthPending = false;
+  clearTimeout(resendTimer);
+  // An artifact destination belongs to the viewer, a different document with
+  // its own chrome. Navigate there rather than rendering this shell under /v/.
+  if (destinationIsArtifact(destination)) { location.replace(destination); return; }
+  history.replaceState(null, '', destination);
+  state = readState();
+  return showApp();
+}
+// A link is only ever consumed by this explicit action; a GET never signs in.
 $('verify-button').addEventListener('click', async () => {
   $('verify-button').disabled = true;
   message('login-feedback');
   try {
-    const data = await api('/api/auth/verify', { method: 'POST', body: { token: loginToken } });
-    loginToken = '';
-    user = data.user;
-    adoptAccount(user);
-    history.replaceState(null, '', '/' + takeLoginReturn());
-    state = readState();
-    await showApp();
+    const data = await api('/api/auth/verify', { method: 'POST', body: { token: loginToken, rememberDevice: $('link-remember').checked } });
+    await finishSignin(data);
   } catch (err) {
     // The link was used, expired, or never valid: offer a new one rather than a dead end.
     if (err.status === 401) { loginToken = ''; loginState = 'expired'; showLogin(); }
     else message('login-feedback', err.message, 'error');
   }
   finally { $('verify-button').disabled = false; }
+});
+$('code-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const b = $('code-submit');
+  const code = $('login-code').value.replace(/\D/g, '');
+  message('login-feedback');
+  if (code.length !== 8) { message('login-feedback', 'Enter the 8-digit code from the email.', 'error'); $('login-code').focus(); return; }
+  if (!loginChallenge) { message('login-feedback', 'That code cannot be used here. Request a new one below.', 'error'); return; }
+  b.disabled = true;
+  try {
+    const data = await api('/api/auth/verify', { method: 'POST', body: { challenge: loginChallenge, code, rememberDevice: $('code-remember').checked } });
+    $('login-code').value = '';
+    await finishSignin(data);
+  } catch (err) {
+    // A code dies after five attempts, so say so and point at a fresh one.
+    if (err.status === 401) message('login-feedback', err.message || 'That code is wrong or has expired. You can try again, or request a new one.', 'error');
+    else message('login-feedback', err.message, 'error');
+  } finally { b.disabled = false; }
+});
+$('login-code').addEventListener('input', () => {
+  const digits = $('login-code').value.replace(/\D/g, '').slice(0, 8);
+  if (digits !== $('login-code').value) $('login-code').value = digits;
 });
 $('different-email').addEventListener('click', backToForm);
 // The account menu: appearance, API credentials and sign out, behind one row.
@@ -1388,22 +1482,24 @@ async function openSharing(item) {
         notify('Named access removed.');
       }), 'icon-button');
       remove.setAttribute('aria-label', `Remove access for ${grant.email}`);
-      grants.append(node('div', { className: 'grant' }, node('div', { className: 'identity' }, node('strong', { textContent: grant.name || grant.email }), node('small', { textContent: grant.email })), permission, remove));
+      grants.append(node('div', { className: 'grant' }, node('div', { className: 'identity' }, node('strong', { textContent: grant.name || grant.email }), node('small', { textContent: grant.email + (grant.status === 'invited' ? ' · Invited — waiting for sign-in' : grant.status === 'disabled' ? ' · Suspended' : '') })), permission, remove));
     }
     body.append(grants);
     const available = eligible.filter(p => !data.grants.some(g => g.userId === p.id));
     if (available.length) {
       const form = node('form');
       const person = formField(form, 'Add a person', node('select', { id: 'share-person', required: true }));
-      setOptions(person, available);
+      person.replaceChildren(...available.map(p => node('option', { value: p.id,
+        textContent: (p.name ? `${p.name} (${p.email})` : p.email) + (p.status === 'invited' ? ' — Invited' : ''),
+      })));
       const permission = formField(form, 'Permission', node('select', { id: 'share-permission' },
         node('option', { value: 'read', textContent: 'Can view' }), node('option', { value: 'write', textContent: 'Can edit' })));
       submit(form, 'Grant access', async () => {
         await api(`/api/artifacts/${encodeURIComponent(item.id)}/sharing`, { method: 'PUT', body: { userId: person.value, permission: permission.value } });
         notify('Access granted.');
       });
-      body.append(form, node('p', { className: 'explain', textContent: 'Only active members are listed. Someone who is invited but has not signed in, or is suspended, cannot be added yet.' }));
-    } else body.append(node('p', { className: 'explain', textContent: 'No other active members are available to add. Invited people appear here once they sign in; the instance owner can invite more.' }));
+      body.append(form, node('p', { className: 'explain', textContent: 'Invited people can be added now. Their access becomes usable when they complete sign-in. Suspended accounts cannot receive new access.' }));
+    } else body.append(node('p', { className: 'explain', textContent: 'No other invited or active members are available to add. The instance owner can invite more people.' }));
   } catch (err) { if (seq === dialogSequence) message('dialog-error', err.message); }
 }
 async function openTransfer(item) {
@@ -1545,8 +1641,26 @@ async function main() {
     const session = await api('/api/session');
     user = session.user;
     adoptAccount(user);
+    // /login?reauth=1 is a request for fresh proof, not navigation. An existing
+    // session must not be forwarded: only a link or code confirmation counts.
+    if (location.pathname === '/login' && new URLSearchParams(location.search).get('reauth') === '1') {
+      loginToken = '';
+      loginState = 'reauth';
+      reauthPending = true;
+      showLogin();
+      if (user) message('login-feedback', 'Sign in again to confirm this security change. Nothing was changed.');
+      return;
+    }
+    // Already signed in: /login?returnTo=… goes straight to where it pointed,
+    // whether that is a library view or one artifact. Ask for nothing.
+    if (user && location.pathname === '/login') {
+      const destination = loginDestination();
+      if (destinationIsArtifact(destination)) { location.replace(destination); return; }
+      history.replaceState(null, '', destination);
+      state = readState();
+      return showApp();
+    }
     if (!user) { rememberLoginReturn(); return showLogin(); }
-    if (location.pathname === '/login') history.replaceState(null, '', '/');
     await showApp();
   } catch (err) {
     if (err.name === 'AbortError') return;

@@ -1,6 +1,7 @@
 import type { Account } from './registry';
 import type { Caller } from './repo';
-import { ACTIVITY_KINDS, LOGIN_TTL, parseExpiration } from './registry';
+import { ACTIVITY_KINDS, LOGIN_TTL, LOGIN_CODE_TTL, SESSION_TTL, REMEMBERED_SESSION_TTL, parseExpiration } from './registry';
+import { safeReturnTo } from '../public/auth-return.js';
 import { genId, genToken, isoOrNull, sha256hex, timingSafeEqual } from './util';
 
 export const registry = (env: Env) => env.REGISTRY.getByName('registry');
@@ -27,6 +28,11 @@ export async function identity(req: Request, env: Env): Promise<{ user: Account 
   const token = sessionToken(req);
   return { user:token ? await r.authenticate(await sha256hex(token)) : null,legacy:false,explicit:false };
 }
+export async function needsReauthentication(req: Request, env: Env, actor: Awaited<ReturnType<typeof identity>>): Promise<boolean> {
+  return !actor.explicit && await registry(env).sessionNeedsReauth(await sha256hex(sessionToken(req)));
+}
+export const reauthenticationError = () => json({ error:'Sign in again to confirm this security change. Nothing was changed.',reauthRequired:true },403);
+
 export async function artifactCaller(req: Request, env: Env, id: string): Promise<Caller> {
   const actor = await identity(req,env);
   if (actor.legacy) return { owner:true,token:'' };
@@ -68,15 +74,27 @@ function testMail(req: Request, env: Env): boolean {
   const ip = req.headers.get('CF-Connecting-IP');
   return env.TEST_MAIL_TRANSPORT==='loopback' && !!app && loopback(app) && loopback(url) && url.origin===app.origin && (ip===null || ip==='127.0.0.1' || ip==='::1');
 }
-async function sendLogin(req: Request, env: Env, user: Account): Promise<Response> {
+function loginCode(): string {
+  // Reject the incomplete final range instead of biasing a modulo reduction.
+  let value: number;
+  do { value = crypto.getRandomValues(new Uint32Array(1))[0]!; } while (value >= 4_200_000_000);
+  return String(value % 100_000_000).padStart(8,'0');
+}
+async function sendLogin(req: Request, env: Env, user: Account, returnTo = '/', challenge?: string): Promise<Response> {
   const origin = appOrigin(env);
   if (!origin || (!testMail(req,env) && (!env.EMAIL_FROM || !env.EMAIL))) return error('Email sign-in is not configured',503);
   const token = genToken(); const hash = await sha256hex(token);
-  await registry(env).login(hash,user.id);
-  const loginUrl = `${origin.origin}/login#token=${token}`;
-  if (testMail(req,env)) return json({ ok:true,loginUrl });
+  const target = safeReturnTo(returnTo);
+  const code = challenge ? loginCode() : undefined;
+  const stored = await registry(env).login(hash,user.id,target,challenge && code ? {
+    challengeHash:await sha256hex(challenge),codeHash:await sha256hex(challenge + ':' + code),
+  } : undefined);
+  if (!stored) return json({ ok:true });
+  const loginUrl = `${origin.origin}/login${target === '/' ? '' : '?returnTo=' + encodeURIComponent(target)}#token=${token}`;
+  if (testMail(req,env)) return json({ ok:true,loginUrl,...(code ? { loginCode:code } : {}) });
   try {
-    await env.EMAIL.send({ from:env.EMAIL_FROM,to:user.email,subject:'Sign in to your artifact library',text:`Use this one-time link within ${LOGIN_TTL/60} minutes:\n${loginUrl}\n\nIf you did not request this, ignore this message.` });
+    const alternative = code ? `\n\nOr enter this code in the browser where you requested it: ${code}\nThe code works for ${LOGIN_CODE_TTL/60} minutes, with at most five attempts.` : '';
+    await env.EMAIL.send({ from:env.EMAIL_FROM,to:user.email,subject:target.startsWith('/v/') ? 'Sign in to open your artifact' : 'Sign in to your artifact library',text:`Use this one-time link within ${LOGIN_TTL/60} minutes:\n${loginUrl}${alternative}\n\nIf you did not request this, ignore this message.` });
   } catch {
     // Invalidate a failed delivery; do not reveal provider errors or tokens.
     await registry(env).discardLogin(hash);
@@ -84,8 +102,8 @@ async function sendLogin(req: Request, env: Env, user: Account): Promise<Respons
   }
   return json({ ok:true });
 }
-function sessionCookie(req: Request, token: string, clear = false): string {
-  return `${cookieName}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${clear ? 0 : 604800}${new URL(req.url).protocol==='https:' ? '; Secure' : ''}`;
+function sessionCookie(req: Request, token: string, clear = false, rememberDevice = false): string {
+  return `${cookieName}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${clear ? 0 : rememberDevice ? REMEMBERED_SESSION_TTL : SESSION_TTL}${new URL(req.url).protocol==='https:' ? '; Secure' : ''}`;
 }
 const limitOf = (url: URL) => Math.min(100,Math.max(1,Number.parseInt(url.searchParams.get('limit') ?? '25',10)||25));
 
@@ -97,20 +115,39 @@ export async function accountRoutes(req: Request, env: Env): Promise<Response | 
   if (path==='/api/session' && method==='GET') return json({ user:actor.user ? publicUser(actor.user) : null });
   if (path==='/api/auth/request' && method==='POST') {
     const b = await smallBody(req); const address = email(b?.email);
+    if (b?.challenge !== undefined && (typeof b.challenge !== 'string' || !/^[a-f0-9]{64}$/.test(b.challenge))) return error('Invalid sign-in challenge');
     if (!address) return json({ ok:true });
     const ip = req.headers.get('CF-Connecting-IP') ?? 'local';
     // 5 links per address keep one inbox from being flooded; 60 per client address lets an office behind one NAT sign in.
     if (!(await r.rate([`email:${await sha256hex(address)}`,[`ip:${await sha256hex(ip)}`,60]]))) return json({ ok:true });
     const user = await r.byEmail(address);
-    return user && user.status!=='disabled' ? sendLogin(req,env,user) : json({ ok:true });
+    return user && user.status!=='disabled' ? sendLogin(req,env,user,safeReturnTo(b?.returnTo),b?.challenge as string | undefined) : json({ ok:true });
   }
   if (path==='/api/auth/verify' && method==='POST') {
     const b = await smallBody(req);
-    if (typeof b?.token!=='string' || !/^[a-f0-9]{64}$/.test(b.token)) return error('Invalid or expired sign-in link',401);
-    const token = genToken(); const user = await r.verify(await sha256hex(b.token),await sha256hex(token));
-    if (!user) return error('Invalid or expired sign-in link',401);
-    await r.audit(user.id,'sign_in');
-    return json({ user:publicUser(user) },200,{ 'Set-Cookie':sessionCookie(req,token) });
+    const invalid = () => error('Invalid or expired sign-in link or code',401);
+    if (!b) return invalid();
+    if (b.rememberDevice !== undefined && typeof b.rememberDevice !== 'boolean') return error('rememberDevice must be boolean');
+    const byLink = b.token !== undefined;
+    const byCode = b.challenge !== undefined || b.code !== undefined;
+    if (byLink === byCode) return invalid();
+    if (byLink && (typeof b.token !== 'string' || !/^[a-f0-9]{64}$/.test(b.token))) return invalid();
+    if (byCode && (typeof b.challenge !== 'string' || !/^[a-f0-9]{64}$/.test(b.challenge) || typeof b.code !== 'string' || !/^\d{8}$/.test(b.code))) return invalid();
+    if (byCode) {
+      const ip = req.headers.get('CF-Connecting-IP') ?? 'local';
+      if (!(await r.rate([[`code-ip:${await sha256hex(ip)}`,60]]))) return invalid();
+    }
+    const token = genToken(); const sessionHash = await sha256hex(token);
+    const verified = byLink
+      ? await r.verify(await sha256hex(b.token as string),sessionHash,b.rememberDevice === true)
+      : await r.verifyCode(await sha256hex(b.challenge as string),await sha256hex(b.challenge + ':' + b.code),sessionHash,b.rememberDevice === true);
+    if (!verified) return invalid();
+    // Reauthentication rotates this browser's prior session rather than
+    // leaving an overwritten remembered credential valid for another month.
+    const previous = sessionToken(req);
+    if (previous) await r.logout(await sha256hex(previous));
+    await r.audit(verified.user.id,'sign_in');
+    return json({ user:publicUser(verified.user), returnTo:safeReturnTo(verified.returnTo) },200,{ 'Set-Cookie':sessionCookie(req,token,false,b.rememberDevice === true) });
   }
   if (path==='/api/auth/logout' && method==='POST') {
     await r.logout(await sha256hex(sessionToken(req)));
@@ -119,6 +156,10 @@ export async function accountRoutes(req: Request, env: Env): Promise<Response | 
   const user = actor.user;
   if (!user) return error('Sign in required',401);
   const admin = user.role==='owner';
+  // Ordinary reads and emergency revocations never require a new email. Only
+  // authority-increasing actions step up an old remembered browser session.
+  const needsReauth = () => needsReauthentication(req,env,actor);
+  const reauth = reauthenticationError;
   if (path.startsWith('/api/admin/') || path.startsWith('/api/people') || path==='/api/invitations') {
     if (!admin) return error('Instance owner required',403);
   }
@@ -168,6 +209,7 @@ export async function accountRoutes(req: Request, env: Env): Promise<Response | 
     if (!address || (b?.name!==undefined && (typeof b.name!=='string' || b.name.length>100))) return error('Valid email and name required');
     const existing = await r.byEmail(address);
     if (existing && existing.status!=='invited') return error('Account already exists',409);
+    if (await needsReauth()) return reauth();
     if (!(await r.rate([`email:${await sha256hex(address)}`]))) { const retryAfter = await r.rateWait(`email:${await sha256hex(address)}`); return json({ error:`Please wait ${Math.max(1,Math.ceil(retryAfter/60))} minutes before resending`,retryAfter },429,{ 'Retry-After':String(retryAfter) }); }
     const invited = await r.invite(address,typeof b?.name==='string' ? b.name.trim() || address : address);
     const response = await sendLogin(req,env,invited);
@@ -186,6 +228,7 @@ export async function accountRoutes(req: Request, env: Env): Promise<Response | 
     if (!target) return error('Account not found',404);
     if (target.role==='owner') return error('Cannot change the instance owner',403);
     if (b?.status!=='active' && b?.status!=='disabled') return error('Invalid status');
+    if (b.status === 'active' && await needsReauth()) return reauth();
     await r.status(target.id,b.status); await r.audit(user.id,`account_${b.status}`,null,null,target.name && target.name!==target.email ? `${target.name} (${target.email})` : target.email); return json({ ok:true });
   }
   if (path==='/api/admin/activity' && method==='GET') {
@@ -199,6 +242,7 @@ export async function accountRoutes(req: Request, env: Env): Promise<Response | 
     if (method==='POST') {
       const b = await smallBody(req);
       if (typeof b?.name!=='string' || !b.name.trim() || b.name.length>100) return error('Credential name required (1–100 characters)');
+      if (await needsReauth()) return reauth();
       const id = genId(),token = genToken(),name = b.name.trim();
       if (!(await r.credential(user.id,id,name,await sha256hex(token)))) return error('Credential limit reached',409);
       await r.audit(user.id,'credential_create'); return json({ id,name,token },201);
@@ -229,12 +273,14 @@ export async function accountRoutes(req: Request, env: Env): Promise<Response | 
     }
     if (!canManage) return error('Artifact owner required',403);
     if (artifact[2]==='sharing') {
-      if (method==='GET') return json({ ownerId:entry.ownerId,grants:await r.sharing(id),users:(await r.people()).filter(u => u.status==='active' && u.role!=='owner' && u.id!==entry.ownerId).map(u => ({ id:u.id,email:u.email,name:u.name })) });
+      if (method==='GET') return json({ ownerId:entry.ownerId,grants:await r.sharing(id),users:(await r.people()).filter(u => (u.status==='active' || u.status==='invited') && u.role!=='owner' && u.id!==entry.ownerId).map(u => ({ id:u.id,email:u.email,name:u.name,status:u.status })) });
       if (method==='PUT') {
         const b = await smallBody(req);
         if (typeof b?.userId!=='string' || !['read','write',null].includes(b.permission as string | null)) return error('Valid user and permission required');
         const target = await r.account(b.userId);
-        if (!target || target.status!=='active' || target.role==='owner' || target.id===entry.ownerId) return error('Target must be an active non-owner account');
+        if (!target || target.role==='owner' || target.id===entry.ownerId
+          || (b.permission !== null && target.status !== 'active' && target.status !== 'invited')) return error('Target must be an invited or active non-owner account');
+        if (b.permission !== null && await needsReauth()) return reauth();
         await r.grant(id,target.id,b.permission as string | null); await r.audit(user.id,'sharing_change',id,entry.title); return json({ ok:true });
       }
     }
@@ -244,6 +290,7 @@ export async function accountRoutes(req: Request, env: Env): Promise<Response | 
       if (b.title!==undefined && (typeof b.title!=='string' || !b.title.trim() || b.title.length>300)) return error('Title must have 1–300 characters');
       if (b.ownerId!==undefined) {
         if (!admin) return error('Only instance owner may transfer artifacts',403);
+        if (await needsReauth()) return reauth();
         const target = typeof b.ownerId==='string' ? await r.account(b.ownerId) : null;
         if (!target || target.status!=='active') return error('New owner must be active');
       }

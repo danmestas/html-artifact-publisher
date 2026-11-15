@@ -635,7 +635,10 @@ async function handleArtifact(req: Request, env: Env, ctx: ExecutionContext, id:
       const r = (await stub.op(who, { op: 'info' })) as FossilReply<Record<string, unknown>>;
       if (!r.ok) return reply(r);
       const [meta, role, readToken, commentToken, flag] = await Promise.all([
-        stub.info(), stub.role(who), stub.readToken(who), stub.commentToken(who),
+        stub.info(), stub.role(who),
+        // Only a Registry-authorized manager may retrieve the reusable read
+        // link through account access. Named editors/readers keep their grants.
+        stub.readToken(canManage ? { owner: true, token: '' } : who), stub.commentToken(who),
         stub.op(who, { op: 'uvGet', name: ATTACHED_FILE }) as Promise<FossilReply<{ data: string | null }>>,
       ]);
       return json({

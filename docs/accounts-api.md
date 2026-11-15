@@ -16,14 +16,20 @@ Reference for account sign-in, library queries and instance administration. Arti
 | Route | Body | Result |
 | --- | --- | --- |
 | `GET /api/session` | — | `{user:{id,email,name,role}\|null}` |
-| `POST /api/auth/request` | `{email}` | Generic `{ok:true}` for unknown, invalid or disabled addresses; sends a link for eligible accounts when configured |
-| `POST /api/auth/verify` | `{token}` | `{user}` and the authentication cookie; invalid/expired/replayed links return 401 |
+| `POST /api/auth/request` | `{email,challenge?,returnTo?}` | Generic `{ok:true}` for unknown, invalid or disabled addresses; sends a link for eligible accounts, plus an alternative code when a valid challenge is supplied |
+| `POST /api/auth/verify` | `{token,rememberDevice?}` **or** `{challenge,code,rememberDevice?}` | `{user,returnTo}` and the authentication cookie; invalid/expired/replayed credentials return 401 |
 | `POST /api/auth/logout` | — | Clears the cookie and returns `{ok:true}` |
 | `POST /api/invitations` | `{email,name?}` | Instance owner only; invites or resends to a pending account, without demoting an active member |
 
 Sign-in links are single-use, expire after 60 minutes and are consumed only after the recipient explicitly continues. The login page removes the token fragment before making requests. Link requests are limited to five per email and 60 per client IP in 15 minutes. Requests past the limit keep the generic response; an invitation resend can return `429 {error,retryAfter}` with a Retry-After header in seconds.
 
-The authentication cookie is HttpOnly, SameSite=Lax, path `/`, Secure on HTTPS, with a seven-day lifetime. It is host-scoped, not shared between unrelated hostnames. Login links use configured `APP_ORIGIN`; sender configuration uses `EMAIL_FROM` and the email binding. Known-account delivery/configuration failures return 503 rather than a false success.
+The sign-in UI generates a random 256-bit `challenge` (64 lowercase hexadecimal characters) in the requesting browser. The email includes an alternative eight-digit code, valid for ten minutes and at most five attempts for that challenge. Code verification is also limited to 60 attempts per client IP in 15 minutes. The challenge is not authentication by itself; its raw value is never stored server-side. Code hashes include the challenge as a salt, so a stored code hash alone does not permit guessing the small code space. A link and its alternative code consume the same login atomically; using either invalidates both. Exhausting code attempts disables the code but leaves the high-entropy email link usable until its own deadline. Legacy clients that omit `challenge` continue to receive link-only email.
+
+`returnTo` is sanitized and stored with the login at issuance, so opening email in another tab does not lose the destination. Allowed destinations are the library's supported filters or `/v/<id>` with an optional `#@<version>`; external URLs, capability fragments and artifact query strings are discarded. Confirmation returns the stored destination, not a new client-supplied redirect. This does not grant artifact access. Login links still require explicit confirmation and never authenticate on GET.
+
+The authentication cookie is HttpOnly, SameSite=Lax, path `/`, Secure on HTTPS, with a seven-day lifetime by default. An explicit boolean `rememberDevice:true` at confirmation selects 30 days in both the cookie and server-side session. A successful sign-in rotates any prior session cookie supplied by that browser. Cookies are host-scoped, not shared between unrelated hostnames. Sign-out, suspension and owner rotation continue to revoke sessions server-side. Login links use configured `APP_ORIGIN`; sender configuration uses `EMAIL_FROM` and the email binding. Known-account delivery/configuration failures return 503 rather than a false success.
+
+A remembered session older than 15 minutes may still read and edit ordinary content, but must sign in again before creating an API credential, sending an invitation, adding a named grant (including guest upgrades), transferring ownership or reactivating an account. These actions return `403 {error,reauthRequired:true}` without performing the mutation. Revoking credentials/grants, withdrawing invitations, suspending accounts and signing out remain immediately available. Existing seven-day sessions and explicit authenticated CLI credentials retain their previous behavior. The UI does not automatically replay a security-sensitive action after reauthentication.
 
 Changing `OWNER_EMAIL` preserves the owner ID and artifact ownership but revokes prior owner authentication, credentials and pending links. An address already used by a member is rejected rather than silently merged.
 
@@ -65,13 +71,13 @@ Suspension revokes authentication, personal credentials and pending login links;
 
 | Route | Body/result | Access |
 | --- | --- | --- |
-| `GET /api/artifacts/:id/sharing` | `{ownerId,grants:[{userId,email,name,permission}],users:[{id,email,name}]}` | Creator or instance owner |
-| `PUT /api/artifacts/:id/sharing` | `{userId,permission:'read'\|'write'\|null}` → `{ok:true}` | Creator or instance owner; target must be eligible and active |
+| `GET /api/artifacts/:id/sharing` | `{ownerId,grants:[{userId,email,name,status,permission}],users:[{id,email,name,status}]}` | Creator or instance owner; eligible people include invited and active accounts |
+| `PUT /api/artifacts/:id/sharing` | `{userId,permission:'read'\|'write'\|null}` → `{ok:true}` | Creator or instance owner; new grants require an invited or active eligible account; revocation also permits suspended accounts |
 | `PATCH /api/artifacts/:id/manage` | `{archived?,ownerId?,title?,expiresAt?}` → `{ok:true}` or `202 {ok:true,expirationPending:true}` | Creator or instance owner; transfer is instance-owner only |
 | `PUT /api/artifacts/:id/star` | `{starred:boolean}` → `{ok:true}` | Account with access; stars are per account |
 | `DELETE /api/artifacts/:id` | 204 | Account creator/instance owner, or an authorized legacy edit link |
 
-The sharing response supplies eligible people without giving members access to the owner-only people endpoint. The artifact owner and instance owner's inherent permissions are not removable named grants.
+The sharing response supplies eligible people without giving members access to the owner-only people endpoint. Invited accounts can receive view or edit grants immediately; saving a grant neither accepts the invitation nor creates a session. Their named access becomes usable only after verified sign-in. Both sharing surfaces label pending invitees. Pending grants can be changed or removed; withdrawing an unaccepted invitation removes its pending login and grants. A new invitation to the same address receives a new identity and does not inherit withdrawn access. Suspended accounts cannot receive new grants, but existing grants can be revoked. Ownership transfer and guest-identity upgrades still require an active, verified account. The artifact owner and instance owner's inherent permissions are not removable named grants.
 
 `expiresAt` is a real future UTC ISO instant ending in `Z`, within `MAX_TTL_SECONDS`, or null for never. Omission preserves the deadline. A date that does not exist is rejected, not normalized. Changing expiration preserves the artifact ID, content, tip and history. A pending response means the deadline is stored but its library projection is unconfirmed; retries are automatic, and refreshing confirms convergence. Expiration permanently removes private content and history; it is not an archive or restore facility.
 

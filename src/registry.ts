@@ -1,5 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
-import { genId, isoOrNull } from './util';
+import { genId, isoOrNull, timingSafeEqual } from './util';
 import { deletePublicationFiles, publicationManifest, publicationPrefix } from './publication-files';
 
 export type Publication = {
@@ -17,6 +17,9 @@ type Row = { id: string; slug: string | null; title: string; created_at: number;
 const now = () => Math.floor(Date.now() / 1000);
 /** How long a sign-in link works, in seconds. The mail and the sign-in page state the same figure. */
 export const LOGIN_TTL = 3600;
+export const LOGIN_CODE_TTL = 600;
+export const SESSION_TTL = 7 * 24 * 3600;
+export const REMEMBERED_SESSION_TTL = 30 * 24 * 3600;
 /** How long an attach may hold its ref pending before reconciling treats it as abandoned (ms). */
 const PENDING_MAX = 5 * 60_000;
 
@@ -68,6 +71,15 @@ export class Registry extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS deleting (key TEXT PRIMARY KEY, deleting_at INTEGER NOT NULL DEFAULT 0);
       CREATE INDEX IF NOT EXISTS deleting_at ON deleting(deleting_at);`);
     const cols = sql.exec<{ name: string }>('PRAGMA table_info(artifacts)').toArray();
+    const loginCols = sql.exec<{ name: string }>('PRAGMA table_info(logins)').toArray();
+    for (const [name, definition] of [
+      ['return_to', "TEXT NOT NULL DEFAULT '/'"], ['challenge_hash', 'TEXT'],
+      ['code_hash', 'TEXT'], ['code_expires', 'INTEGER'], ['code_attempts', 'INTEGER NOT NULL DEFAULT 0'],
+    ]) if (!loginCols.some(c => c.name === name)) sql.exec(`ALTER TABLE logins ADD COLUMN ${name} ${definition}`);
+    sql.exec('CREATE UNIQUE INDEX IF NOT EXISTS logins_challenge ON logins(challenge_hash)');
+    const sessionCols = sql.exec<{ name: string }>('PRAGMA table_info(sessions)').toArray();
+    if (!sessionCols.some(c => c.name === 'authenticated_at')) sql.exec('ALTER TABLE sessions ADD COLUMN authenticated_at INTEGER NOT NULL DEFAULT 0');
+    if (!sessionCols.some(c => c.name === 'remembered')) sql.exec('ALTER TABLE sessions ADD COLUMN remembered INTEGER NOT NULL DEFAULT 0');
     if (!sql.exec<{ name: string }>('PRAGMA table_info(blob_uploads)').toArray().some(c => c.name === 'uploaded_at')) {
       // Uploads recorded before these columns count as old: they no longer hold their bytes on their own.
       sql.exec('ALTER TABLE blob_uploads ADD COLUMN uploaded_at INTEGER NOT NULL DEFAULT 0');
@@ -539,30 +551,56 @@ export class Registry extends DurableObject<Env> {
     return this.ctx.storage.transactionSync(() => {
       const sql = this.ctx.storage.sql;
       const gone = sql.exec<{ id: string }>(`DELETE FROM accounts WHERE id = ? AND role != 'owner' AND status = 'invited' AND signed_in_at IS NULL RETURNING id`,id).toArray().length > 0;
-      if (gone) for (const t of ['logins','sessions','credentials']) sql.exec(`DELETE FROM ${t} WHERE user_id = ?`,id);
+      if (gone) for (const t of ['logins','sessions','credentials','grants','stars']) sql.exec(`DELETE FROM ${t} WHERE user_id = ?`,id);
       return gone;
     });
   }
-  async login(hash: string, userId: string): Promise<void> {
-    this.ctx.storage.sql.exec('DELETE FROM logins WHERE expires <= ?',now());
-    this.ctx.storage.sql.exec('INSERT INTO logins VALUES (?,?,?)',hash,userId,now()+LOGIN_TTL);
+  async login(hash: string, userId: string, returnTo = '/', code?: { challengeHash: string; codeHash: string }): Promise<boolean> {
+    const sql = this.ctx.storage.sql;
+    sql.exec('DELETE FROM logins WHERE expires <= ?',now());
+    // A reused client challenge must neither replace another request nor send
+    // a code for a login that was not stored. The HTTP answer stays generic.
+    return sql.exec(`INSERT OR IGNORE INTO logins (hash,user_id,expires,return_to,challenge_hash,code_hash,code_expires)
+      VALUES (?,?,?,?,?,?,?) RETURNING hash`,hash,userId,now()+LOGIN_TTL,returnTo,
+      code?.challengeHash ?? null,code?.codeHash ?? null,code ? now()+LOGIN_CODE_TTL : null).toArray().length > 0;
   }
-  async verify(hash: string, sessionHash: string): Promise<Account | null> {
+  /** Called inside the same synchronous transaction that consumes a link/code. */
+  private finishSignIn(userId: string, returnTo: string, sessionHash: string, rememberDevice: boolean): { user: Account; returnTo: string } | null {
+    const sql = this.ctx.storage.sql;
+    const user = sql.exec<Account>(`SELECT * FROM accounts WHERE id = ? AND status IN ('active','invited')`,userId).toArray()[0];
+    if (!user) return null;
+    sql.exec(`UPDATE accounts SET status = 'active', signed_in_at = ? WHERE id = ?`,now(),user.id);
+    sql.exec('DELETE FROM sessions WHERE expires <= ?',now());
+    sql.exec('INSERT INTO sessions (hash,user_id,expires,authenticated_at,remembered) VALUES (?,?,?,?,?)',sessionHash,user.id,now()+(rememberDevice ? REMEMBERED_SESSION_TTL : SESSION_TTL),now(),rememberDevice ? 1 : 0);
+    return { user: { ...user, status: 'active' }, returnTo };
+  }
+  async verify(hash: string, sessionHash: string, rememberDevice = false): Promise<{ user: Account; returnTo: string } | null> {
+    return this.ctx.storage.transactionSync(() => {
+      const token = this.ctx.storage.sql.exec<{ user_id: string; return_to: string }>('DELETE FROM logins WHERE hash = ? AND expires > ? RETURNING user_id,return_to',hash,now()).toArray()[0];
+      return token ? this.finishSignIn(token.user_id,token.return_to,sessionHash,rememberDevice) : null;
+    });
+  }
+  async verifyCode(challengeHash: string, codeHash: string, sessionHash: string, rememberDevice = false): Promise<{ user: Account; returnTo: string } | null> {
     return this.ctx.storage.transactionSync(() => {
       const sql = this.ctx.storage.sql;
-      const token = sql.exec<{ user_id: string }>('DELETE FROM logins WHERE hash = ? AND expires > ? RETURNING user_id',hash,now()).toArray()[0];
-      if (!token) return null;
-      const user = sql.exec<Account>(`SELECT * FROM accounts WHERE id = ? AND status IN ('active','invited')`,token.user_id).toArray()[0];
-      if (!user) return null;
-      sql.exec(`UPDATE accounts SET status = 'active', signed_in_at = ? WHERE id = ?`,now(),user.id);
-      sql.exec('DELETE FROM sessions WHERE expires <= ?',now());
-      sql.exec('INSERT INTO sessions VALUES (?,?,?)',sessionHash,user.id,now()+604800);
-      return { ...user, status: 'active' };
+      // Every well-formed guess consumes an attempt atomically, including
+      // simultaneous requests. Five failures disable the code, not the link.
+      const token = sql.exec<{ hash: string; user_id: string; return_to: string; code_hash: string }>(`UPDATE logins SET code_attempts = code_attempts + 1
+        WHERE challenge_hash = ? AND expires > ? AND code_expires > ? AND code_attempts < 5 AND code_hash IS NOT NULL
+        RETURNING hash,user_id,return_to,code_hash`,challengeHash,now(),now()).toArray()[0];
+      if (!token || !timingSafeEqual(token.code_hash,codeHash)) return null;
+      sql.exec('DELETE FROM logins WHERE hash = ?',token.hash);
+      return this.finishSignIn(token.user_id,token.return_to,sessionHash,rememberDevice);
     });
   }
   async authenticate(hash: string, credential = false): Promise<Account | null> {
     const sql = this.ctx.storage.sql;
     return sql.exec<Account>(`SELECT a.* FROM accounts a JOIN ${credential ? 'credentials' : 'sessions'} s ON s.user_id=a.id WHERE s.hash=? AND a.status='active' ${credential ? '' : 'AND s.expires > ?'}`, ... (credential ? [hash] : [hash,now()])).toArray()[0] ?? null;
+  }
+  /** Long-lived remembered sessions need recent proof before increasing access. */
+  async sessionNeedsReauth(hash: string): Promise<boolean> {
+    const session = this.ctx.storage.sql.exec<{ authenticated_at: number; remembered: number }>('SELECT authenticated_at,remembered FROM sessions WHERE hash = ? AND expires > ?',hash,now()).toArray()[0];
+    return !session || (!!session.remembered && session.authenticated_at + 15 * 60 <= now());
   }
   async discardLogin(hash: string): Promise<void> { this.ctx.storage.sql.exec('DELETE FROM logins WHERE hash = ?',hash); }
   async logout(hash: string): Promise<void> { this.ctx.storage.sql.exec('DELETE FROM sessions WHERE hash = ?',hash); }
@@ -586,7 +624,7 @@ export class Registry extends DurableObject<Env> {
     return this.ctx.storage.sql.exec<{ permission: 'read' | 'write' }>('SELECT permission FROM grants WHERE artifact_id=? AND user_id=?',id,user.id).toArray()[0]?.permission ?? null;
   }
   async sharing(id: string) {
-    return this.ctx.storage.sql.exec<{ userId: string; email: string; name: string; permission: 'read' | 'write' }>('SELECT a.id AS userId,a.email,a.name,g.permission FROM grants g JOIN accounts a ON a.id=g.user_id WHERE artifact_id=?',id).toArray();
+    return this.ctx.storage.sql.exec<{ userId: string; email: string; name: string; status: Account['status']; permission: 'read' | 'write' }>('SELECT a.id AS userId,a.email,a.name,a.status,g.permission FROM grants g JOIN accounts a ON a.id=g.user_id WHERE artifact_id=?',id).toArray();
   }
   async grant(id: string, userId: string, permission: string | null): Promise<void> {
     if (permission) this.ctx.storage.sql.exec('INSERT INTO grants VALUES (?,?,?) ON CONFLICT(artifact_id,user_id) DO UPDATE SET permission=excluded.permission',id,userId,permission);

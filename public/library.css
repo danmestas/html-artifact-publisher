@@ -282,6 +282,14 @@ dialog p{max-width:70ch}
 .linkish:hover:not(:disabled){border-color:transparent}
 .verify-note{color:var(--muted);font-size:12.5px;margin:0 0 4px}
 .verify-escape{margin:14px 0 0}
+.code-form{display:grid;gap:0;padding-top:4px;border-top:1px solid var(--line);margin-top:6px}
+.code-form label:not(.check-label){margin-top:14px}
+#login-code{font:15px/1.4 ui-monospace,monospace;letter-spacing:.18em;min-height:46px;text-align:center;font-variant-numeric:tabular-nums}
+#code-help{margin:7px 0 0}
+.code-form .check-label{margin:14px 0 0}
+.code-form .tiny:not(#code-help){margin:6px 0 0;padding-left:30px}
+#code-submit{margin-top:6px}
+#code-remember,#link-remember{margin-top:2px;flex:none}
 
 /* Cards and rows at intermediate widths. */
 .shelf-meta{display:flex;align-items:center;gap:7px;min-width:0;margin-top:4px}

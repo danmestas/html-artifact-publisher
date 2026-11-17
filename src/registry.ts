@@ -1,5 +1,6 @@
 import { DurableObject } from 'cloudflare:workers';
 import { genId, isoOrNull, timingSafeEqual } from './util';
+import { ftsTerm, searchTerms, searchSnippet, normalizeSearchText, type SearchProjection, type SearchChunk, type SearchStatus } from './search';
 import { deletePublicationFiles, publicationManifest, publicationPrefix } from './publication-files';
 
 export type Publication = {
@@ -86,6 +87,10 @@ export class Registry extends DurableObject<Env> {
       sql.exec('ALTER TABLE blob_uploads ADD COLUMN used INTEGER NOT NULL DEFAULT 0');
     }
     if (!cols.some(c => c.name === 'owner_id')) sql.exec('ALTER TABLE artifacts ADD COLUMN owner_id TEXT');
+    if (!cols.some(c => c.name === 'search_title')) {
+      sql.exec("ALTER TABLE artifacts ADD COLUMN search_title TEXT NOT NULL DEFAULT ''");
+      for (const row of sql.exec<{id:string; title:string}>('SELECT id,title FROM artifacts').toArray()) sql.exec('UPDATE artifacts SET search_title=? WHERE id=?',normalizeSearchText(row.title),row.id);
+    }
     // When an account was invited (null for accounts that predate the column), and whom an audited action was about.
     if (!sql.exec<{ name: string }>('PRAGMA table_info(accounts)').toArray().some(c => c.name === 'created_at')) sql.exec('ALTER TABLE accounts ADD COLUMN created_at INTEGER');
     // When the account last completed a sign-in: reactivating one that never did restores "invited".
@@ -116,7 +121,57 @@ export class Registry extends DurableObject<Env> {
       CREATE INDEX IF NOT EXISTS publications_owner ON publications(owner_id,created_at DESC,id DESC);
       CREATE INDEX IF NOT EXISTS publications_status ON publications(status,created_at);
       CREATE TABLE IF NOT EXISTS publication_cleanup (id INTEGER PRIMARY KEY CHECK(id=1), cursor TEXT NOT NULL);
-      INSERT OR IGNORE INTO publication_cleanup VALUES (1,'');`);
+      INSERT OR IGNORE INTO publication_cleanup VALUES (1,'');
+      CREATE TABLE IF NOT EXISTS search_state (artifact_id TEXT PRIMARY KEY,version INTEGER NOT NULL,indexed_version INTEGER NOT NULL,status TEXT NOT NULL);
+      CREATE VIRTUAL TABLE IF NOT EXISTS search_chunks USING fts5(artifact_id UNINDEXED,path UNINDEXED,text, tokenize='unicode61');
+      CREATE TABLE IF NOT EXISTS search_backfill (artifact_id TEXT PRIMARY KEY,status TEXT NOT NULL);`);
+  }
+  async searchBackfillStatus() {
+    const rows = this.ctx.storage.sql.exec<{ status:string; n:number }>(`SELECT j.status,count(*) AS n FROM search_backfill j JOIN artifacts a ON a.id=j.artifact_id WHERE ${LIVE.replaceAll('expires_at','a.expires_at')} GROUP BY j.status`,now()).toArray();
+    const processed = rows.find(r => r.status === 'done')?.n ?? 0;
+    const remaining = rows.find(r => r.status === 'pending')?.n ?? 0;
+    const failed = rows.find(r => r.status === 'error')?.n ?? 0;
+    return { status:remaining ? 'running' : failed ? 'error' : processed ? 'complete' : 'idle',processed,remaining,failed };
+  }
+  async startSearchBackfill() {
+    this.ctx.storage.sql.exec(`INSERT OR IGNORE INTO search_backfill SELECT id,'pending' FROM artifacts WHERE ${LIVE}`,now());
+    this.ctx.storage.sql.exec("UPDATE search_backfill SET status='pending' WHERE status='error'");
+    const status = await this.searchBackfillStatus();
+    if (status.remaining) await this.ctx.storage.setAlarm(Date.now()+1);
+    return status;
+  }
+  async alarm(): Promise<void> {
+    const rows = this.ctx.storage.sql.exec<{ id:string }>(`SELECT a.id FROM search_backfill j JOIN artifacts a ON a.id=j.artifact_id WHERE j.status='pending' AND ${LIVE.replaceAll('expires_at','a.expires_at')} ORDER BY a.id LIMIT 5`,now()).toArray();
+    for (const { id } of rows) {
+      let indexed = false;
+      try { indexed = await this.env.REPO.getByName(id).indexSearch(); } catch { /* Retained error is resumable by the owner. */ }
+      this.ctx.storage.sql.exec('UPDATE search_backfill SET status=? WHERE artifact_id=?',indexed ? 'done' : 'error',id);
+    }
+    if ((await this.searchBackfillStatus()).remaining) await this.ctx.storage.setAlarm(Date.now()+1000);
+  }
+  async searchPending(id: string, version: number): Promise<void> {
+    this.ctx.storage.sql.exec(`INSERT INTO search_state (artifact_id,version,indexed_version,status)
+      SELECT id,?,0,'pending' FROM artifacts WHERE id=? AND ${LIVE}
+      ON CONFLICT(artifact_id) DO UPDATE SET version=excluded.version,status='pending' WHERE excluded.version > search_state.version`, version,id,now());
+  }
+  async projectSearch(input: SearchProjection): Promise<boolean> {
+    const fault = (this.env as unknown as Record<string,string | undefined>).TEST_SEARCH_FAULT;
+    if (fault === 'throw') throw new Error('injected search projection failure');
+    if (fault === `fail-version-${input.version}-once` && input.status !== 'error' && !(await this.ctx.storage.get<boolean>(`search-fault-${input.id}`))) {
+      await this.ctx.storage.put(`search-fault-${input.id}`,true);
+      throw new Error('injected search projection failure');
+    }
+    return this.ctx.storage.transactionSync(() => {
+      const sql = this.ctx.storage.sql;
+      const live = sql.exec(`SELECT 1 FROM artifacts WHERE id=? AND ${LIVE}`,input.id,now()).toArray().length;
+      if (!live) return false;
+      const state = sql.exec<{ version: number }>('SELECT version FROM search_state WHERE artifact_id=?',input.id).toArray()[0];
+      if (state && state.version > input.version) return false;
+      sql.exec('DELETE FROM search_chunks WHERE artifact_id=?',input.id);
+      for (const chunk of input.chunks) sql.exec('INSERT INTO search_chunks (artifact_id,path,text) VALUES (?,?,?)',input.id,chunk.path,chunk.text);
+      sql.exec(`INSERT INTO search_state VALUES (?,?,?,?) ON CONFLICT(artifact_id) DO UPDATE SET version=excluded.version,indexed_version=excluded.indexed_version,status=excluded.status`, input.id,input.version,input.version,input.status);
+      return true;
+    });
   }
   async beginPublication(artifactId: string, ownerId: string, title: string, checkin: string): Promise<Publication> {
     let id: string;
@@ -194,7 +249,7 @@ export class Registry extends DurableObject<Env> {
       if (sql.exec(`SELECT 1 FROM artifacts WHERE slug = ? AND ${LIVE}`, e.slug, now()).toArray().length) return false;
       sql.exec('DELETE FROM artifacts WHERE slug = ?', e.slug);
     }
-    sql.exec('INSERT INTO artifacts (id,slug,title,created_at,updated_at,expires_at,tip,owner_id,icon) VALUES (?,?,?,?,?,?,?,?,?)', e.id,e.slug,e.title,e.createdAt,e.updatedAt,e.expiresAt,e.tip,e.ownerId ?? 'instance-owner',e.icon ?? 'document');
+    sql.exec('INSERT INTO artifacts (id,slug,title,created_at,updated_at,expires_at,tip,owner_id,icon,search_title) VALUES (?,?,?,?,?,?,?,?,?,?)', e.id,e.slug,e.title,e.createdAt,e.updatedAt,e.expiresAt,e.tip,e.ownerId ?? 'instance-owner',e.icon ?? 'document',normalizeSearchText(e.title));
     return true;
   }
   async resolve(key: string): Promise<string | null> {
@@ -205,7 +260,7 @@ export class Registry extends DurableObject<Env> {
     return r ? toEntry(r) : null;
   }
   async touch(id: string, tip?: string, title?: string, icon?: string | null): Promise<void> {
-    this.ctx.storage.sql.exec('UPDATE artifacts SET tip = COALESCE(?,tip), updated_at = ?, title = COALESCE(?,title), icon = COALESCE(?,icon) WHERE id = ?',tip ?? null,now(),title ?? null,icon === null ? 'document' : icon ?? null,id);
+    this.ctx.storage.sql.exec('UPDATE artifacts SET tip = COALESCE(?,tip), updated_at = ?, title = COALESCE(?,title), icon = COALESCE(?,icon), search_title=COALESCE(?,search_title) WHERE id = ?',tip ?? null,now(),title ?? null,icon === null ? 'document' : icon ?? null,title === undefined ? null : normalizeSearchText(title),id);
   }
   /**
    * Delete an artifact's listing, and the R2 objects no other artifact points
@@ -227,7 +282,7 @@ export class Registry extends DurableObject<Env> {
             JSON.stringify({ reason:'expired', expiresAt: isoOrNull(context.expiresAt !== undefined ? context.expiresAt : row.expires_at) }));
         }
       }
-      for (const table of ['grants','stars']) sql.exec(`DELETE FROM ${table} WHERE artifact_id = ?`,id);
+      for (const table of ['grants','stars','search_state','search_chunks','search_backfill']) sql.exec(`DELETE FROM ${table} WHERE artifact_id = ?`,id);
       sql.exec('DELETE FROM artifacts WHERE id = ?',id);
       const shasOf = (q: string) => sql.exec<{ sha: string }>(q,id).toArray().map(r => r.sha);
       // What the artifact points at, and what was uploaded to it but never used.
@@ -633,7 +688,7 @@ export class Registry extends DurableObject<Env> {
   async manage(id: string, changes: { archived?: boolean; ownerId?: string; title?: string }): Promise<void> {
     this.ctx.storage.transactionSync(() => {
       const sql = this.ctx.storage.sql;
-      sql.exec('UPDATE artifacts SET archived=COALESCE(?,archived),owner_id=COALESCE(?,owner_id),title=COALESCE(?,title),updated_at=? WHERE id=?',changes.archived === undefined ? null : Number(changes.archived),changes.ownerId ?? null,changes.title ?? null,now(),id);
+      sql.exec('UPDATE artifacts SET archived=COALESCE(?,archived),owner_id=COALESCE(?,owner_id),title=COALESCE(?,title),search_title=COALESCE(?,search_title),updated_at=? WHERE id=?',changes.archived === undefined ? null : Number(changes.archived),changes.ownerId ?? null,changes.title ?? null,changes.title === undefined ? null : normalizeSearchText(changes.title),now(),id);
       if (changes.ownerId) sql.exec('DELETE FROM grants WHERE artifact_id=?',id);
     });
   }
@@ -686,23 +741,34 @@ export class Registry extends DurableObject<Env> {
   async star(id: string, userId: string, starred: boolean): Promise<void> {
     this.ctx.storage.sql.exec(starred ? 'INSERT OR IGNORE INTO stars VALUES (?,?)' : 'DELETE FROM stars WHERE artifact_id=? AND user_id=?',id,userId);
   }
-  async library(user: Account, opts: { admin: boolean; view: string; q: string; ownerId: string; status: string; cursor: string; limit: number; sort?: 'recent' | 'name' | 'expiry'; expiry?: 'all' | 'soon' }) {
+  async library(user: Account | null, opts: { admin: boolean; view: string; q: string; ownerId: string; status: string; cursor: string; limit: number; sort?: 'recent' | 'name' | 'expiry' | 'relevance'; expiry?: 'all' | 'soon'; artifactId?:string; artifactPermission?:'read' | 'comment' | 'write' }) {
+    const principalId = user?.id ?? '';
+    const instance = !user && !opts.artifactId;
     const clauses = [`${LIVE.replaceAll('expires_at','a.expires_at')}`];
-    const args: (string | number)[] = [user.id,user.id,now()];
-    if (!opts.admin) {
+    const terms = searchTerms(opts.q);
+    const searchJoins = terms.map((_, i) => `LEFT JOIN (SELECT artifact_id,1 AS hit FROM search_chunks WHERE search_chunks MATCH ? GROUP BY artifact_id) h${i} ON h${i}.artifact_id=a.id AND si.version=si.indexed_version AND si.status IN ('complete','partial')`).join(' ');
+    const literal = (value: string) => `'${value.replaceAll("'", "''")}'`;
+    const matched = terms.map((term, i) => `(instr(a.search_title,${literal(normalizeSearchText(term))})>0 OR h${i}.hit=1)`);
+    const score = terms.length ? terms.map((term, i) => `(CASE WHEN ${matched[i]} THEN 1000 ELSE 0 END + CASE WHEN instr(a.search_title,${literal(normalizeSearchText(term))})>0 THEN 10 ELSE 0 END)`).join('+') : '0';
+    const args: (string | number)[] = [...terms.map(ftsTerm),principalId,principalId,now()];
+    if (opts.artifactId) { clauses.push('a.id=?'); args.push(opts.artifactId); }
+    if (opts.artifactPermission) {
+      if (opts.view === 'archived') clauses.push('a.archived=1');
+    } else if (!opts.admin) {
       clauses.push('a.archived=?'); args.push(opts.view === 'archived' ? 1 : 0);
-      if (user.role !== 'owner') { clauses.push("(COALESCE(a.owner_id,'instance-owner')=? OR g.permission IS NOT NULL)"); args.push(user.id); }
-      if (opts.view === 'mine') { clauses.push("COALESCE(a.owner_id,'instance-owner')=?"); args.push(user.id); }
-      if (opts.view === 'shared') { clauses.push("COALESCE(a.owner_id,'instance-owner')!=? AND g.permission IS NOT NULL"); args.push(user.id); }
+      if (user?.role !== 'owner') { clauses.push("(COALESCE(a.owner_id,'instance-owner')=? OR g.permission IS NOT NULL)"); args.push(principalId); }
+      if (opts.view === 'mine') { clauses.push("COALESCE(a.owner_id,'instance-owner')=?"); args.push(principalId); }
+      if (opts.view === 'shared') { clauses.push("COALESCE(a.owner_id,'instance-owner')!=? AND g.permission IS NOT NULL"); args.push(principalId); }
       if (opts.view === 'starred') clauses.push('s.user_id IS NOT NULL');
     } else {
       if (opts.ownerId) { clauses.push("COALESCE(a.owner_id,'instance-owner')=?"); args.push(opts.ownerId); }
     }
-    if (opts.q) { clauses.push("instr(lower(a.title),lower(?)) > 0"); args.push(opts.q); }
+    const queryClause = opts.q ? (matched.length ? `(${matched.join(' OR ')})` : '0') : '';
+    if (queryClause) clauses.push(queryClause);
     // Deadlines due within the next seven days, inclusive, among live rows
     // only: the LIVE clause already excludes anything past its deadline.
     if (opts.expiry === 'soon') { clauses.push('a.expires_at IS NOT NULL AND a.expires_at <= ?'); args.push(now() + 7 * 86400); }
-    const joins = "FROM artifacts a LEFT JOIN accounts u ON u.id=COALESCE(a.owner_id,'instance-owner') LEFT JOIN grants g ON g.artifact_id=a.id AND g.user_id=? LEFT JOIN stars s ON s.artifact_id=a.id AND s.user_id=?";
+    const joins = `FROM artifacts a LEFT JOIN search_state si ON si.artifact_id=a.id ${searchJoins} LEFT JOIN accounts u ON u.id=COALESCE(a.owner_id,'instance-owner') LEFT JOIN grants g ON g.artifact_id=a.id AND g.user_id=? LEFT JOIN stars s ON s.artifact_id=a.id AND s.user_id=?`;
     // The inventory's status tabs show how many are active and archived under the other filters.
     let counts: { all: number; active: number; archived: number } | undefined;
     if (opts.admin) {
@@ -711,14 +777,26 @@ export class Registry extends DurableObject<Env> {
       counts = { all: active + archived, active, archived };
       if (opts.status !== 'all') { clauses.push('a.archived=?'); args.push(opts.status === 'archived' ? 1 : 0); }
     }
+    const coverageClauses = clauses.filter(clause => clause !== queryClause);
+    const searchCoverage = this.ctx.storage.sql.exec<{ total:number; complete:number; partial:number; pending:number; error:number; unsupported:number }>(`SELECT count(*) AS total,
+      count(CASE WHEN si.status='complete' THEN 1 END) AS complete,
+      count(CASE WHEN si.status='partial' THEN 1 END) AS partial,
+      count(CASE WHEN si.status IS NULL OR si.status='pending' THEN 1 END) AS pending,
+      count(CASE WHEN si.status='error' THEN 1 END) AS error,
+      count(CASE WHEN si.status='unsupported' THEN 1 END) AS unsupported
+      ${joins.replace(searchJoins,'')} WHERE ${coverageClauses.join(' AND ')}`,...args.slice(terms.length)).one();
     const total = this.ctx.storage.sql.exec<{ n: number }>(`SELECT count(*) AS n ${joins} WHERE ${clauses.join(' AND ')}`,...args).one().n;
     // SQLite NOCASE folds ASCII only, not locale-specific Unicode ordering.
     // Keep the same collation and ID tie-breaker in the seek and ORDER BY.
     const byName = opts.sort === 'name';
     const byExpiry = opts.sort === 'expiry';
+    const byRelevance = !!opts.q && (!opts.sort || opts.sort === 'relevance');
     if (opts.cursor) {
       const values = JSON.parse(opts.cursor);
-      if (byName) {
+      if (byRelevance) {
+        const [,rank,time,id] = values;
+        clauses.push(`((${score}) < ? OR ((${score}) = ? AND (a.updated_at < ? OR (a.updated_at=? AND a.id < ?))))`); args.push(rank,rank,time,time,id);
+      } else if (byName) {
         const [,title,id] = values;
         clauses.push('(a.title COLLATE NOCASE > ? OR (a.title COLLATE NOCASE = ? AND a.id > ?))'); args.push(title,title,id);
       } else if (byExpiry) {
@@ -732,10 +810,26 @@ export class Registry extends DurableObject<Env> {
         clauses.push('(a.updated_at < ? OR (a.updated_at=? AND a.id < ?))'); args.push(time,time,id);
       }
     }
-    const rows = this.ctx.storage.sql.exec<Row & { ownerName: string; starred: number; permission: 'read' | 'write'; shared: number }>(`SELECT a.*,u.name AS ownerName,s.user_id IS NOT NULL AS starred, g.permission, EXISTS(SELECT 1 FROM grants x WHERE x.artifact_id=a.id) AS shared ${joins} WHERE ${clauses.join(' AND ')} ORDER BY ${byName ? 'a.title COLLATE NOCASE ASC,a.id ASC' : byExpiry ? '(a.expires_at IS NULL) ASC,a.expires_at ASC,a.id ASC' : 'a.updated_at DESC,a.id DESC'} LIMIT ?`,...args,opts.limit+1).toArray();
+    const rows = this.ctx.storage.sql.exec<Row & { ownerName: string; starred: number; permission: 'read' | 'write'; shared: number; search_version: number | null; search_status: SearchStatus | null; search_score: number; matched: string }>(`SELECT a.*,si.version AS search_version,si.status AS search_status,(${score}) AS search_score,${terms.length ? `json_array(${matched.map(m => `CASE WHEN ${m} THEN 1 ELSE 0 END`).join(',')})` : "'[]'"} AS matched,u.name AS ownerName,s.user_id IS NOT NULL AS starred, g.permission, EXISTS(SELECT 1 FROM grants x WHERE x.artifact_id=a.id) AS shared ${joins} WHERE ${clauses.join(' AND ')} ORDER BY ${byName ? 'a.title COLLATE NOCASE ASC,a.id ASC' : byExpiry ? '(a.expires_at IS NULL) ASC,a.expires_at ASC,a.id ASC' : byRelevance ? 'search_score DESC,a.updated_at DESC,a.id DESC' : 'a.updated_at DESC,a.id DESC'} LIMIT ?`,...args,opts.limit+1).toArray();
     const more = rows.length > opts.limit; rows.splice(opts.limit);
     const last = rows.at(-1);
-    return { artifacts: rows.map(r => ({ ...toEntry(r), ownerName: r.ownerName ?? 'Instance owner', accessLabel: (r.owner_id ?? 'instance-owner') === user.id ? (r.shared ? 'Shared by you' : 'Private') : (user.role === 'owner' || r.permission === 'write' ? 'Can edit' : 'Can view'), starred: !!r.starred, permission: user.role === 'owner' || (r.owner_id ?? 'instance-owner') === user.id ? 'write' as const : r.permission, canManage: user.role === 'owner' || (r.owner_id ?? 'instance-owner') === user.id, visibility: r.shared ? 'shared' : 'private' })), total, ...(counts ? { counts } : {}), nextCursor: more && last ? JSON.stringify(byName ? ['name',last.title,last.id] : byExpiry ? ['expiry',last.expires_at,last.id] : [last.updated_at,last.id]) : null };
+    const artifacts = rows.map(r => {
+      const flags = JSON.parse(r.matched) as number[];
+      const matchedTerms = terms.filter((_,i) => flags[i]);
+      const chunks = opts.q && (r.search_status === 'complete' || r.search_status === 'partial')
+        ? this.ctx.storage.sql.exec<SearchChunk>('SELECT path,text FROM search_chunks WHERE artifact_id=?',r.id).toArray() : [];
+      const own = !!user && (r.owner_id ?? 'instance-owner') === principalId;
+      const canManage = user?.role === 'owner' || own;
+      return {
+        ...toEntry(r), searchIndex:{status:r.search_status ?? 'pending',version:r.search_version},
+        ...(opts.q ? {search:{matchedTerms,totalTerms:terms.length,partial:matchedTerms.length < terms.length,snippet:searchSnippet(chunks,terms)}} : {}),
+        ownerName:r.ownerName ?? 'Instance owner',
+        accessLabel:instance ? 'Instance access' : own ? (r.shared ? 'Shared by you' : 'Private') : (user?.role === 'owner' || r.permission === 'write' ? 'Can edit' : 'Can view'),
+        starred:!!r.starred,permission:instance || canManage ? 'write' as const : r.permission,canManage,visibility:r.shared ? 'shared' : 'private',
+      };
+    });
+    const nextCursor = more && last ? JSON.stringify(byName ? ['name',last.title,last.id] : byExpiry ? ['expiry',last.expires_at,last.id] : byRelevance ? ['relevance',last.search_score,last.updated_at,last.id] : [last.updated_at,last.id]) : null;
+    return { artifacts,total,searchCoverage,...(counts ? {counts} : {}),nextCursor };
   }
   async audit(userId: string, action: string, id: string | null = null, title: string | null = null, target: string | null = null, details: Record<string, unknown> | null = null): Promise<void> {
     this.ctx.storage.sql.exec('INSERT INTO activity (id,actor_id,action,artifact_id,artifact_title,created_at,target,details) VALUES (?,?,?,?,?,?,?,?)',genId(),userId,action,id,title,now(),target,details ? JSON.stringify(details) : null);

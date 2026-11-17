@@ -15,6 +15,7 @@ import { ICON_NAMES, validIcon } from '../public/icons.js';
 import { loadPikchr, pikchrBlocks } from './pikchr.mjs';
 import { externalReferenceWarnings, htmlDocumentProblems } from './input-validation.mjs';
 import { redact, runWatch } from './watch.mjs';
+import { remoteSearch } from './search.mjs';
 
 const HELP = `
 Usage:
@@ -23,6 +24,7 @@ Usage:
   node scripts/publish-html.mjs read <url> [--out <dir>]
   node scripts/publish-html.mjs history <url>
   node scripts/publish-html.mjs list
+  node scripts/publish-html.mjs search <query> [--artifact <url>] [--limit 25] [--cursor <cursor>] [--json]
   node scripts/publish-html.mjs delete <edit-url>
   node scripts/publish-html.mjs expire <artifact-url> <ttl|never>
   node scripts/publish-html.mjs new-comment-link <edit-url>   (the old comment link, and any watch using it, stops working)
@@ -61,8 +63,18 @@ a restart prints only what is new.
 It polls every --interval (5s to 1h) until Ctrl-C; --once makes one pass.
 
 Environment variables:
-  HTML_PUBLISHER_URL    Base URL of the publisher Worker (publish, list, expire)
-  HTML_PUBLISHER_TOKEN  Owner bearer token (publish, list, expire)
+  HTML_PUBLISHER_URL    Base URL of the publisher Worker (publish, list, expire, search)
+  HTML_PUBLISHER_TOKEN  Personal API credential or instance bearer (including search)
+
+search reads the current document's title, headings and readable HTML text.
+Quote a multi-word query; put literal double quotes inside it for an exact phrase.
+Partial matches are labelled, and index coverage may be incomplete. --json emits
+one bounded result page and nextCursor; pass that cursor with the same query.
+Personal credentials search that account's library. Instance automation searches
+the instance inventory. --artifact <capability-url> searches only that artifact,
+using only the supplied capability; no environment credential is needed or sent.
+Search never creates access links, follows redirects, posts comments or copies
+anything to the clipboard. Advanced scope/filter options are at GET /api/search.
 
 expire changes the existing artifact's deadline without republishing. Durations
 run from now; never clears the deadline. Requires owner automation credentials,
@@ -81,7 +93,7 @@ Links:
 // ---------------------------------------------------------------------------
 
 const args = process.argv.slice(2);
-const flagsWithValues = new Set(['--icon', '--title', '--ttl', '--slug', '--message', '--notes', '--out', '--since', '--interval', '--cache']);
+const flagsWithValues = new Set(['--icon', '--title', '--ttl', '--slug', '--message', '--notes', '--out', '--since', '--interval', '--cache', '--limit', '--cursor', '--artifact']);
 const hasFlag = flag => args.includes(flag);
 const flagValue = flag => {
   const i = args.indexOf(flag);
@@ -99,7 +111,7 @@ if (hasFlag('--help') || hasFlag('-h')) {
   process.exit(0);
 }
 
-const COMMANDS = new Set(['publish', 'update', 'read', 'history', 'list', 'delete', 'expire', 'new-comment-link', 'watch']);
+const COMMANDS = new Set(['publish', 'update', 'read', 'history', 'list', 'search', 'delete', 'expire', 'new-comment-link', 'watch']);
 const command = COMMANDS.has(positional[0]) ? positional.shift() : 'publish';
 
 const icon = flagValue('--icon');
@@ -325,6 +337,30 @@ async function list() {
   for (const a of artifacts) console.log(`${a.id}  ${a.updatedAt}  ${a.title}`);
 }
 
+async function search() {
+  if (positional.length !== 1) die('usage: search <query> [--limit 25] [--cursor <cursor>] [--json]');
+  for (const flag of ['--artifact', '--limit', '--cursor']) {
+    if (hasFlag(flag) && (!flagValue(flag) || flagValue(flag).startsWith('--'))) die(`${flag} needs a value`);
+  }
+  const rawLimit = flagValue('--limit');
+  if (rawLimit !== undefined && !/^\d+$/.test(rawLimit)) die('--limit must be 1–100');
+  const result = await remoteSearch({
+    base: process.env.HTML_PUBLISHER_URL, credential: process.env.HTML_PUBLISHER_TOKEN,
+    artifactUrl: flagValue('--artifact'), query: positional[0],
+    limit: rawLimit === undefined ? 25 : Number(rawLimit), cursor: flagValue('--cursor'),
+  });
+  if (jsonOnly) { console.log(JSON.stringify(result)); return; }
+  console.log(`${result.total} matching artifact${result.total === 1 ? '' : 's'}`);
+  const clean = text => String(text ?? '').replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '');
+  for (const item of result.artifacts) {
+    console.log(`${clean(item.title || 'Untitled artifact')}  (${clean(item.id)})`);
+    if (item.search?.snippet?.text) console.log('  ' + clean(item.search.snippet.text));
+    if (item.search?.partial) console.log(`  Partial match: ${item.search.matchedTerms?.length || 0} of ${item.search.totalTerms} terms`);
+    if (item.viewerUrl) console.log('  ' + clean(item.viewerUrl));
+  }
+  if (result.nextCursor) console.log('More matches available. Use --json and pass nextCursor with --cursor.');
+}
+
 async function expire() {
   const [rawUrl, ttl] = positional;
   if (!rawUrl || !ttl || positional.length !== 2) die('usage: expire <artifact-url> <ttl|never>');
@@ -431,7 +467,7 @@ function output(result, viewerUrl) {
   }
 }
 
-const run = { publish, update, read, history, list, delete: remove, expire, 'new-comment-link': newCommentLink, watch }[command];
+const run = { publish, update, read, history, list, search, delete: remove, expire, 'new-comment-link': newCommentLink, watch }[command];
 try {
   await run();
 } catch (e) {

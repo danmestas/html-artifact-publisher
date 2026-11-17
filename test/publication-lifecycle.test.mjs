@@ -11,7 +11,9 @@ const compile = file => ts.transpileModule(readFileSync(new URL('../src/' + file
 const durable = moduleUrl('export class DurableObject { constructor(ctx,env){this.ctx=ctx;this.env=env;} }');
 const util = moduleUrl(compile('util.ts'));
 const files = moduleUrl(compile('publication-files.ts'));
-const registrySource = compile('registry.ts').replace("'cloudflare:workers'", JSON.stringify(durable)).replace("'./util'", JSON.stringify(util)).replace("'./publication-files'", JSON.stringify(files));
+const entities = moduleUrl(compile('search-entities.ts'));
+const search = moduleUrl(compile('search.ts').replace("'./search-entities'", JSON.stringify(entities)));
+const registrySource = compile('registry.ts').replace("'cloudflare:workers'", JSON.stringify(durable)).replace("'./util'", JSON.stringify(util)).replace("'./publication-files'", JSON.stringify(files)).replace("'./search'", JSON.stringify(search));
 const { Registry } = await import(moduleUrl(registrySource));
 
 function fixture(t) {

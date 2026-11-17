@@ -2,7 +2,7 @@
 // All four anchor helpers are injected as source. No ticket text or token
 // enters the page, and anchors are never used as selectors or markup.
 
-export function pagePins(findQuotes, anchorFor, encodePointAnchor, decodePointAnchor) {
+export function pagePins(findQuotes, anchorFor, encodePointAnchor, decodePointAnchor, pageContext) {
   const PIN = 28;
   const MAX_PINS = 500, MAX_ANCHOR = 500;
   const SETTLE_MS = 250, EVERY_MS = 1000;
@@ -122,13 +122,17 @@ export function pagePins(findQuotes, anchorFor, encodePointAnchor, decodePointAn
 
   function draw() {
     frame = 0;
-    const keys = [], seen = new Map();
+    const keys = [], seen = new Map(), order = [];
     for (const t of targets) {
       const r = t.box();
       const shown = r && (r.width > 0 || r.height > 0);
       t.el.style.display = shown && visible ? 'grid' : 'none';
       if (!shown) continue;
       keys.push(t.pin.key);
+      // The page's real top-to-bottom order, which is what "Page order" means.
+      // The route's order and the numeric label are not that: both can differ
+      // from where the pin actually sits in the document.
+      order.push({ key: t.pin.key, top: Math.round(r.top), left: Math.round(r.left) });
       const spot = `${Math.round(r.left)},${Math.round(r.top)}`;
       const stack = seen.get(spot) || 0;
       seen.set(spot, stack + 1);
@@ -136,8 +140,10 @@ export function pagePins(findQuotes, anchorFor, encodePointAnchor, decodePointAn
       t.el.style.left = `${left}px`;
       t.el.style.top = `${Math.max(r.top - PIN + 4, Math.min(r.top, 2))}px`;
     }
-    const now = keys.sort((a, b) => a - b).join(',');
-    if (now !== placed) { placed = now; send({ type: 'placed', keys }); }
+    // Placed labels in reading order: top, then left for pins on one line.
+    const orderedKeys = order.sort((a, b) => a.top - b.top || a.left - b.left).map(o => o.key);
+    const now = keys.sort((a, b) => a - b).join(',') + '|' + orderedKeys.join(',');
+    if (now !== placed) { placed = now; send({ type: 'placed', keys, orderedKeys }); }
     if (tracked) {
       const r = trackedTarget && trackedTarget.box();
       send(r && (r.width || r.height) ? { type: 'position', anchor: tracked, x: r.left, y: r.top } : { type: 'position', anchor: tracked, unavailable: true });
@@ -162,6 +168,23 @@ export function pagePins(findQuotes, anchorFor, encodePointAnchor, decodePointAn
     if (placing) showPlacement();
   }
 
+  // ── Readable context for a new comment (M9) ──────────────────────────────
+  //
+  // The page sends a section label and a bounded excerpt of the text around
+  // the click or selection, taken with textContent only (pageContext, which is
+  // injected as source). The viewer re-checks both; nothing here is trusted.
+
+  /** The context around the reader's current selection, or null when there is none. */
+  function selectionContext() {
+    const sel = getSelection();
+    if (!sel || !sel.rangeCount || sel.isCollapsed) return null;
+    const quote = sel.toString();
+    if (!quote.trim()) return null;
+    let el = sel.getRangeAt(0).commonAncestorContainer;
+    if (el.nodeType !== 1) el = el.parentElement;
+    return pageContext(el, quote);
+  }
+
   function atPoint(x, y) {
     return document.elementsFromPoint(x, y).find(el => el !== host) || document.documentElement;
   }
@@ -178,7 +201,7 @@ export function pagePins(findQuotes, anchorFor, encodePointAnchor, decodePointAn
     if (!r.width || !r.height) return;
     const clamp = n => Math.max(0, Math.min(1, n));
     const anchor = encodePointAnchor({ id: el === document.documentElement ? '' : el.id || '', path, x: clamp((x - r.left) / r.width), y: clamp((y - r.top) / r.height) });
-    if (anchor) send({ type: 'point', anchor, x, y });
+    if (anchor) send({ type: 'point', anchor, x, y, context: pageContext(el) || undefined });
   }
 
   addEventListener('message', e => {
@@ -238,6 +261,6 @@ export function pagePins(findQuotes, anchorFor, encodePointAnchor, decodePointAn
       const owner = el && el.closest('[id]');
       anchor = anchorFor({ text: sel.toString(), id: owner ? owner.id : '', idText: owner ? owner.textContent : '' });
     }
-    if (anchor !== selected) { selected = anchor; send({ type: 'selection', anchor }); }
+    if (anchor !== selected) { selected = anchor; send({ type: 'selection', anchor, context: selectionContext() || undefined }); }
   });
 }

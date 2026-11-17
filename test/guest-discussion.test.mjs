@@ -217,13 +217,14 @@ test('owners review, block, claim and upgrade guests; named editors cannot', asy
   const path = `/api/artifacts/${a.id}`;
   assert.equal((await api(`${path}/sharing`, { method: 'PUT', cookies: [owner.cookie], body: { userId: member.user.id, permission: 'read' } })).status, 200);
 
-  // A read-role account also identifies before discussing.
+  // A read-role account may deliberately use a separate guest identity;
+  // that choice still requires its own browser profile before posting.
   const guestRes = await api(`${path}/guest`, { method: 'PUT', cookies: [member.cookie], body: { name: 'Member Rae', email: 'member@example.com' } });
   assert.equal(guestRes.status, 200, guestRes.text);
   const memberGuest = guestCookie(guestRes);
   const memberGuestId = guestRes.json.guest.id;
-  assert.equal((await api(`${path}/tickets`, { method: 'POST', cookies: [member.cookie], body: { text: 'From a read-role account' } })).status, 403, 'profile first, then post');
-  const memberPost = await api(`${path}/tickets`, { method: 'POST', cookies: [member.cookie, memberGuest], body: { text: 'From a read-role account' } });
+  assert.equal((await api(`${path}/tickets`, { method: 'POST', cookies: [member.cookie], body: { text: 'From a read-role account', identity: 'guest' } })).status, 403, 'profile first, then post');
+  const memberPost = await api(`${path}/tickets`, { method: 'POST', cookies: [member.cookie, memberGuest], body: { text: 'From a read-role account', identity: 'guest' } });
   assert.equal(memberPost.status, 201, memberPost.text);
 
   const readInfo = await api(path, { cookies: [member.cookie] });

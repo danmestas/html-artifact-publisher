@@ -258,7 +258,7 @@ test('named access is cookie management; a capability link neither grants nor ma
     assert.equal((await send(`${path}/sharing`, { cookie: outsider.cookie, method: 'PUT', body: { userId: outsider.user.id, permission: 'write' } })).status, 404);
 
     // Grants: a named writer edits content but never manages; a named reader
-    // can only read, and can neither comment nor see management data.
+    // may discuss as their verified account, but cannot moderate or manage.
     assert.equal((await send(`${path}/sharing`, { cookie: creator.cookie, method: 'PUT', body: { userId: writer.user.id, permission: 'write' } })).status, 200);
     assert.equal((await send(`${path}/sharing`, { cookie: creator.cookie, method: 'PUT', body: { userId: reader.user.id, permission: 'read' } })).status, 200);
     const writerInfo = await send(path, { cookie: writer.cookie });
@@ -277,7 +277,9 @@ test('named access is cookie management; a capability link neither grants nor ma
     assert.equal(readerInfo.json.role, 'read');
     assert.equal(readerInfo.json.canManage, false);
     assert.equal((await send(`${path}/tickets`, { cookie: reader.cookie })).status, 200, 'readers may read threads');
-    assert.equal((await send(`${path}/tickets`, { cookie: reader.cookie, method: 'POST', body: { text: 'no' } })).status, 403, 'readers may not comment');
+    const readerPost = await send(`${path}/tickets`, { cookie: reader.cookie, method: 'POST', body: { text: 'Verified reader discussion' } });
+    assert.equal(readerPost.status, 201, 'named readers may post text using their verified account identity');
+    assert.equal((await send(`${path}/tickets`, { cookie: reader.cookie, method: 'POST', body: { ticketUuid: readerPost.json.ticketUuid, status: 'Closed' } })).status, 403, 'discussion does not grant moderation rights');
     assert.equal((await send(`${path}/manage`, { cookie: reader.cookie, method: 'PATCH', body: { expiresAt: iso(3600) } })).status, 403);
     assert.equal((await send(`${path}/sharing`, { cookie: reader.cookie })).status, 403);
 

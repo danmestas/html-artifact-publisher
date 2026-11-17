@@ -334,6 +334,46 @@ input[type=text], input[type=email], input[type=datetime-local], textarea {
 #allComments { border: 0; width: auto; padding: 4px 0; background: transparent; color: var(--muted); font-size: 11px; }
 .panel-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scroll-padding-top: 48px; }
 
+/* One quiet identity line. The form behind "Change" is optional detail, never
+   in the reading path, and never a tall panel above the discussions. */
+.identity-line {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px; flex: none;
+  padding: 7px 14px; border-bottom: 1px solid var(--line); background: var(--surface); font-size: 12px; color: var(--muted);
+}
+.identity-line .identity-text { min-width: 0; overflow-wrap: anywhere; }
+.identity-line button { flex: none; min-height: 30px; padding: 0 8px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--bar); color: var(--accent-ink); font-size: 12px; }
+.identity-line.compact { padding: 6px 0 0; border-bottom: 0; background: transparent; font-size: 11.5px; }
+.identity-line.compact button { min-height: 28px; padding: 0 7px; font-size: 11.5px; }
+.guest-profile { padding: 12px 14px; border-bottom: 1px solid var(--line); background: var(--bar); }
+.guest-profile-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.guest-profile button { min-height: 38px; }
+#guestProfile #identityDone { min-height: 32px; padding: 0 10px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--surface); font-size: 12px; }
+#guestProfile #saveGuestProfile { justify-self: start; padding: 0 12px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--surface); font-size: 12.5px; }
+
+/* A failure or stale state in the discussion list: honest, bounded and
+   retryable, never a silent blank list. */
+.thread-notice { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0; padding: 8px 14px; border-bottom: 1px solid var(--line); background: var(--accent-wash); color: var(--ink-2); font-size: 12px; }
+.thread-notice button { flex: none; min-height: 30px; padding: 0 10px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--surface); font-size: 12px; }
+.recovery { margin: 0; padding: 10px 14px; border-bottom: 1px solid var(--line); background: var(--accent-wash); font-size: 12px; }
+.recovery strong { display: block; font-size: 12.5px; }
+.recovery p { margin: 3px 0 8px; color: var(--muted); }
+.recovery-actions { display: flex; gap: 8px; }
+.recovery-actions button { min-height: 34px; padding: 0 10px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--surface); font-size: 12px; }
+.thread-tools { display: grid; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+#threadPanel:not([data-mode="index"]) .thread-tools { display: none; }
+#threadSearch { width: 100%; min-height: 34px; padding: 6px 9px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--surface); font-size: 12.5px; }
+.filter-row { display: flex; gap: 4px; flex-wrap: wrap; }
+.filter-row button { min-height: 30px; padding: 0 9px; border: 1px solid var(--line); border-radius: 15px; background: var(--surface); color: var(--muted); font-size: 11.5px; }
+.filter-row button[aria-pressed="true"] { border-color: var(--accent-edge); background: var(--accent-soft); color: var(--accent-ink); font-weight: 600; }
+.sort-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 11.5px; color: var(--muted); }
+.sort-row select { min-height: 30px; max-width: 150px; font-size: 11.5px; }
+.thread-list-status { margin: 0; padding: 10px 14px; }
+.thread-list-status:empty { display: none; }
+.load-older { display: block; width: calc(100% - 28px); margin: 8px 14px 14px; min-height: 36px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--surface); font-size: 12px; }
+.panel-display { border-top: 1px solid var(--line); margin-top: 8px; }
+.panel-display-label { margin: 0; padding: 10px 14px 0; color: var(--muted); font-size: 11.5px; font-weight: 600; }
+.panel-display .marker-preference { border-bottom: 0; }
+
 .marker-preference { padding: 10px 14px; border-bottom: 1px solid var(--line); }
 #threadPanel:not([data-mode="index"]) .marker-preference { display: none; }
 /* Every comment view overlays the page. Switching between the index, a draft
@@ -403,6 +443,17 @@ input[type=text], input[type=email], input[type=datetime-local], textarea {
 .thread .anchor.unanchored { color: var(--accent-ink); }
 .thread .anchor button { padding: 0; border: none; background: none; color: var(--accent-ink); text-align: left; text-decoration: underline; text-underline-offset: 3px; min-height: 32px; }
 .thread .message { margin: 2px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; }
+.thread .edited-tag { display: inline-block; font-size: 11px; color: var(--muted); }
+.thread .message-history { font-size: 12px; color: var(--muted); }
+.thread .message-history > summary { cursor: pointer; min-height: 28px; padding: 2px 0; }
+.thread .message-history .message { color: var(--muted); font-size: 12px; text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--muted) 45%, transparent); }
+.thread .message-editor { display: flex; flex-direction: column; gap: 8px; padding: 8px 0 2px; }
+.thread .message-editor textarea { width: 100%; padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--surface); color: var(--ink); font: inherit; resize: vertical; }
+.thread .edit-message { justify-self: start; min-height: 32px; padding: 0 10px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--surface); color: var(--ink-2); font-size: 12px; }
+.thread .thread-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; }
+.thread .thread-actions button { min-height: 32px; padding: 0 10px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--surface); color: var(--ink-2); font-size: 12px; }
+.thread .thread-actions button[aria-pressed="true"] { border-color: var(--accent-edge); background: var(--accent-soft); color: var(--accent-ink); }
+.thread .thread-actions .thread-status { flex-basis: 100%; font-size: 11.5px; }
 .thread .who { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
 .thread .checkins { margin: 0; font-size: 12px; }
 .thread .checkins a { color: var(--accent-ink); font-family: var(--mono); text-underline-offset: 3px; }
@@ -433,10 +484,10 @@ input[type=text], input[type=email], input[type=datetime-local], textarea {
 @keyframes dots-blink { 0%, 80%, 100% { opacity: 0.25; } 40% { opacity: 1; } }
 .hint .dots { margin-right: 6px; vertical-align: middle; }
 #threadPanel[data-mode="index"] .thread-body,
-#threadPanel[data-mode="thread"] :is(#commentForm, #placeComment, #responderNote, #resolvedHead),
+#threadPanel[data-mode="thread"] :is(#commentForm, #placeComment, #responderNote, #resolvedHead, #threadTools, #panelDisplay),
 #threadPanel[data-mode="thread"] .thread:not(.focus),
 #threadPanel[data-mode="thread"] #threadList:empty,
-#threadPanel[data-mode="draft"] :is(#threadList, #resolvedList, #resolvedHead, #responderNote, #placeComment) { display: none; }
+#threadPanel[data-mode="draft"] :is(#threadList, #resolvedList, #resolvedHead, #responderNote, #placeComment, #threadTools, #loadOlder, #panelDisplay) { display: none; }
 
 .inspector-intro { margin: 12px 14px 4px; font-size: 12.5px; color: var(--muted); }
 .panel-footnote { margin: 14px; font-size: 11.5px; color: var(--muted); }
@@ -536,6 +587,10 @@ dialog.manage-dialog::backdrop { background: var(--overlay); }
   .signin-action { width: 44px; justify-content: center; padding: 0; }
   #shareBtn .label { display: none; }
   #shareBtn .primary-face { width: 44px; height: 36px; justify-content: center; padding: 0; }
+  /* Small phones: the identity line and panel controls keep a 44px target. */
+  .identity-line button, .filter-row button, .recovery-actions button, .thread .thread-actions button, .thread .edit-message, .load-older { min-height: 44px; }
+  .identity-line { font-size: 11.5px; }
+  #commentBubble .identity-line.compact button { min-height: 36px; }
 }
 @media (prefers-reduced-motion: reduce) {
   #ring, .dots i { animation: none; }

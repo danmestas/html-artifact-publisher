@@ -300,47 +300,63 @@ test('watch: a state file from the other path, or an older one, is never misread
   assert.deepEqual(changes(await watch(a.editUrl, old, { path: noFossilPath })), [c6.artifact]);
 });
 
-test('responder: attached.json while it runs, cleared on exit and on SIGTERM, even within one second', needsFossil, async () => {
+test('responder: attached.json while it runs, cleared on exit and on SIGTERM, even within one second', needsFossil, async t => {
   const a = await createArtifact(worker.base, worker.owner, '<p>attached</p>');
   const attached = async () => (await api(`/api/artifacts/${a.id}`, a.read)).attached;
   const cache = join(work, 'cache-attached');
+  const runs = [];
+  const safe = value => String(value).replace(/https?:\/\/\S+/g, '[fixture URL]').replace(/[a-f0-9]{64}/gi, '[private value]');
+  t.after(async () => {
+    for (const run of runs) {
+      if (run.child.exitCode !== null || run.child.signalCode !== null) continue;
+      const signal = name => {
+        try { if (process.platform === 'win32') run.child.kill(name); else process.kill(-run.child.pid, name); } catch { /* already exited */ }
+      };
+      run.child.stdin.destroy();
+      signal('SIGTERM');
+      const deadline = setTimeout(() => signal('SIGKILL'), 5_000);
+      try { await run.exited; } finally { clearTimeout(deadline); }
+    }
+  });
   const start = () => {
     const child = spawn(process.execPath, [join(root, 'scripts/responder.mjs'), a.editUrl, '--cache', cache, '--name', 'test responder', '--contact', 'ops@example.com'],
-      { env: { ...process.env, HOME: work }, stdio: ['pipe', 'pipe', 'pipe'] });
+      { env: { ...process.env, HOME: work }, detached: process.platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe'] });
     let stderr = '';
     child.stderr.on('data', d => { stderr += d; });
     const exited = new Promise(r => child.on('close', code => r({ code, stderr })));
-    return { child, exited };
+    const run = { child, exited, diagnostic: () => safe(stderr).slice(-3000) };
+    runs.push(run);
+    return run;
   };
-  const until = async (want, what) => {
+  const until = async (want, what, run) => {
     for (let i = 0; i < 300; i++) {
       if (want(await attached())) return;
       await new Promise(r => setTimeout(r, 100));
     }
-    assert.fail(`attached.json never ${what}`);
+    assert.fail(`attached.json never ${what}; responder stderr: ${run.diagnostic() || '(empty)'}`);
   };
 
   assert.equal(await attached(), null);
   for (const stop of ['eof', 'SIGTERM', 'SIGINT']) {
-    const { child, exited } = start();
-    await until(f => f?.responder === 'test responder', `set (${stop})`);
+    const run = start(), { child, exited } = run;
+    await until(f => f?.responder === 'test responder', `set (${stop})`, run);
     const flag = await attached();
     assert.equal(flag.contact, 'ops@example.com');
     assert.ok(Date.parse(flag.since) <= Date.now());
     if (stop === 'eof') child.stdin.end(); else child.kill(stop);
     const { code, stderr } = await exited;
-    assert.equal(code, 0, stderr);
+    assert.equal(code, 0, safe(stderr));
     assert.ok(![a.read, a.write, a.comment].some(t => stderr.includes(t)), 'a token leaked into the log');
     assert.equal(await attached(), null, `cleared (${stop})`);
   }
   // Set and cleared within the same second, twice: the clear still wins, and the next set too.
   for (let i = 0; i < 2; i++) {
     const r = await respond(a.editUrl, '', { args: ['--name', 'quick'] });
-    assert.equal(r.code, 0, r.stderr);
+    assert.equal(r.code, 0, safe(r.stderr));
     assert.equal(await attached(), null, `quick run ${i}`);
   }
-  const { child, exited } = start();
-  await until(f => f?.responder === 'test responder', 'set after quick runs');
+  const run = start(), { child, exited } = run;
+  await until(f => f?.responder === 'test responder', 'set after quick runs', run);
   child.stdin.end();
   await exited;
   assert.equal(await attached(), null);

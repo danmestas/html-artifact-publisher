@@ -10,7 +10,19 @@ import { b64encode, genId, genToken, sha256hex, timingSafeEqual } from './util';
 import { WAKE_FANOUT, ticketKind, type WakeKind } from './wake';
 import { RESPONDER_STATUS_FILE, applyStatus, resolveChange, statusFrom, type StatusRequest } from './responder-status';
 import { GUEST_DISCUSSION, GUEST_TTL, guestAuthor } from './guest';
-import { ticketTitle } from './ticket-body';
+import { ticketTitle, type ticketChange } from './ticket-body';
+import { ticketAuthor } from './ticket-author';
+import type { DiscussionContext, DiscussionQuery } from './discussion';
+
+/** Resolved by the Worker from independent session/guest credentials, never request JSON. */
+export interface DiscussionPerson { accountId?: string; accountName?: string; guestHash: string }
+interface DiscussionViewer { key: string | null; label: string; verified: boolean; blocked?: boolean }
+interface DiscussionThread {
+  uuid: string; status: string; changed: string; fields: Record<string, string>; changes: TicketChange[];
+  ref?: number; mine?: boolean; unread?: boolean; following?: boolean; context?: DiscussionContext; lastChange?: string;
+}
+type MessageProof = { artifact: string; ticket: string; principal: string; context: string };
+type CorrectionProof = { artifact: string; ticket: string; original: string; text: string };
 
 /** A ticket change a push stored: its ticket, its artifact hash, who made it and what it was. */
 export interface PushedTicket {
@@ -23,12 +35,25 @@ export interface PushedTicket {
 interface TicketChange {
   artifact: string;
   user: string;
+  time?: string;
+  comment?: string;
   fields?: Record<string, string>;
+  text?: string;
+  canEdit?: boolean;
+  edited?: boolean;
+  history?: { artifact: string; text: string; time?: string }[];
 }
 
 /** Each role can do everything the ones before it can. */
 export type Role = 'read' | 'comment' | 'write';
 const RANK: Record<Role, number> = { read: 0, comment: 1, write: 2 };
+
+// History budgets are checked before WASM expansion. They do not truncate responses:
+// traversal continues with a cursor, or a single oversized history fails explicitly.
+const DISCUSSION_SCAN_THREADS = 32;
+const DISCUSSION_HISTORY_BYTES = 512 * 1024;
+const DISCUSSION_HISTORY_EVENTS = 4096;
+const DISCUSSION_RESULT_BYTES = 2 * 1024 * 1024;
 
 /** A guest listing cursor: the last row's [createdAt, id]; unreadable values seek from the newest. */
 function cursorAt(cursor: string): number {
@@ -81,15 +106,6 @@ export interface GuestProfile {
   name: string;
   email: string;
   claimedAccountId?: string;
-}
-
-/** A guest write a caller asked for: its text and the thread's anchor/version for a new thread. */
-export interface GuestPost {
-  text: string;
-  ticketUuid: string;
-  anchor: string;
-  version: string;
-  status: '' | 'Open' | 'Closed';
 }
 
 /** The ops a caller may run, by the role they need. */
@@ -367,6 +383,255 @@ export class Repo extends DurableObject<Env> {
     this.ctx.storage.sql.exec(`UPDATE _artifact SET title = ?`, title);
   }
 
+  // ─── Personal discussion state ────────────────────────────────────────────
+
+  private discussionTables(): void {
+    this.provenanceTable();
+    const sql = this.ctx.storage.sql;
+    sql.exec(`CREATE TABLE IF NOT EXISTS _discussion_ref (ref INTEGER PRIMARY KEY AUTOINCREMENT, ticket TEXT NOT NULL UNIQUE)`);
+    sql.exec(`CREATE TABLE IF NOT EXISTS _discussion_message (artifact TEXT PRIMARY KEY, ticket TEXT NOT NULL, principal TEXT NOT NULL, context TEXT NOT NULL DEFAULT '')`);
+    sql.exec(`CREATE TABLE IF NOT EXISTS _discussion_correction (artifact TEXT PRIMARY KEY, ticket TEXT NOT NULL, original TEXT NOT NULL, text TEXT NOT NULL)`);
+    sql.exec('CREATE INDEX IF NOT EXISTS _discussion_message_ticket ON _discussion_message(ticket)');
+    sql.exec('CREATE INDEX IF NOT EXISTS _discussion_correction_ticket ON _discussion_correction(ticket)');
+    sql.exec(`CREATE TABLE IF NOT EXISTS _discussion_view (principal TEXT NOT NULL, ticket TEXT NOT NULL, read_through TEXT NOT NULL DEFAULT '', following INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (principal, ticket))`);
+  }
+
+  private discussionViewer(person: DiscussionPerson): DiscussionViewer {
+    const guest = person.guestHash ? this.guestRow('token_hash = ?', person.guestHash) : null;
+    // A different display identity does not clear this browser's existing moderation block.
+    if (person.accountId) return { key: `account:${person.accountId}`, label: person.accountName || 'Account', verified: true, blocked: guest?.blocked ?? false };
+    return guest ? { key: `guest:${guest.id}`, label: guest.name, verified: false, blocked: guest.blocked }
+      : { key: null, label: 'Guest', verified: false };
+  }
+
+  private threadRef(ticket: string): number {
+    const known = this.ctx.storage.sql.exec<{ ref: number }>('SELECT ref FROM _discussion_ref WHERE ticket = ?', ticket).toArray()[0];
+    if (known) return known.ref;
+    // INSERT OR IGNORE would consume AUTOINCREMENT numbers even on a conflict.
+    return this.ctx.storage.sql.exec<{ ref: number }>('INSERT INTO _discussion_ref (ticket) VALUES (?) RETURNING ref', ticket).toArray()[0]!.ref;
+  }
+
+  private messageText(change: TicketChange): string { return change.fields?.comment ?? change.comment ?? ''; }
+
+  /** Stored blob.size is the expanded artifact size, so this check happens before WASM expands history. */
+  private discussionCost(ticket: string): { bytes: number; count: number } {
+    return this.ctx.storage.sql.exec<{ bytes: number; count: number }>(`SELECT COALESCE(SUM(MAX(b.size, 0)), 0) AS bytes, COUNT(*) AS count FROM tagxref x JOIN tag t ON t.tagid = x.tagid JOIN blob b ON b.rid = x.rid WHERE t.tagname = ?`, `tkt-${ticket}`).toArray()[0]!;
+  }
+
+  private discussionSizeError(ticket: string, resumeCursor: string | null = null): FossilReply<never> {
+    return {
+      error: 'This discussion exceeds the safe size for one complete history response. No messages were omitted or changed.',
+      code: 'discussion_too_large', ticketUuid: ticket, ref: this.threadRef(ticket), resumeCursor,
+    };
+  }
+
+  private discussionChanges(ticket: string, cost = this.discussionCost(ticket)): FossilReply<TicketChange[]> {
+    if (cost.bytes > DISCUSSION_HISTORY_BYTES || cost.count > DISCUSSION_HISTORY_EVENTS) return this.discussionSizeError(ticket);
+    return run<TicketChange[]>(this.ctx.storage, { op: 'ticketChanges', ticketUuid: ticket });
+  }
+
+  /** Full metadata is the inherited TicketList cost; histories are bounded sequential scans, never one all-history WASM value. */
+  async discussionThreads(caller: Caller, person: DiscussionPerson, query: DiscussionQuery): Promise<FossilReply<unknown>> {
+    if (!(await this.role(caller)) || !this.meta()) return { error: 'not found', code: 'not_found' };
+    this.discussionTables();
+    const viewer = this.discussionViewer(person);
+    const r = run<DiscussionThread[]>(this.ctx.storage, { op: 'ticketList' });
+    if (!r.ok || !r.result) return r;
+    // Backfill imported/legacy tickets by immutable UUID, not activity or display order.
+    this.ctx.storage.transactionSync(() => {
+      for (const t of [...r.result!].sort((a, b) => a.uuid.localeCompare(b.uuid))) t.ref = this.threadRef(t.uuid);
+    });
+    // Exact lookup selects the one artifact-local ticket BEFORE scan chunking; it never searches only the first cohort.
+    const tickets = (query.thread ? r.result.filter(t => t.uuid === query.thread) : r.result)
+      .sort((a, b) => query.sort === 'reference' ? a.ref! - b.ref! : b.changed.localeCompare(a.changed) || a.uuid.localeCompare(b.uuid));
+    if (query.thread && !tickets.length) return { error: 'not found', code: 'not_found' };
+    const signature = JSON.stringify([query.limit, query.q, query.filter, query.sort, viewer.key]);
+    let index = 0;
+    if (query.cursor) {
+      let cursor: unknown;
+      try { cursor = JSON.parse(query.cursor); } catch { return { error: 'Invalid cursor', code: 'bad_request' }; }
+      if (!Array.isArray(cursor) || cursor.length !== 3 || cursor[0] !== 1 || cursor[1] !== signature || typeof cursor[2] !== 'string') return { error: 'Invalid cursor', code: 'bad_request' };
+      index = tickets.findIndex(t => t.uuid === cursor[2]);
+      if (index < 0) return { error: 'Invalid cursor', code: 'bad_request' };
+      index++;
+    }
+    const page: DiscussionThread[] = [];
+    let scanned = 0, expandedBytes = 0, resultBytes = 0;
+    while (index < tickets.length && scanned < DISCUSSION_SCAN_THREADS && page.length < query.limit) {
+      const ticket = tickets[index]!;
+      const open = !ticket.status || ticket.status === 'Open';
+      if ((query.filter === 'open' && !open) || (query.filter === 'resolved' && open)) {
+        scanned++;
+        index++;
+        continue;
+      }
+      if (query.filter === 'following' && (!viewer.key || !this.ctx.storage.sql.exec('SELECT 1 FROM _discussion_view WHERE principal = ? AND ticket = ? AND following = 1', viewer.key, ticket.uuid).toArray().length)) {
+        scanned++;
+        index++;
+        continue;
+      }
+      const cost = this.discussionCost(ticket.uuid);
+      if (cost.bytes > DISCUSSION_HISTORY_BYTES || cost.count > DISCUSSION_HISTORY_EVENTS) {
+        if (page.length) break; // Preserve the normal cohort and stop BEFORE this candidate.
+        return this.discussionSizeError(ticket.uuid, query.thread ? null : JSON.stringify([1, signature, ticket.uuid]));
+      }
+      // Stop before consuming this candidate. The cursor names the LAST scanned candidate, even with no matches.
+      if (expandedBytes + cost.bytes > DISCUSSION_HISTORY_BYTES) break;
+      const changes = this.discussionChanges(ticket.uuid, cost);
+      if (!changes.ok || !changes.result) return changes;
+      const raw = changes.result;
+      expandedBytes += cost.bytes;
+      const messages = this.ctx.storage.sql.exec<MessageProof>('SELECT artifact, ticket, principal, context FROM _discussion_message WHERE ticket = ?', ticket.uuid).toArray();
+      const owners = new Map(messages.map(m => [m.artifact, m]));
+      const corrections = this.ctx.storage.sql.exec<CorrectionProof>('SELECT artifact, ticket, original, text FROM _discussion_correction WHERE ticket = ?', ticket.uuid).toArray();
+      const linked = new Map(corrections.map(c => [c.artifact, c]));
+      const states = viewer.key ? this.ctx.storage.sql.exec<{ ticket: string; read_through: string; following: number }>('SELECT ticket, read_through, following FROM _discussion_view WHERE principal = ? AND ticket = ?', viewer.key, ticket.uuid).toArray() : [];
+      const views = new Map(states.map(s => [s.ticket, s]));
+      this.stripAuthority(ticket.fields);
+      this.decorateChanges(raw);
+      ticket.ref = this.threadRef(ticket.uuid);
+      ticket.mine = !!viewer.key && raw.some(c => owners.get(c.artifact)?.ticket === ticket.uuid && owners.get(c.artifact)?.principal === viewer.key);
+      ticket.lastChange = raw.at(-1)?.artifact;
+      ticket.following = !!views.get(ticket.uuid)?.following;
+      ticket.unread = !!viewer.key && !!ticket.lastChange && views.get(ticket.uuid)?.read_through !== ticket.lastChange;
+      const correctionHistory = new Map<string, { artifact: string; text: string; time?: string }[]>();
+      for (const event of raw) {
+        const correction = linked.get(event.artifact);
+        if (correction?.ticket !== ticket.uuid || owners.get(correction.original)?.ticket !== ticket.uuid) continue;
+        const history = correctionHistory.get(correction.original) ?? [];
+        history.push({ artifact: event.artifact, text: correction.text, time: event.time });
+        correctionHistory.set(correction.original, history);
+      }
+      ticket.changes = raw.filter(c => linked.get(c.artifact)?.ticket !== ticket.uuid);
+      for (const change of ticket.changes) {
+        const proof = owners.get(change.artifact);
+        const trusted = proof?.ticket === ticket.uuid;
+        const original = this.messageText(change);
+        const history = [{ artifact: change.artifact, text: original, time: change.time }, ...(trusted ? correctionHistory.get(change.artifact) ?? [] : [])];
+        change.text = history.at(-1)!.text;
+        change.edited = history.length > 1;
+        change.history = history;
+        change.canEdit = !!trusted && !!viewer.key && !viewer.blocked && proof!.principal === viewer.key && !!original.trim();
+        // Existing clients also see corrected canonical text, without losing the original history.
+        if (change.fields?.comment !== undefined) change.fields.comment = change.text;
+        else change.comment = change.text;
+        if (trusted && proof!.context) {
+          try { ticket.context = JSON.parse(proof!.context) as DiscussionContext; } catch { /* old malformed private metadata has no display context */ }
+        }
+      }
+      const opening = ticket.changes[0];
+      if (opening?.fields?.comment !== undefined) {
+        ticket.fields.comment = opening.text ?? '';
+        ticket.fields.title = ticketTitle(opening.text ?? '');
+      }
+      const filterMatches = !((query.filter === 'open' && !open) || (query.filter === 'resolved' && open) || (query.filter === 'mine' && !ticket.mine) || (query.filter === 'unread' && !ticket.unread) || (query.filter === 'following' && !ticket.following));
+      const searchMatches = !query.q || [ticket.fields.title ?? '', ticket.context?.label ?? '', ticket.context?.quote ?? '', ...ticket.changes.map(c => c.text ?? '')].join('\n').toLocaleLowerCase().includes(query.q.toLocaleLowerCase());
+      if (filterMatches && searchMatches) {
+        const bytes = new TextEncoder().encode(JSON.stringify(ticket)).byteLength;
+        if (bytes > DISCUSSION_RESULT_BYTES) {
+          if (page.length) break;
+          return this.discussionSizeError(ticket.uuid, query.thread ? null : JSON.stringify([1, signature, ticket.uuid]));
+        }
+        if (resultBytes + bytes > DISCUSSION_RESULT_BYTES) break;
+        page.push(ticket);
+        resultBytes += bytes;
+      } else {
+        // The metadata array outlives this iteration: do not accidentally retain nonmatching histories on it.
+        ticket.changes = [];
+      }
+      scanned++;
+      index++;
+    }
+    const truncated = index < tickets.length;
+    const { blocked: _blocked, ...publicViewer } = viewer;
+    return { ok: true, result: { tickets: page, limit: query.limit, truncated, nextCursor: truncated ? JSON.stringify([1, signature, tickets[index - 1]!.uuid]) : null, viewer: publicViewer } };
+  }
+
+  /** The role is unchanged by identity selection; identity proves ownership, not capability. */
+  async discussionPost(caller: Caller, person: DiscussionPerson, req: NonNullable<ReturnType<typeof ticketChange>>, fallbackAuthor: string, expectedIdentity?: string): Promise<FossilReply<{ ticketUuid: string; artifact: string; discussion: boolean; author: string }>> {
+    const role = await this.role(caller);
+    if (!role || !this.meta()) return { error: 'not found', code: 'not_found' };
+    this.discussionTables();
+    const viewer = this.discussionViewer(person);
+    if (expectedIdentity !== undefined && expectedIdentity !== viewer.key) return { error: 'Comment identity changed. Refresh before trying again.', code: 'identity_changed' };
+    if (viewer.blocked) return { error: 'this guest is blocked from discussing this artifact', code: 'forbidden' };
+    const discussion = role === 'read';
+    if (discussion && !viewer.key) return { error: 'identify before posting: set your name with PUT …/guest', code: 'forbidden' };
+    if (discussion && (req.asResponder || (req.ticketUuid && req.fields.status))) return { error: 'guest discussion cannot change a thread\'s status', code: 'forbidden' };
+    const user = req.asResponder ? fallbackAuthor : viewer.key ? (viewer.verified ? ticketAuthor({ kind: 'account', name: viewer.label }) : guestAuthor(viewer.label)) : fallbackAuthor;
+    if (req.ticketUuid) {
+      const known = this.discussionChanges(req.ticketUuid);
+      if (!known.ok) return { ...known, result: undefined };
+    }
+    const fields = { ...req.fields, ...(discussion ? { severity: GUEST_DISCUSSION } : {}) };
+    const result = run<{ ticketUuid?: string; artifact: string }>(this.ctx.storage, { op: req.ticketUuid ? 'ticketSet' : 'ticketAdd', ticketUuid: req.ticketUuid, fields, user, comment: req.comment }, undefined, result => {
+      if (!result?.artifact) return;
+      const ticket = req.ticketUuid || result.ticketUuid!;
+      this.markChange(result.artifact, discussion ? 'view' : 'edit', !viewer.verified ? viewer.key?.slice(6) : '');
+      this.threadRef(ticket);
+      if (viewer.key) {
+        this.ctx.storage.sql.exec('INSERT INTO _discussion_message (artifact, ticket, principal, context) VALUES (?, ?, ?, ?)', result.artifact, ticket, viewer.key, req.context ? JSON.stringify(req.context) : '');
+        this.ctx.storage.sql.exec(`INSERT INTO _discussion_view (principal, ticket, read_through) VALUES (?, ?, ?) ON CONFLICT(principal, ticket) DO UPDATE SET read_through = excluded.read_through`, viewer.key, ticket, result.artifact);
+      } else if (req.context) {
+        this.ctx.storage.sql.exec('INSERT INTO _discussion_message (artifact, ticket, principal, context) VALUES (?, ?, ?, ?)', result.artifact, ticket, '', JSON.stringify(req.context));
+      }
+    });
+    return result.ok && result.result ? { ok: true, result: { ticketUuid: req.ticketUuid || result.result.ticketUuid!, artifact: result.result.artifact, discussion, author: user } } : { error: result.error, code: result.code };
+  }
+
+  /** Read/follow preferences are private, require a real principal, and never write Fossil. */
+  async discussionView(caller: Caller, person: DiscussionPerson, ticket: string, input: { readThrough?: string; following?: boolean }, expectedIdentity?: string): Promise<FossilReply<unknown>> {
+    if (!(await this.role(caller)) || !this.meta()) return { error: 'not found', code: 'not_found' };
+    this.discussionTables();
+    const viewer = this.discussionViewer(person);
+    if (expectedIdentity !== undefined && expectedIdentity !== viewer.key) return { error: 'Comment identity changed. Refresh before trying again.', code: 'identity_changed' };
+    if (!viewer.key || viewer.blocked) return { error: 'Identify before saving discussion preferences', code: 'forbidden' };
+    const changes = this.discussionChanges(ticket);
+    if (!changes.ok) return changes;
+    if (!changes.result?.length) return { error: 'not found', code: 'not_found' };
+    const state = this.ctx.storage.sql.exec<{ read_through: string; following: number }>('SELECT read_through, following FROM _discussion_view WHERE principal = ? AND ticket = ?', viewer.key, ticket).toArray()[0];
+    let readThrough = state?.read_through ?? '';
+    const requested = input.readThrough ?? (input.following === undefined ? changes.result.at(-1)!.artifact : undefined);
+    if (requested) {
+      const index = changes.result.findIndex(c => c.artifact === requested);
+      if (index < 0) return { error: 'not found', code: 'not_found' };
+      // Delayed responses/opening an older message must never move a marker backwards.
+      const previous = changes.result.findIndex(c => c.artifact === readThrough);
+      if (index >= previous) readThrough = requested;
+    }
+    const following = input.following ?? !!state?.following;
+    this.ctx.storage.sql.exec(`INSERT INTO _discussion_view (principal, ticket, read_through, following) VALUES (?, ?, ?, ?) ON CONFLICT(principal, ticket) DO UPDATE SET read_through = excluded.read_through, following = excluded.following`, viewer.key, ticket, readThrough, following ? 1 : 0);
+    return { ok: true, result: { ticketUuid: ticket, following, unread: readThrough !== changes.result.at(-1)!.artifact } };
+  }
+
+  /** Append a text-only correction, with its trusted original linkage committed atomically. */
+  async correctDiscussion(caller: Caller, person: DiscussionPerson, ticket: string, original: string, text: string, expectedIdentity?: string): Promise<FossilReply<{ ticketUuid: string; artifact: string; correctionOf: string; discussion: boolean; author: string }>> {
+    if (!(await this.role(caller)) || !this.meta()) return { error: 'not found', code: 'not_found' };
+    this.discussionTables();
+    const viewer = this.discussionViewer(person);
+    if (expectedIdentity !== undefined && expectedIdentity !== viewer.key) return { error: 'Comment identity changed. Refresh before trying again.', code: 'identity_changed' };
+    const denied = { error: 'not found', code: 'not_found' };
+    if (!viewer.key || viewer.blocked) return denied;
+    // Both bindings are private server proofs. Imported fields and shared capability possession prove nothing.
+    const proof = this.ctx.storage.sql.exec<{ principal: string; ticket: string; authority: string }>(`SELECT m.principal, m.ticket, p.authority FROM _discussion_message m JOIN _ticket_provenance p ON p.artifact = m.artifact WHERE m.artifact = ?`, original).toArray()[0];
+    if (!proof || proof.principal !== viewer.key || proof.ticket !== ticket || (proof.authority !== 'view' && proof.authority !== 'edit')) return denied;
+    const known = this.discussionChanges(ticket);
+    if (!known.ok) return { ...known, result: undefined };
+    const source = known.result?.find(c => c.artifact === original);
+    if (!known.ok || !source || !this.messageText(source).trim()) return denied;
+    if (!text.trim() || text.length > 8000 || /\0/.test(text)) return { error: 'Invalid correction text', code: 'bad_request' };
+    const discussion = proof.authority === 'view';
+    const fields = discussion ? { severity: GUEST_DISCUSSION } : {};
+    // Keep the original author and authority even if the owner's current artifact role changed.
+    const r = run<{ artifact: string }>(this.ctx.storage, { op: 'ticketSet', ticketUuid: ticket, fields, user: source.user, comment: text }, undefined, result => {
+      if (!result?.artifact) return;
+      this.markChange(result.artifact, proof.authority as 'view' | 'edit', !viewer.verified ? viewer.key!.slice(6) : '');
+      this.ctx.storage.sql.exec('INSERT INTO _discussion_correction (artifact, ticket, original, text) VALUES (?, ?, ?, ?)', result.artifact, ticket, original, text);
+      this.ctx.storage.sql.exec(`INSERT INTO _discussion_view (principal, ticket, read_through) VALUES (?, ?, ?) ON CONFLICT(principal, ticket) DO UPDATE SET read_through = excluded.read_through`, viewer.key!, ticket, result.artifact);
+    });
+    return r.ok && r.result ? { ok: true, result: { ticketUuid: ticket, artifact: r.result.artifact, correctionOf: original, discussion, author: source.user } } : { error: r.error, code: r.code };
+  }
+
   // ─── Guests ────────────────────────────────────────────────────────────────
   //
   // A guest identity belongs to one artifact's repository object and lives
@@ -472,46 +737,6 @@ export class Repo extends DurableObject<Env> {
       })),
       nextCursor: rows.length > limit && last ? JSON.stringify([last.created_at, last.id]) : null,
     };
-  }
-
-  /**
-   * Post discussion as guest `guest` for a caller holding `role` on this
-   * artifact. Reads and licenses the write on this object in one call: the
-   * profile must exist, be the caller's, be unexpired and unblocked, and the
-   * caller must still hold read authority. A guest may open a thread or reply
-   * to one; it may not set status, act as the responder, or name any other
-   * field. The change carries the server-selected discussion marker.
-   */
-  async guestPost(
-    caller: Caller, hash: string, req: GuestPost,
-  ): Promise<FossilReply<{ ticketUuid: string; artifact: string }>> {
-    const role = await this.role(caller);
-    if (!role) return { error: 'not found', code: 'not_found' };
-    if (RANK[role] >= RANK.comment) return { error: 'this credential may comment directly', code: 'forbidden' };
-    const guest = await this.guestByToken(hash);
-    if (!guest) return { error: 'identify before posting: set your name with PUT …/guest', code: 'forbidden' };
-    if (guest.blocked) return { error: 'this guest is blocked from discussing this artifact', code: 'forbidden' };
-    if (req.status) return { error: 'guest discussion cannot change a thread\'s status', code: 'forbidden' };
-    const body = req.text.trim();
-    if (!body) return { error: 'text is required', code: 'bad_request' };
-    const user = guestAuthor(guest.name);
-    this.provenanceTable();
-    const record = (result: { artifact: string } | undefined) => {
-      if (result?.artifact) this.markChange(result.artifact, 'view', guest.id);
-    };
-    const marked = { severity: GUEST_DISCUSSION };
-    if (!req.ticketUuid) {
-      const fields: Record<string, string> = {
-        title: ticketTitle(body), comment: body, status: 'Open', type: 'Comment',
-        subsystem: req.anchor, ...(req.version ? { foundin: req.version } : {}), ...marked,
-      };
-      const r = run<{ ticketUuid: string; artifact: string }>(this.ctx.storage, { op: 'ticketAdd', fields, user, comment: '' }, undefined, record);
-      return r.ok ? { ok: true, result: r.result } : { error: r.error, code: r.code };
-    }
-    const known = run<unknown[]>(this.ctx.storage, { op: 'ticketChanges', ticketUuid: req.ticketUuid });
-    if (!known.ok) return { error: known.error, code: known.code };
-    const r = run<{ artifact: string }>(this.ctx.storage, { op: 'ticketSet', ticketUuid: req.ticketUuid, fields: marked, user, comment: body }, undefined, record);
-    return r.ok ? { ok: true, result: { ticketUuid: req.ticketUuid, artifact: r.result!.artifact } } : { error: r.error, code: r.code };
   }
 
   /**

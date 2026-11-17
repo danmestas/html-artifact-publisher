@@ -273,7 +273,10 @@ export async function viewerQA({ base, a, api, output, attach }) {
     await run('wait', '--fn', `[...document.querySelectorAll('#threadPanel .thread .message')].some(m => m.textContent === 'Agreed, shortened.')`);
     let t = await byTitle('About the fox');
     assert.equal(t.changes.at(-1).comment, 'Agreed, shortened.');
-    assert.equal(t.changes.at(-1).user, 'comment-link');
+    // A reply composed in the viewer now carries the reader's own guest
+    // identity, so it is owned (and correctable) rather than an anonymous
+    // capability-link post. API posts without a guest cookie stay as they were.
+    assert.equal(t.changes.at(-1).user, 'Guest (guest)');
     const foxNow = await labelOf('About the fox');
     await press(`#threadPanel .thread[data-label="${foxNow}"] .resolve`);
     await run('wait', '--fn', `document.querySelector('#threadPanel .thread.resolved summary .title')?.textContent === 'About the fox'`);
@@ -378,10 +381,13 @@ export async function viewerQA({ base, a, api, output, attach }) {
     assert.equal(card.frame.width, widthBefore, 'opening a pin thread does not reshape the page');
     // Anchored at the pin: the card's near horizontal edge sits about one gap
     // from the clicked pin, and its top is just under the pin's bottom edge,
-    // rather than parked at the screen's right edge.
+    // rather than parked at the screen's right edge. A card too tall for
+    // either side of the pin aligns to the page's far edge, which keeps the
+    // pin itself inside the card instead of beyond it.
     const gapX = Math.min(Math.abs(card.x - (card.frame.x + pin.x)), Math.abs(card.right - (card.frame.x + pin.x)));
     const gapY = card.y - (card.frame.y + pin.y + pin.h / 2);
-    assert.ok(gapX <= 30 && gapY >= -30 && gapY <= 100, JSON.stringify({ card, pin, gapX, gapY }));
+    const pinInsideCard = card.frame.y + pin.y >= card.y - 2 && card.frame.y + pin.y <= card.bottom + 2;
+    assert.ok(gapX <= 30 && ((gapY >= -30 && gapY <= 100) || pinInsideCard), JSON.stringify({ card, pin, gapX, gapY, pinInsideCard }));
     assert.ok(card.x >= card.frame.x && card.y >= card.frame.y && card.right <= card.frame.right && card.bottom <= card.frame.bottom, JSON.stringify(card));
     // A reply typed into the card stays there, and a page message cannot take it.
     await run('fill', '#threadPanel .thread.focus .reply textarea', 'Card reply in progress');

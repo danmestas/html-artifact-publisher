@@ -22,6 +22,10 @@ export interface FossilReply<T = Record<string, unknown>> {
   error?: string;
   code?: string;
   aborted?: string;
+  /** Explicit, authenticated continuation past a known oversized discussion; never an automatic skip. */
+  ticketUuid?: string;
+  ref?: number;
+  resumeCursor?: string | null;
 }
 
 interface FossilApi {

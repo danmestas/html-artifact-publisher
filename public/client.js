@@ -13,16 +13,23 @@ import { validIcon } from './icons.js';
 const enc = new TextEncoder();
 
 export class ApiError extends Error {
-  constructor(status, body) {
+  constructor(status, body, headers) {
     super(body?.error || `request failed (HTTP ${status})`);
-    Object.assign(this, { name: 'ApiError', status, code: body?.code ?? '' });
+    const delay = Number(headers?.get?.('retry-after') ?? body?.retryAfter);
+    const retryAfter = Number.isFinite(delay) && delay >= 0 ? delay : 0;
+    Object.assign(this, { name: 'ApiError', status, code: body?.code ?? '', retryAfter });
+    if (this.code === 'discussion_too_large') {
+      this.ticketUuid = typeof body?.ticketUuid === 'string' && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(body.ticketUuid) ? body.ticketUuid : null;
+      this.ref = Number.isSafeInteger(body?.ref) && body.ref > 0 ? body.ref : null;
+      this.resumeCursor = typeof body?.resumeCursor === 'string' && body.resumeCursor.length > 0 && body.resumeCursor.length <= 2048 ? body.resumeCursor : null;
+    }
   }
 }
 
 /** The artifact changed since the check-in an edit was based on. */
 export class ConflictError extends ApiError {
-  constructor(status, body) {
-    super(status, body);
+  constructor(status, body, headers) {
+    super(status, body, headers);
     this.name = 'ConflictError';
   }
 }
@@ -87,14 +94,15 @@ export async function readFileList(list) {
   return out;
 }
 
-async function call(url, { method = 'GET', auth = '', body, raw = false } = {}) {
+async function call(url, { method = 'GET', auth = '', body, raw = false, expectedCommentIdentity } = {}) {
   const headers = {};
   if (auth) headers.Authorization = auth;
   if (body !== undefined) headers['Content-Type'] = 'application/json';
+  if (expectedCommentIdentity !== undefined && expectedCommentIdentity !== null) headers['X-Comment-Identity'] = String(expectedCommentIdentity);
   const res = await fetch(url, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), cache: 'no-store' });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    throw new (res.status === 409 && err.code === 'conflict' ? ConflictError : ApiError)(res.status, err);
+    throw new (res.status === 409 && err.code === 'conflict' ? ConflictError : ApiError)(res.status, err, res.headers);
   }
   if (res.status === 204) return null;
   return raw ? new Uint8Array(await res.arrayBuffer()) : res.json();
@@ -153,10 +161,23 @@ export class Artifact {
   /** Replace the comment link; the old one stops working. Returns { commentToken, commentUrl }. */
   newCommentLink() { return call(`${this.base}/comment-link`, { method: 'POST', auth: this.auth }); }
 
-  /** The newest-changed comment threads: { tickets: [{ uuid, status, changed, fields, changes }], limit, truncated }. */
-  tickets() { return call(`${this.base}/tickets`, { auth: this.auth }); }
+  /** Bounded discussion query; returns {tickets,limit,truncated,nextCursor,viewer}. Cursor is query/identity-bound. */
+  tickets(options = {}) {
+    const query = new URLSearchParams();
+    for (const key of ['limit', 'cursor', 'q', 'filter', 'sort', 'identity', 'thread']) if (options[key] !== undefined && options[key] !== '') query.set(key, String(options[key]));
+    return call(`${this.base}/tickets${query.size ? '?' + query : ''}`, { auth: this.auth });
+  }
   /** Open a thread ({ text, anchor? }) or change one ({ ticketUuid, text?, status? }). */
-  comment(change) { return call(`${this.base}/tickets`, { method: 'POST', auth: this.auth, body: change }); }
+  comment(change, { expectedIdentity } = {}) { return call(`${this.base}/tickets`, { method: 'POST', auth: this.auth, body: change, expectedCommentIdentity: expectedIdentity }); }
+  /** Correct only your own text; the original artifact and full history remain immutable. */
+  editComment(ticketUuid, change, text, { identity, expectedIdentity } = {}) {
+    return call(`${this.base}/tickets/${encodeURIComponent(ticketUuid)}/messages/${encodeURIComponent(change)}`, { method: 'PATCH', auth: this.auth, expectedCommentIdentity: expectedIdentity, body: { text, ...(identity ? { identity } : {}) } });
+  }
+
+  /** Save only the current viewer's read/follow state. With no marker/preference, mark through latest. */
+  discussionView(uuid, change, following, { identity, expectedIdentity } = {}) {
+    return call(`${this.base}/tickets/${encodeURIComponent(uuid)}/view`, { method: 'PUT', auth: this.auth, expectedCommentIdentity: expectedIdentity, body: { ...(change ? { readThrough: change } : {}), ...(following === undefined ? {} : { following }), ...(identity ? { identity } : {}) } });
+  }
 
   /** The caller's private guest profile; a guest cookie never grants artifact access. */
   guest() { return call(`${this.base}/guest`, { auth: this.auth }); }

@@ -70,16 +70,34 @@ const CHECKIN = /(?<![\w.@])@([0-9a-f]{4,64})(?![\w@])/g;
 /** A ticket from GET …/tickets as a thread: its messages, oldest first. */
 export function thread(ticket) {
   const messages = ticket.changes.map((c, i) => {
-    const text = c.comment || (i === 0 ? c.fields.comment ?? '' : '');
+    // The server sends the canonical text (`text`, with earlier revisions in
+    // `history`) and keeps the raw field for older clients.
+    const text = typeof c.text === 'string' ? c.text : c.comment || (i === 0 ? c.fields.comment ?? '' : '');
     const status = i === 0 ? '' : c.fields.status ?? '';
-    return { user: c.user, time: c.time, text, status, change: c.artifact,
+    return { user: c.user, time: c.time, text, status, change: c.artifact, canEdit: c.canEdit === true,
+      edited: c.edited === true,
+      // Earlier revisions, oldest first, each {artifact, text, time}; never
+      // includes the canonical text itself.
+      history: Array.isArray(c.history) ? c.history.filter(h => h && typeof h.text === 'string' && typeof h.artifact === 'string').slice(0, 16) : [],
       ...(c.fields.authority ? { authority: c.fields.authority, intent: c.fields.intent } : {}) };
   });
   const checkins = [...new Set(messages.slice(1).flatMap(m => [...m.text.matchAll(CHECKIN)].map(x => x[1])))];
   const status = ticket.status || 'Open';
+  const context = ticket.context && typeof ticket.context === 'object'
+    && typeof ticket.context.label === 'string' ? { label: ticket.context.label, quote: typeof ticket.context.quote === 'string' ? ticket.context.quote : '' } : null;
   return {
     uuid: ticket.uuid, title: ticket.fields.title || '(untitled)', status, resolved: RESOLVED.includes(status),
-    anchor: ticket.fields.subsystem ?? '', version: ticket.fields.foundin ?? '', checkins, messages,
+    anchor: ticket.fields.subsystem ?? '', version: ticket.fields.foundin ?? '', checkins, messages, context,
+    // A server-assigned reference is stable for the thread's life; it never
+    // changes with activity, replies, resolution or pagination. 0 means the
+    // server did not supply one (an older response), and arrange() numbers it.
+    ref: Number.isInteger(ticket.ref) && ticket.ref > 0 ? ticket.ref : 0,
+    mine: ticket.mine === true, unread: ticket.unread === true, following: ticket.following === true,
+    changed: typeof ticket.changed === 'string' ? ticket.changed : '',
+    // The raw latest event, including a correction event that the canonical
+    // changes[] hides. Read state is marked through this, never through
+    // changes.at(-1).artifact, or a correction would stay unread forever.
+    lastChange: typeof ticket.lastChange === 'string' ? ticket.lastChange : '',
   };
 }
 
@@ -185,14 +203,176 @@ export function responderProgress({ threads, status, responder, now, guestDiscus
 
 /**
  * Threads as the panel lists them: open ones, then resolved ones, each in the
- * route's order (newest-changed first). A thread's label is its number in the
- * panel and on its pin; `pins` is what the page is told, anchors and labels only.
+ * route's order (newest-changed first). A thread's label is its stable
+ * server reference, so activity, replies, resolution, sorting and pagination
+ * never renumber it; `pins` is what the page is told, anchors and labels only.
  */
 export function arrange(threads) {
   const open = threads.filter(t => !t.resolved), resolved = threads.filter(t => t.resolved);
-  [...open, ...resolved].forEach((t, i) => { t.label = i + 1; });
+  // A server ref is preferred. Only a response without one is numbered, and
+  // then in this order, so a pin and its row still agree within one render.
+  let next = threads.reduce((max, t) => Math.max(max, t.ref || 0), 0);
+  for (const t of [...open, ...resolved]) if (!t.ref) t.ref = ++next;
+  for (const t of [...open, ...resolved]) t.label = t.ref;
   const pins = [...open, ...resolved].filter(t => t.anchor).map(t => ({ key: t.label, anchor: t.anchor, resolved: t.resolved }));
   return { open, resolved, pins };
+}
+
+// The filters the panel offers, and what each one keeps. Unread and Mine are
+// the server's per-viewer flags, never a guess from the text.
+export const FILTERS = ['all', 'open', 'resolved', 'mine', 'unread', 'following'];
+export const SORTS = ['activity', 'page'];
+
+/** Keep only the threads a filter names. An unknown filter means all. */
+export function filterThreads(threads, filter) {
+  return threads.filter(t => filter === 'open' ? !t.resolved
+    : filter === 'resolved' ? t.resolved
+    : filter === 'mine' ? t.mine
+    : filter === 'unread' ? t.unread
+    : filter === 'following' ? t.following
+    : true);
+}
+
+/**
+ * Threads in the chosen order: recent activity (newest change first, as the
+ * route sends them) or page order (their place in the document). `placed` is
+ * the labels the page reported, top to bottom; a thread whose pin the page
+ * could not place comes last, and with no placement yet the route's order
+ * stands.
+ */
+export function sortThreads(threads, sort, placed = null) {
+  if (sort !== 'page') return [...threads];
+  const order = Array.isArray(placed) ? placed : [];
+  const at = label => { const i = order.indexOf(label); return i < 0 ? Infinity : i; };
+  return [...threads].sort((a, b) => at(a.label) - at(b.label));
+}
+
+/** A silent, case-insensitive match of a search over a thread's title, text and context. */
+export function searchThreads(threads, query) {
+  const q = String(query ?? '').trim().toLowerCase();
+  if (!q) return [...threads];
+  return threads.filter(t => [t.title, t.context?.label, t.context?.quote, ...t.messages.map(m => m.text)]
+    .some(value => typeof value === 'string' && value.toLowerCase().includes(q)));
+}
+
+/**
+ * The copyable link to a thread: the current URL without capabilities, with
+ * only a validated `?thread=` and the version on screen kept. A read token the
+ * viewer legitimately holds is preserved; nothing else about the query is.
+ */
+export function threadLink({ origin, pathname, token, version, thread }) {
+  const ref = /^[a-f0-9]{40}$|^[a-f0-9]{64}$/.test(String(thread)) ? String(thread) : '';
+  const query = ref ? `?thread=${ref}` : '';
+  const hash = token ? `#${token}${version ? `@${encodeURIComponent(version)}` : ''}` : version ? `#@${encodeURIComponent(version)}` : '';
+  return origin + pathname + query + hash;
+}
+
+/** Whether a message shows an Edit control: the server said so, and it has text. */
+export function editable(message) {
+  return !!message && message.canEdit === true && typeof message.text === 'string' && message.text.trim() !== '';
+}
+
+/**
+ * A heading or landmark enclosing `el`, and the block it sits in: the nearest
+ * ancestor (or `el` itself) with a heading, then the nearest block of text
+ * inside it. The label is the heading's own text; the quote is `quote` (a
+ * selection) when given, else that block's text, bounded.
+ *
+ * This function is injected into the sandboxed page as source, so it must use
+ * nothing outside itself — including boundedContext, which the viewer side
+ * re-applies to whatever the page sends.
+ */
+export function pageContext(el, quote = '') {
+  const MAX_LABEL = 120, MAX_QUOTE = 240;
+  const SECTION = 'H1,H2,H3,H4,H5,H6,SECTION,ARTICLE,MAIN,[role="region"],[role="group"],NAV,ASIDE,FIGURE,TABLE,LI,BLOCKQUOTE,PRE';
+  const SKIP = /^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE|TEXTAREA)$/;
+  // Only rendered text: an injected runtime script or a stylesheet is not page
+  // content, and its source must never become a comment's excerpt.
+  const clean = node => {
+    let text = '';
+    const walk = n => {
+      if (!n) return;
+      if (n.nodeType === 3) { text += n.data; return; }
+      if (n.nodeType === 1 && SKIP.test(n.tagName)) return;
+      // A real DOM exposes firstChild/nextSibling; the unit tests' minimal
+      // nodes carry a children array instead, and text in textContent.
+      const kids = n.firstChild !== undefined ? (() => { const out = []; for (let c = n.firstChild; c; c = c.nextSibling) out.push(c); return out; })() : Array.isArray(n.children) ? n.children : null;
+      if (!kids || !kids.length) { text += typeof n.textContent === 'string' ? n.textContent : ''; return; }
+      for (const c of kids) walk(c);
+    };
+    walk(node);
+    return text.replace(/\s+/g, ' ').trim();
+  };
+  const bounded = text => {
+    let cut = String(text || '').slice(0, MAX_QUOTE);
+    if (String(text || '').length > MAX_QUOTE) {
+      const stop = cut.lastIndexOf(' ');
+      if (stop > MAX_QUOTE * 0.6) cut = cut.slice(0, stop);
+      cut = cut.replace(/[\s,;:.\-–—]+$/, '');
+    }
+    return cut;
+  };
+  if (!el || el.nodeType !== 1) return null;
+  // A click on the runtime or a stylesheet is not a comment location with any
+  // readable text; say nothing rather than quoting its source.
+  if (SKIP.test(el.tagName)) return null;
+  let block = el.closest('p, li, blockquote, pre, figcaption, td, th, dd, dt, h1, h2, h3, h4, h5, h6') || el.closest(SECTION) || el;
+  if (SKIP.test(block.tagName)) return null;
+  // A click on a container (a section or the page body) should quote a block
+  // of text, not the whole container run together. Prefer the first real text
+  // block inside it, when the container itself is not one.
+  const isBlock = /^(P|LI|BLOCKQUOTE|PRE|FIGCAPTION|TD|TH|DD|DT|H[1-6])$/.test(block.tagName);
+  if (!isBlock) {
+    const first = block.querySelector('p, li, blockquote, pre, figcaption, td, th, dd, dt, h1, h2, h3, h4, h5, h6');
+    if (first && !SKIP.test(first.tagName)) block = first;
+  }
+  const region = el.closest(SECTION) || block;
+  const heading = region.querySelector('h1, h2, h3, h4, h5, h6')
+    || (region.previousElementSibling && /^H[1-6]$/.test(region.previousElementSibling.tagName) ? region.previousElementSibling : null)
+    || region.closest('section, article, [role="region"]')?.querySelector('h1, h2, h3, h4, h5, h6')
+    || null;
+  if (block === heading) {
+    // A click on the heading itself: the text that follows it is what the
+    // reader is pointing at, falling back to the heading's own words.
+    const next = heading.nextElementSibling;
+    block = next && /^(P|LI|BLOCKQUOTE|PRE|FIGCAPTION|TD|TH|DD|DT|DIV)$/.test(next.tagName) && clean(next) ? next : heading;
+  }
+  let label = clean(heading).slice(0, MAX_LABEL);
+  if (!label && heading && heading.id) label = heading.id.slice(0, MAX_LABEL);
+  // The element itself may be the only heading around (a click on it).
+  if (!label && /^H[1-6]$/.test(el.tagName)) label = clean(el).slice(0, MAX_LABEL);
+  const text = bounded(quote || clean(block));
+  return label || text ? { label, quote: text } : null;
+}
+
+/**
+ * Bounded context for a new comment, from text the page supplied. The page is
+ * untrusted, so the viewer re-checks the shape and the limits here: a section
+ * label of at most 120 characters and an excerpt of at most 240, both plain
+ * text. Null when there is nothing honest to show.
+ */
+export function boundedContext(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const clean = s => typeof s === 'string' ? s.replace(/\s+/g, ' ').trim() : '';
+  const label = clean(value.label).slice(0, 120);
+  // Cut an excess excerpt at a word boundary, never leaving a trailing fragment.
+  let quote = clean(value.quote);
+  if (quote.length > 240) {
+    quote = quote.slice(0, 240);
+    const stop = quote.lastIndexOf(' ');
+    if (stop > 144) quote = quote.slice(0, stop);
+    quote = quote.replace(/[\s,;:.\-–—]+$/, '');
+  }
+  return label || quote ? { label, quote } : null;
+}
+
+/** A thread's context, as the panel says it: a section label and a bounded excerpt. */
+export function contextLine(context) {
+  if (!context || typeof context !== 'object') return '';
+  const label = typeof context.label === 'string' ? context.label.trim().slice(0, 120) : '';
+  const quote = typeof context.quote === 'string' ? context.quote.trim().slice(0, 240) : '';
+  if (!label) return quote ? `“${quote}”` : '';
+  return quote ? `${label} · “${quote}”` : label;
 }
 
 /**
@@ -245,6 +425,11 @@ export function bubblePlacement(point, size, bounds) {
   const flippedY = top > maxY;
   if (flippedY) top = y - GAP - size.height;
   const clamp = (n, min, max) => Math.min(Math.max(n, min), Math.max(min, max));
+  // When the flipped side overflows too (a card taller or wider than either
+  // side has room for), align to the far edge rather than the near one, so
+  // the point the reader clicked stays inside the card instead of beyond it.
+  if (flippedX && left < bounds.left) left = maxX;
+  if (flippedY && top < bounds.top) top = maxY;
   return { x: clamp(left, bounds.left, maxX), y: clamp(top, bounds.top, maxY), flippedX, flippedY };
 }
 

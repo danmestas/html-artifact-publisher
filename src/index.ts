@@ -55,7 +55,8 @@ import { b64decode, b64encode, clampTtl, genId, genToken, isoOrNull, sha256hex }
 import { ATTACHED_FILE, attachedFrom } from './attached';
 import { RESPONDER_STATUS_FILE, statusFrom, statusRequest } from './responder-status';
 import { ticketAuthor } from './ticket-author';
-import type { Caller, Role } from './repo';
+import type { Caller, Role, DiscussionPerson } from './repo';
+import { discussionQuery, correctionInput, viewInput, commentIdentityPrecondition, type DiscussionIdentity } from './discussion';
 import { TICKET_BODY, ticketChange } from './ticket-body';
 import { ticketKind, wake, wakeKind, type WakeKind } from './wake';
 import {
@@ -79,8 +80,8 @@ function secHeaders(): Record<string, string> {
 function corsHeaders(): Record<string, string> {
   return {
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, HEAD, POST, PUT, DELETE, OPTIONS',
-    'Access-Control-Allow-Headers': 'Authorization, Content-Type, X-Wake',
+    'Access-Control-Allow-Methods': 'GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS',
+    'Access-Control-Allow-Headers': 'Authorization, Content-Type, X-Wake, X-Comment-Identity',
     'Access-Control-Max-Age': '86400',
   };
 }
@@ -93,13 +94,15 @@ function json(data: unknown, status = 200, extra: Record<string, string> = {}): 
 }
 
 const STATUS: Record<string, number> = {
-  bad_request: 400, forbidden: 403, not_found: 404, conflict: 409, unchanged: 409, too_large: 413, quota: 413, aborted: 500, internal: 500,
+  bad_request: 400, forbidden: 403, not_found: 404, conflict: 409, identity_changed: 409, unchanged: 409, too_large: 413, discussion_too_large: 413, quota: 413, aborted: 500, internal: 500,
 };
 
 /** A Fossil reply as an HTTP response: the result, or the error with its status. */
 function reply(r: FossilReply<unknown>): Response {
   if (r.ok) return json(r.result);
-  return json({ error: r.error, code: r.code }, STATUS[r.code ?? 'internal'] ?? 500);
+  const oversized = r.code === 'discussion_too_large'
+    ? { ticketUuid: r.ticketUuid, ref: r.ref, resumeCursor: r.resumeCursor ?? null } : {};
+  return json({ error: r.error, code: r.code, ...oversized }, STATUS[r.code ?? 'internal'] ?? 500);
 }
 
 function missingReply(paths: string[]): Response {
@@ -166,39 +169,28 @@ function changeAuthor(role: Role | null, actor: Actor): string {
     : actor.legacy ? { kind: 'owner' } : { kind: 'edit' });
 }
 
-/**
- * A read credential's POST …/tickets: shared discussion from an identified
- * guest. The Repo rechecks the read role, the guest profile and its block in
- * one call, so a credential revoked between the route's check and the write
- * cannot post. Wakes nobody: ordinary discussion is not agent work, and the
- * upstream responder gates on the marker this writes.
- */
-async function guestDiscussion(
-  req: Request, env: Env, id: string, who: Caller, change: NonNullable<ReturnType<typeof ticketChange>>,
-): Promise<Response> {
-  // Responder identity is the edit link's alone; a guest cannot claim it.
-  if (change.asResponder) return json({ error: 'asResponder needs the edit link' }, 403);
+/** An artifact capability and a named account are independent proofs; selecting a name never replaces `who`. */
+async function discussionPerson(req: Request, env: Env, actor: Actor, choice?: DiscussionIdentity): Promise<{ person: DiscussionPerson; canUseAccount?: { name: string }; missingAccount: boolean }> {
   const tokenIn = guestToken(req);
-  // No token is no identity: an empty token must never hash into one.
-  const hash = tokenIn ? await sha256hex(tokenIn) : '';
-  const reg = registry(env);
+  const guestHash = tokenIn ? await sha256hex(tokenIn) : '';
+  const account = req.headers.get('Authorization')?.startsWith('Token ')
+    ? (await identity(new Request(req.url, { headers: new Headers([...req.headers].filter(([k]) => k.toLowerCase() !== 'authorization')) }), env)).user
+    : actor.user;
+  const available = account?.status === 'active' ? account : null;
+  const selected = choice === 'guest' ? null : choice === 'account' ? available : actor.user;
+  return {
+    person: { guestHash, ...(selected ? { accountId: selected.id, accountName: selected.name } : {}) },
+    ...(available ? { canUseAccount: { name: available.name } } : {}),
+    missingAccount: choice === 'account' && !available,
+  };
+}
+
+/** Same bounded attempt counters as ordinary guest posting, without any outbound effect. */
+async function discussionRate(req: Request, env: Env, id: string, person: DiscussionPerson): Promise<Response | null> {
   const ip = await clientKey(req, 'guest-post', GUEST_IP_POSTS);
-  const keys: RateKey[] = [
-    [`guest-post-artifact:${id}`, GUEST_ARTIFACT_POSTS],
-    ip,
-    ...(hash ? [[`guest-post:${hash}`, GUEST_POSTS] as RateKey] : []),
-  ];
-  if (!(await guestRates(reg, keys))) return rateLimited(env, keys);
-  const r = await repo(env, id).guestPost(who, hash, {
-    text: change.ticketUuid ? change.comment : change.fields.comment ?? '',
-    ticketUuid: change.ticketUuid, anchor: change.fields.subsystem ?? '',
-    version: change.fields.foundin ?? '',
-    // A new thread's Open status is the schema's, not the client's; only a
-    // reply can carry a status the client chose.
-    status: change.ticketUuid && (change.fields.status === 'Open' || change.fields.status === 'Closed') ? change.fields.status : '',
-  });
-  if (!r.ok || !r.result) return reply(r);
-  return json(r.result, change.ticketUuid ? 200 : 201);
+  const key = person.accountId ? `account:${person.accountId}` : person.guestHash;
+  const keys: RateKey[] = [[`guest-post-artifact:${id}`, GUEST_ARTIFACT_POSTS], ip, ...(key ? [[`guest-post:${key}`, GUEST_POSTS] as RateKey] : [])];
+  return await guestRates(registry(env), keys) ? null : rateLimited(env, keys);
 }
 
 // ─── Guest discussion ────────────────────────────────────────────────────────
@@ -744,13 +736,16 @@ async function handleArtifact(req: Request, env: Env, ctx: ExecutionContext, id:
   if (rest === '/tickets' && method === 'GET') {
     // One engine call however many tickets there are: a comment link can add
     // tickets, and none can be deleted.
-    const limit = url.searchParams.get('limit') ?? '100';
-    if (!/^[1-9][0-9]{0,2}$/.test(limit) || Number(limit) > 200) return json({ error: 'limit must be 1 to 200' }, 400);
+    const query = discussionQuery(url.searchParams);
+    if (!query) return json({ error: 'Invalid discussion query: limit must be 1 to 200; filter, sort, identity, search and cursor must be bounded' }, 400);
+    const selected = await discussionPerson(req, env, actor, query.identity);
+    if (selected.missingAccount) return json({ error: 'Sign in before selecting account identity' }, 401);
     const [r, status] = await Promise.all([
-      stub.op(who, { op: 'ticketThreads', limit: Number(limit) }) as Promise<FossilReply<Record<string, unknown>>>,
+      stub.discussionThreads(who, selected.person, query) as Promise<FossilReply<Record<string, unknown>>>,
       stub.op(who, { op: 'uvGet', name: RESPONDER_STATUS_FILE }) as Promise<FossilReply<{ data: string | null }>>,
     ]);
     if (!r.ok || !r.result) return reply(r);
+    if (selected.canUseAccount) (r.result.viewer as Record<string, unknown>).canUseAccount = selected.canUseAccount;
     return json({ ...r.result, guestDiscussion: true, responder: statusFrom(status.ok ? status.result?.data : null) });
   }
   if (rest === '/responder-status' && method === 'PUT') {
@@ -760,15 +755,50 @@ async function handleArtifact(req: Request, env: Env, ctx: ExecutionContext, id:
     if (r.code === 'not_found' && r.error === 'no such change') return json({ error: 'no such change' }, 404);
     return reply(r);
   }
+  const view = /^\/tickets\/([a-f0-9]{40})\/view$/.exec(rest);
+  if (view && method === 'PUT') {
+    if (!(await stub.role(who))) return json({ error: 'not found', code: 'not_found' }, 404);
+    const expectedIdentity = commentIdentityPrecondition(req.headers.get('X-Comment-Identity'));
+    if (expectedIdentity === null) return json({ error: 'Invalid comment identity precondition' }, 400);
+    const input = viewInput(await readBody(req, 4096));
+    if (!input) return json({ error: 'Invalid discussion view body' }, 400);
+    const selected = await discussionPerson(req, env, actor, input.identity);
+    if (selected.missingAccount) return json({ error: 'Sign in before selecting account identity' }, 401);
+    return reply(await stub.discussionView(who, selected.person, view[1]!, input, expectedIdentity));
+  }
+  const correction = /^\/tickets\/([a-f0-9]{40})\/messages\/([a-f0-9]{40}(?:[a-f0-9]{24})?)$/.exec(rest);
+  if (correction && method === 'PATCH') {
+    if (!(await stub.role(who))) return json({ error: 'not found', code: 'not_found' }, 404);
+    const expectedIdentity = commentIdentityPrecondition(req.headers.get('X-Comment-Identity'));
+    if (expectedIdentity === null) return json({ error: 'Invalid comment identity precondition' }, 400);
+    const input = correctionInput(await readBody(req, 65536));
+    if (!input) return json({ error: 'Body must contain only text (1-8000 characters) and optional identity (guest or account)' }, 400);
+    const selected = await discussionPerson(req, env, actor, input.identity);
+    if (selected.missingAccount) return json({ error: 'Sign in before selecting account identity' }, 401);
+    const limited = await discussionRate(req, env, id, selected.person);
+    if (limited) return limited;
+    const r = await stub.correctDiscussion(who, selected.person, correction[1]!, correction[2]!, input.text, expectedIdentity);
+    if (!r.ok || !r.result) return reply(r);
+    const { discussion: _discussion, author: _author, ...result } = r.result;
+    // A text correction is history, never a new request for agent work.
+    return json(result);
+  }
   if (rest === '/tickets' && method === 'POST') {
+    const expectedIdentity = commentIdentityPrecondition(req.headers.get('X-Comment-Identity'));
+    if (expectedIdentity === null) return json({ error: 'Invalid comment identity precondition' }, 400);
     const b = await readBody(req, 65536);
     const change = b && ticketChange(b);
     if (!change) return json({ error: TICKET_BODY }, 400);
     const role = await stub.role(who);
-    // A read credential discusses only as an identified guest. The server
-    // decides the author and the discussion marker; the request cannot choose
-    // either, and no wake is sent for it.
-    if (role === 'read') return guestDiscussion(req, env, id, who, change);
+    // Read credentials discuss as an identified guest or verified account.
+    // Selecting account authorship never replaces the artifact capability;
+    // the Repo derives authority and ordinary discussion wakes nobody.
+    const selected = await discussionPerson(req, env, actor, change.identity);
+    if (selected.missingAccount) return json({ error: 'Sign in before selecting account identity' }, 401);
+    if (role === 'read') {
+      const limited = await discussionRate(req, env, id, selected.person);
+      if (limited) return limited;
+    }
     let user = changeAuthor(role, actor);
     if (change.asResponder) {
       // Only the edit link itself: attached.json is what it can already set.
@@ -777,18 +807,11 @@ async function handleArtifact(req: Request, env: Env, ctx: ExecutionContext, id:
       const attached = attachedFrom(flag.ok ? flag.result?.data : null);
       if (attached) user = ticketAuthor({ kind: 'responder', name: attached.responder });
     }
-    if (!change.ticketUuid) {
-      const r = (await stub.op(who, { op: 'ticketAdd', fields: change.fields, user, comment: '' })) as FossilReply<{ ticketUuid: string; artifact: string }>;
-      if (!r.ok || !r.result) return reply(r);
-      wakeOnTicket(env, ctx, id, r.result.ticketUuid, r.result.artifact, user, 'comment');
-      return json(r.result, 201);
-    }
-    const known = (await stub.op(who, { op: 'ticketChanges', ticketUuid: change.ticketUuid })) as FossilReply<unknown[]>;
-    if (!known.ok) return reply(known);
-    const r = (await stub.op(who, { op: 'ticketSet', ticketUuid: change.ticketUuid, fields: change.fields, user, comment: change.comment })) as FossilReply<{ artifact: string }>;
+    const r = await stub.discussionPost(who, selected.person, change, user, expectedIdentity);
     if (!r.ok || !r.result) return reply(r);
-    wakeOnTicket(env, ctx, id, change.ticketUuid, r.result.artifact, user, ticketKind(false, change.fields));
-    return json({ ticketUuid: change.ticketUuid, ...r.result });
+    const { discussion, author, ...result } = r.result;
+    if (!discussion) wakeOnTicket(env, ctx, id, result.ticketUuid, result.artifact, author, ticketKind(!change.ticketUuid, change.fields));
+    return json(result, change.ticketUuid ? 200 : 201);
   }
   const attachments = await handleAttachments(req, env, id, rest, who, actor);
   if (attachments) return attachments;

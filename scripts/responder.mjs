@@ -44,7 +44,6 @@ Prints {"artifact","ticket","change","reply"} for each reply it posts.
 
 const MAX_BODY = 65_536;
 const MAX_LINE = 1 << 20;
-const THREADS_LIMIT = 200;
 const ATTACHED = 'attached.json';
 
 const args = process.argv.slice(2);
@@ -172,6 +171,16 @@ function eventOf(raw) {
   return { artifact: e.artifact, ticket: e.ticket, change, kind: e.kind };
 }
 
+async function readThread(ticket) {
+  try {
+    const { tickets } = await apiGet(link, `/tickets?thread=${encodeURIComponent(ticket)}`);
+    return tickets.find(t => t.uuid === ticket) ?? null;
+  } catch (error) {
+    if (error.status === 404) return null; // Unknown targets retain the old skip behavior.
+    throw error; // In particular, oversized histories are explicit failures, never auto-skipped.
+  }
+}
+
 async function handle(raw) {
   if (raw.length > MAX_LINE) return log('skipped an oversized line');
   if (!raw.trim()) return;
@@ -180,10 +189,9 @@ async function handle(raw) {
   if (ev.artifact !== link.id) return log(`skipped ${short(ev.change)}: another artifact`);
   if (ev.kind !== 'comment' && ev.kind !== 'reply') return log(`skipped ${short(ev.change)}: ${String(ev.kind).slice(0, 20)}`);
   // Read the thread from the Worker, not the event: the event says only where to look.
-  const { tickets } = await apiGet(link, `/tickets?limit=${THREADS_LIMIT}`);
-  const thread = tickets.find(t => t.uuid === ev.ticket);
+  const thread = await readThread(ev.ticket);
   const i = thread ? thread.changes.findIndex(c => c.artifact === ev.change) : -1;
-  if (i < 0) return log(`skipped ${short(ev.change)}: not in the newest ${THREADS_LIMIT} threads`);
+  if (i < 0) return log(`skipped ${short(ev.change)}: not in the thread this link can read`);
   if (isAck(changeText(i === 0, thread.changes[i].fields ?? {}))) return log(`skipped ${short(ev.change)}: its own reply`);
   if (thread.changes.slice(i + 1).some(c => isAck(c.comment))) return log(`skipped ${short(ev.change)}: already acknowledged`);
   const r = await link.art.comment({ ticketUuid: thread.uuid, text: ACK });

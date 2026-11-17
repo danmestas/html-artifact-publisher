@@ -135,7 +135,7 @@ export async function apiGet(link, path) {
     headers: { Authorization: `Token ${link.token}` }, cache: 'no-store', signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
   });
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(`GET ${path.split('?')[0]} answered ${res.status}${body?.error ? `: ${String(body.error).slice(0, 200)}` : ''}`);
+  if (!res.ok) throw Object.assign(new Error(`GET ${path.split('?')[0]} answered ${res.status}${body?.error ? `: ${String(body.error).slice(0, 200)}` : ''}`), { status: res.status });
   return body;
 }
 
@@ -246,9 +246,29 @@ async function viaHttp(link, since, max) {
   const { timeline } = await apiGet(link, `/timeline?since=${since}&type=t`);
   const entries = timeline.slice().reverse().slice(0, max);
   if (!entries.length) return [];
-  const { tickets } = await apiGet(link, `/tickets?limit=${THREADS_LIMIT}`);
   const byChange = new Map();
-  for (const t of tickets) t.changes.forEach((c, i) => byChange.set(c.artifact, { t, c, i }));
+  const wanted = new Set(entries.map(entry => entry.uuid));
+  const seenThreads = new Set(), seenCursors = new Set();
+  let cursor = '';
+  // The HTTP API may return a bounded scan cohort smaller than limit. Keep the
+  // old 200-thread ceiling, not a new implicit first-32 ceiling. A 413 throws:
+  // this consumer never silently skips an oversized discussion.
+  for (let pages = 0; pages < THREADS_LIMIT; pages++) {
+    const query = new URLSearchParams({ limit: String(THREADS_LIMIT), ...(cursor ? { cursor } : {}) });
+    const page = await apiGet(link, `/tickets?${query}`);
+    for (const t of page.tickets) {
+      if (seenThreads.has(t.uuid)) continue;
+      if (seenThreads.size === THREADS_LIMIT) break;
+      seenThreads.add(t.uuid);
+      t.changes.forEach((c, i) => { if (wanted.has(c.artifact)) byChange.set(c.artifact, { t, c, i }); });
+    }
+    const next = page.nextCursor;
+    if (next !== undefined && next !== null && (typeof next !== 'string' || next.length === 0 || next.length > 2048 || seenCursors.has(next))) throw new Error('discussion pagination did not advance');
+    if (next === undefined || next === null || seenThreads.size === THREADS_LIMIT || byChange.size === wanted.size) break;
+    seenCursors.add(next);
+    cursor = next;
+    if (pages === THREADS_LIMIT - 1) throw new Error('discussion pagination exceeded its bounded scan');
+  }
   return entries.map(e => {
     const hit = byChange.get(e.uuid);
     if (!hit) return { change: e.uuid, missing: true };

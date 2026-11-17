@@ -25,11 +25,16 @@ export async function guestDiscussionQA({ base, artifact: a, api }) {
     await run(guest, 'open', `${base}/v/${a.id}#${a.read}`);
     await run(guest, 'wait', '#bar:not([hidden])');
     await run(guest, 'click', '#discussionsBtn');
+    // Identity is one quiet line above the discussions; the optional details
+    // (name, private email) open only when the reader asks for them.
+    await run(guest, 'wait', '#identityLine:not([hidden])');
+    await run(guest, 'click', '#identityChange');
     await run(guest, 'wait', '#guestProfile:not([hidden])');
     await run(guest, 'fill', '#guestName', 'Browser Guest');
     await run(guest, 'fill', '#guestEmail', 'private-browser@example.com');
     await run(guest, 'click', '#saveGuestProfile');
-    await run(guest, 'wait', '--text', 'Comment identity saved.');
+    // Saving closes the disclosure; the identity line names the new reader.
+    await run(guest, 'wait', '--fn', `document.getElementById('guestProfile').hidden && document.getElementById('identityText').textContent.includes('Browser Guest')`);
     await run(guest, 'click', '#generalComment');
     await run(guest, 'wait', '#commentForm:not([hidden])');
     await run(guest, 'fill', '#commentText', 'A shared browser discussion');

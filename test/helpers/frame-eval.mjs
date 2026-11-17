@@ -45,6 +45,19 @@ export async function frameEval(cdpUrl) {
   }
 
   return {
+    /** Native input on the viewer target, including OOPIF hit testing. */
+    async click(x, y) {
+      const { targetInfos } = await call('Target.getTargets');
+      const target = targetInfos.find(t => t.type === 'page' && t.url.includes('/v/'));
+      if (!target) throw new Error('no viewer page');
+      const { sessionId } = await call('Target.attachToTarget', { targetId: target.targetId, flatten: true });
+      try {
+        await call('Page.bringToFront', {}, sessionId);
+        await call('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y }, sessionId);
+        await call('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 }, sessionId);
+        await call('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 }, sessionId);
+      } finally { await call('Target.detachFromTarget', { sessionId }); }
+    },
     async eval(expression, wanted = f => f.url.startsWith('blob:')) {
       for (let tries = 0; tries < 20; tries++) {
         const { sessionId, frameId } = await attach(wanted);

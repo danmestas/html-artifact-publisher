@@ -10,13 +10,14 @@ import { embedFonts } from './fonts.js';
 import { zip } from './zip.js';
 import { setArtifactFavicon, resolveIcon } from './icons.js';
 import { preparePublication } from './export.js';
-import { anchorFor, arrange, attachmentDisplay, bubblePlacement, controls, decodePointAnchor, encodePointAnchor, findQuotes, responderNote, responderProgress, thread } from './comments.js';
+import { anchorFor, arrange, attachmentDisplay, boundedContext, bubblePlacement, clock, contextLine, controls, decodePointAnchor, editable, encodePointAnchor, filterThreads, findQuotes, pageContext, responderNote, responderProgress, searchThreads, sortThreads, thread, threadLink } from './comments.js';
 import { guestPanel } from './guest-panel.js';
 import { typeOf } from './blobs.js';
 import { pagePins } from './page-pins.js';
 import { pageAppearance } from './page-appearance.js';
 import { backdropColor, pageBackdrop, chooseCanvas } from './backdrop.js';
-import { safeReturnTo, signinUrl } from './auth-return.js';
+import { safeReturnTo, signinUrl, threadRef } from './auth-return.js';
+import { createDraftStore } from './comment-drafts.js';
 
 const $ = id => document.getElementById(id);
 const NONCE = document.querySelector('meta[name="artifact-nonce"]')?.content ?? '';
@@ -45,7 +46,10 @@ $('backLibrary').href = libraryReturnLocation(new URLSearchParams(location.searc
 // replay into email or a URL.
 function signinDestination() {
   const at = link?.at ? `#@${encodeURIComponent(link.at)}` : '';
-  return safeReturnTo(location.pathname + at);
+  // A thread the reader opened is navigation within the artifact, not access:
+  // it survives the sign-in round trip so they return to the same discussion.
+  const thread = threadRef(new URLSearchParams(location.search).get('thread'));
+  return safeReturnTo(location.pathname + (thread ? `?thread=${thread}` : '') + at);
 }
 let contentFailed = false;
 let failureMessage = '';
@@ -137,6 +141,13 @@ let sessionCheckedEpoch = -1;
 let sessionSeq = 0;      // newest /api/session request wins over older ones
 let sessionInFlight = null;
 const SESSION_FRESH_MS = 5_000;
+// Signing in from signed-out is the approved continuation: the live guest
+// draft belongs to the same person and must survive the new account identity.
+// Account A → B, or A → signed out, is a different person and clears drafts.
+let signInContinuation = false;
+// Set when a signed-out → account confirmation is the sign-in continuation,
+// and cleared by the first identity change it explains.
+let signInJustConfirmed = false;
 
 function sessionRequest({ fresh = false } = {}) {
   if (sessionInFlight && !fresh) return sessionInFlight.promise;
@@ -162,25 +173,154 @@ async function confirmAccount({ fresh = false } = {}) {
   // A newer check already settled; its answer, not this one, is the identity.
   if (seq !== sessionSeq) return accountId || null;
   if (id === null) return accountId || null; // unknown: keep the last confirmed identity
+  acceptSessionAccount(id);
+  return accountId || null;
+}
+
+/** Apply only a successful, current session response; never an offline guess. */
+function acceptSessionAccount(id) {
   if (id !== accountId) {
-    const adopted = accountId !== null;
+    const previous = accountId;
+    const adopted = !!previous;
     accountId = id;
-    // A change drops the last account's cache, panels and rights, then asks
-    // the server again for the role the new cookie actually has.
-    if (adopted) forgetAccount(); else identityEpoch++;
+    signInContinuation = !adopted && !!id;
+    signInJustConfirmed = signInContinuation;
+    try {
+      if (adopted) forgetAccount(previous); else identityEpoch++;
+    } finally { signInContinuation = false; }
   }
   sessionCheckedAt = Date.now();
   sessionCheckedEpoch = identityEpoch;
   paintSignin();
-  return accountId || null;
 }
 
-/** A confirmed identity loss or change drops every account-scoped cache and panel. */
-function forgetAccount() {
-  const epoch = ++identityEpoch;
+/**
+ * Drop every draft that belonged to `previous` (or the tab's anonymous
+ * drafts), plus a live composer and the recovery banner. The reader is told
+ * once; the words of another identity are never carried into this one.
+ */
+/**
+ * Move this tab's anonymous drafts to the identity the server has just named.
+ * Used only for the signed-out → account continuation, where it is the same
+ * reader: no other transition moves words between identities.
+ */
+function carryDraftsTo(key) {
+  if (!key || !shown?.checkin || !art?.id) return;
+  for (const { binding: from, draft } of draftStore.list({ artifact: art.id, version: shown.checkin, identity: anonIdentity })) {
+    const to = { ...from, identity: key };
+    const existing = draftStore.load(to);
+    if (!existing || existing.updatedAt <= draft.updatedAt) draftStore.save(to, draft);
+    draftStore.remove(from);
+    if (recoverable && sameDraftBinding(recoverable.binding, from)) {
+      const current = draftStore.load(to);
+      recoverable = current ? { binding: to, draft: current } : null;
+    }
+  }
+  renderRecovery();
+}
+
+function clearIdentityDrafts(previous = null) {
+  if (previous) draftStore.clearIdentity(previous);
+  draftStore.clearIdentity(anonIdentity);
+  commentOperation++;
+  commentBusy = false;
+  for (const status of document.querySelectorAll('#threadPanel [role="status"], #commentStatus, #bubbleStatus')) {
+    const timed = waits.has(status);
+    clearInterval(waits.get(status));
+    waits.delete(status);
+    if (timed) status.textContent = '';
+  }
+  $('commentStatus').textContent = '';
+  $('bubbleStatus').textContent = '';
+  for (const control of document.querySelectorAll('#commentForm textarea, #commentBubble textarea, #threadPanel .reply textarea')) control.readOnly = false;
+  for (const button of document.querySelectorAll('#commentForm [type="submit"], #commentBubble [type="submit"], #threadPanel .reply button')) button.disabled = false;
+  recoverable = null;
+  renderRecovery();
+  // Every textarea that could hold words is emptied at once: the panel
+  // composer and bubble, and the live reply and correction editors inside
+  // threads, which are DOM, not just the drafts map.
+  let dropped = false;
+  if ($('commentText').value.trim()) { $('commentText').value = ''; dropped = true; }
+  if ($('bubbleText').value.trim()) { $('bubbleText').value = ''; dropped = true; }
+  for (const area of document.querySelectorAll('#threadPanel .reply textarea, #threadPanel .message-editor textarea')) {
+    if (area.value?.trim()) { area.value = ''; dropped = true; }
+  }
+  for (const [uuid, text] of drafts) if (text?.trim()) { drafts.delete(uuid); dropped = true; }
+  selection = draftAnchor = bubbleAnchor = bubbleVersion = '';
+  bubbleContext = selectionContext = panelDraftContext = null;
+  if (document.activeElement?.matches('#commentForm textarea, #commentBubble textarea, #threadPanel textarea')) document.activeElement.blur();
+  setPlacement(false);
+  closeBubble(false);
+  // Close a correction editor that belonged to the old identity outright,
+  // rather than leaving an empty box whose Save could still name that message.
+  for (const editor of document.querySelectorAll('#threadPanel .message-editor')) {
+    editor.remove();
+    for (const edit of document.querySelectorAll('#threadPanel .edit-message')) edit.hidden = false;
+  }
+  editors.clear();
+  if (dropped) {
+    $('commentStatus').textContent = 'The previous identity’s unsent draft was not carried over.';
+    notice('Comment identity changed. The previous identity’s draft was not kept.');
+  }
+  // The previous account's private per-viewer flags are not this account's:
+  // drop them until the server answers for the new identity, and ignore any
+  // response still in flight from before the change.
+  identityEpoch++;
+  focusedScope = null;
+  threadRequest++;
+  threadsLoading = 0;
+  for (const t of threads) { t.mine = false; t.unread = false; t.following = false; t.messages.forEach(m => { m.canEdit = false; }); }
+  threadSnapshot = '';
+  if (info) renderThreads();
+}
+
+/**
+ * A confirmed identity loss or change drops every account-scoped cache and
+ * panel — including the previous account's draft and its private view flags,
+ * so nothing from account A survives into account B or into signed-out use.
+ */
+function clearCookieContent() {
+  // A cookie-only page has no independent capability after account loss.
+  // Cancel pending renders and remove the old document until access is proven.
+  renders++;
+  frameReady = false;
+  setPlacement(false);
+  closeBubble(false);
+  closeInspector();
+  $('frame').src = 'about:blank';
+  $('frame').style.display = 'none';
+  if (frameUrl) { URL.revokeObjectURL(frameUrl); frameUrl = ''; }
+  shown = null;
+  threads = [];
+  views.clear();
+  $('threadList').replaceChildren();
+  $('resolvedList').replaceChildren();
+  $('bar').hidden = true;
+  $('shell').style.display = '';
+  $('ring').style.display = '';
+  $('msg').className = '';
+  $('msg').textContent = 'Checking artifact access…';
+}
+
+function forgetAccount(previous = null) {
+  identityEpoch++;
+  // Draft keys are principals (account:<id> / guest:<id>), not bare account
+  // ids. Drop the cached principal before another response can name a new one.
+  const previousPrincipal = guestUI.identityKey() || (previous ? `account:${previous}` : null);
+  if (!signInContinuation) {
+    guestUI.resetViewer();
+    draftStore.clearAll(); // a different account must inherit no tab draft realm
+    clearIdentityDrafts(previousPrincipal);
+  }
   libraryCache = { at: 0, items: null, error: '', accountId: null };
   people = { grants: [], users: [], ownerId: '' };
   peopleLoaded = false;
+  $('peopleForm').reset();
+  for (const id of ['renameDialog', 'expirationDialog']) {
+    const dialog = $(id);
+    if (dialog.open) dialog.close();
+    dialog.querySelector('form')?.reset();
+  }
   publications = [];
   publicationCursor = '';
   sidebarUnavailable = true;
@@ -195,19 +335,102 @@ function forgetAccount() {
   // The content role came from the link and still stands; management came from
   // the cookie and may not. Drop it now, then ask the server again rather than
   // trusting a page restored under another identity.
-  if (info) { info.canManage = false; if (shown) renderChrome(); }
-  if (art && info && shown) {
-    art.info().then(next => {
-      if (epoch !== identityEpoch) return; // a newer identity owns the page now
-      info = next;
-      renderChrome();
-    }).catch(() => { /* the content link still governs */ });
+  if (info) {
+    info.canManage = false;
+    // Tokens are capabilities cached under the lost identity. A copied thread
+    // link must never use one after that identity is gone.
+    delete info.readToken;
+    delete info.commentToken;
+    if (shown) renderChrome();
+  }
+  const cookieOnly = !link?.token;
+  if (cookieOnly) clearCookieContent();
+  // clearIdentityDrafts also invalidates the epoch. Capture only AFTER all
+  // synchronous invalidation, otherwise this refresh rejects itself forever.
+  const epoch = identityEpoch, source = art, at = link?.at ?? '';
+  const current = () => epoch === identityEpoch && source === art && at === (link?.at ?? '');
+  if (source) {
+    source.info().then(async next => {
+      if (!current()) return;
+      if (cookieOnly) {
+        const bundle = await source.bundle(at);
+        if (!current()) return;
+        await fetchTextBlobs(bundle);
+        if (!current()) return;
+        info = next;
+        shown = bundle;
+        contentFailed = false;
+        failureMessage = '';
+        failureStatus = 0;
+        await render();
+        if (!current()) return;
+      } else {
+        info = next;
+        if (shown) renderChrome();
+      }
+      await loadThreads();
+      if (current() && !hasUnsavedWork()) await openLinkedThread();
+    }).catch(error => {
+      if (!current() || !cookieOnly) return; // a valid capability still governs
+      info = null;
+      fail(error.status === 404 ? 'This artifact does not exist, has expired, or the link is wrong.' : 'Could not confirm artifact access. Sign in or try again.', error.status ?? 0);
+    });
   }
 }
 
 /** Whether an account request still speaks for the identity confirmed now. */
 function stillCurrent(epoch, account = accountId) {
   return epoch === identityEpoch && account === accountId;
+}
+
+/**
+ * The identity a write was started under. A write captures this before it
+ * awaits anything, and re-checks it before it sends and before it touches the
+ * UI: a cookie or identity change in between must not post the first reader's
+ * words under the second reader's identity, clear their composer, or clear
+ * their draft.
+ */
+function writeScope() {
+  const identity = guestUI.identity(), key = guestUI.identityKey();
+  const expectedIdentity = key?.startsWith(identity + ':') ? key
+    : identity === 'account' && accountId ? `account:${accountId}`
+    : identity === 'guest' && guestUI.profile()?.id ? `guest:${guestUI.profile().id}` : null;
+  return { epoch: identityEpoch, account: accountId, artifact: art?.id ?? '', identity, key, expectedIdentity };
+}
+
+/** Bind a new anonymous post only after its own profile preflight names it. */
+function expectedPrincipal(scope) {
+  return scope.expectedIdentity || (scope.identity === 'guest' && guestUI.profile()?.id ? `guest:${guestUI.profile().id}` : undefined);
+}
+
+async function refreshChangedIdentity(error) {
+  if (error?.code !== 'identity_changed') return;
+  await confirmAccount({ fresh: true });
+  await loadThreads();
+}
+
+async function principalReady(scope, operation, status) {
+  if (scope.identity !== 'account' || scope.key?.startsWith('account:')) return true;
+  await confirmAccount({ fresh: true });
+  if (operation !== commentOperation) return false;
+  await loadThreads();
+  if (operation === commentOperation) status.textContent = 'Your comment identity is confirmed. Review your text, then post again.';
+  return false; // never send text under an initially unknown account
+}
+
+/** Whether a write's captured scope still describes this page and reader. */
+function scopeCurrent(scope, { allowGuestNaming = false } = {}) {
+  const key = guestUI.identityKey();
+  // The first successful guest request may name the previously anonymous
+  // browser. That is not an account/identity change; real key replacement
+  // still invalidates the epoch and never passes this exception.
+  const namedGuest = !scope?.key && scope?.identity === 'guest' && typeof key === 'string' && key.startsWith('guest:')
+    && (scope.expectedIdentity === key || (allowGuestNaming && !scope.expectedIdentity));
+  const sameGuest = scope?.identity === 'guest' && (scope.key === key || namedGuest) && scope.epoch + 1 === identityEpoch
+    && ((scope.account === null && accountId === '') || (!scope.account && !!accountId && signInJustConfirmed));
+  return !!scope && ((scope.epoch === identityEpoch && scope.account === accountId) || sameGuest)
+    && scope.artifact === (art?.id ?? '') && scope.identity === guestUI.identity()
+    && (scope.key === key || namedGuest);
 }
 
 /**
@@ -301,7 +524,7 @@ const RUNTIME = `(function(){
     t.scrollIntoView({ block: 'start' });
   }, true);
 })();
-(${pagePins})(${findQuotes}, ${anchorFor}, ${encodePointAnchor}, ${decodePointAnchor});
+(${pagePins})(${findQuotes}, ${anchorFor}, ${encodePointAnchor}, ${decodePointAnchor}, ${pageContext});
 (${pageBackdrop})(${chooseCanvas}, ${backdropColor});`;
 
 // The page renders in a sandboxed iframe with an opaque origin, which cannot
@@ -501,17 +724,88 @@ function renderAuthority() {
 // The panel lists the threads; the page draws a pin at each anchor it finds
 // (page-pins.js) and tells the viewer which it placed. The page is sent
 // anchors and labels only, never ticket text, and never a token.
+//
+// The list is the server's, not a client-side projection: search, filters,
+// ordering and older pages are query parameters (client.js -> GET …/tickets).
+// The client tolerates an older server by sending only what it understands.
+
+/** GET …/tickets with the panel's query, falling back once for an older server. */
+async function ticketQuery({ append = false, cursor = '' } = {}) {
+  const query = { limit: 50, ...threadQuery };
+  // An explicit cursor (a server-offered continuation) is used instead of the
+  // list's own next page; it is query- and identity-bound on the server.
+  if (cursor) query.cursor = cursor;
+  else if (append && threadsNextCursor) query.cursor = threadsNextCursor;
+  // Always explicit: a cookie-only named entry would otherwise default to the
+  // account while the composer says guest. The server still decides what each
+  // choice is allowed to be; the query only names the reader's own choice.
+  query.identity = guestUI.identity();
+  if (!legacyServer) {
+    try { return await art.tickets(query); }
+    catch (err) {
+      // A server that predates discussions rejects the query outright. Say so
+      // once, ask for the plain list, and never send a filter it cannot honour.
+      if (err?.status !== 400) throw err;
+      legacyServer = true;
+    }
+  }
+  return art.tickets();
+}
+
+/** The reader's current draft binding; null until the page knows the artifact and version. */
+function sameDraftBinding(a, b) {
+  return !!a && !!b && ['artifact', 'version', 'thread', 'kind', 'identity'].every(key => a[key] === b[key]);
+}
+function draftBinding(kind, thread = '') {
+  // A private per-tab nonce scopes a draft typed before the server has named
+  // this reader; it is replaced, and its drafts cleared, the moment a real
+  // key arrives. It is never a credential and never leaves this tab.
+  const identity = guestUI.identityKey() || anonIdentity;
+  const version = shown?.checkin;
+  if (!version) return null;
+  return { artifact: art?.id ?? '', version, thread: thread || '', kind, identity };
+}
+
+/** The text, anchor and context a comment composer currently holds. */
+function composerDraft({ text, anchor, context }) {
+  return { text: String(text ?? ''), anchor: anchor || '', ...(context ? { context } : {}) };
+}
+
+/** Save a live composer's words so a reload or a failed post never loses them. */
+function saveDraft(binding, value) {
+  if (!binding) return;
+  // The store itself is used directly (never through the page's data API), so
+  // this call needs the store's own synchronous save. It returns false when
+  // the binding is invalid; nothing else here depends on that.
+  if (!value || !value.text.trim()) { clearDraft(binding); return; }
+  draftStore.save(binding, value);
+  if (recoverable && sameDraftBinding(recoverable.binding, binding)) {
+    recoverable = null; // this draft is being actively edited, not awaiting Restore
+    renderRecovery();
+  }
+}
+
 
 let threads = [];
 let threadsTruncated = false;
+let threadsNextCursor = '';  // the server's cursor for older discussions
+let threadQuery = { q: '', filter: 'all', sort: 'activity' };
+let threadNotice = '';       // a failed load or stale list, shown above the list
+let noticeSticky = false;    // the notice explains a deep link, not the last request
+let serverDiscussion = false; // the server answered with stable refs and query support
+let legacyServer = false;     // the server rejects discussion queries; send none again
 let responderStatus = { threads: {} }; // GET …/tickets `responder`, as last loaded
 let threadSnapshot = '';
 let threadRequest = 0;
 let threadsLoading = 0;
 let pins = [];           // what the page was last sent
 let placed = null;       // labels the page placed, or null before it answered
+let placedOrder = [];    // those labels in the page's own top-to-bottom order
+let pageOrderLocal = false; // Page order sorts the loaded cohort by real placement
 let selection = '';      // the anchor of the reader's selection in the page
 let focused = '';        // uuid of the thread a pin opened
+let focusedScope = null; // private flags belong to the principal that opened it
+let discussionNavigation = 0; // an initial deep link must not override a later reader action
 let markersVisible = true; // local to this viewer; threads and anchors remain available
 let placing = false;     // the placement toggle: the page takes the next click
 let panelPoint = null;   // active anchor in the iframe's viewport coordinates
@@ -520,7 +814,36 @@ let bubbleAnchor = '';   // the bubble's own anchor, bound when it opens
 let bubbleVersion = '';  // the check-in the bubble's draft was started on
 let draftAnchor = '';    // a picked location survives closing the composer
 let commentBusy = false;
+let commentOperation = 0; // only the current operation may release shared controls
 let trackedAnchor = '';  // echoed by the page; stale position messages are ignored
+let bubbleContext = null;    // bounded {label,quote} the page sent for a placed comment
+let selectionContext = null; // the same, for the reader's current selection
+let panelDraftContext = null; // independent of a simultaneously open point draft
+// A correction editor the reader opened survives the five-second poll: its
+// words, focus and pending request belong to the reader, not to a render.
+const editors = new Map(); // `${ticketUuid}:${change}` -> { item, draft, save, status }
+
+const draftStore = createDraftStore(); // private, same-tab recovery; never the page's storage
+/**
+ * Whether a stored draft survives a reload. With sessionStorage blocked the
+ * store falls back to memory, and the banner must say so rather than promise
+ * a recovery that will not happen.
+ */
+const draftsPersist = draftStore.persistent;
+// A per-tab name for drafts typed before the server identifies the reader.
+// It survives a same-tab reload (sessionStorage), never a new tab, and is not
+// a credential: the server never sees it, and a real identity key replaces it
+// as soon as one is known.
+const anonIdentity = (() => {
+  const KEY = 'hap-comment-anon';
+  try {
+    const saved = sessionStorage.getItem(KEY);
+    if (saved && /^tab:[a-z0-9]{1,32}$/.test(saved)) return saved;
+    const fresh = 'tab:' + Math.random().toString(36).slice(2, 12);
+    sessionStorage.setItem(KEY, fresh);
+    return fresh;
+  } catch { return 'tab:' + Math.random().toString(36).slice(2, 12); }
+})();
 const expanded = new Map(); // uuid -> open, once the reader toggled it
 const drafts = new Map();   // uuid -> reply text not yet sent
 const views = new Map();    // uuid -> its element in the panel
@@ -591,13 +914,237 @@ function anchored(t) {
 }
 
 function anchorLine(t) {
+  // The server's bounded context (a section label and an excerpt) is what the
+  // reader gets; the raw anchor is a fallback for older threads. Either way it
+  // is plain text, and its jump never closes the thread or loses a draft.
+  const where = t.context ? contextLine(t.context) : anchorName(t.anchor);
+  if (!where) return null;
   const state = anchored(t);
-  if (state === 'none') return null;
-  if (state === 'no') return el('p', { className: 'anchor unanchored', textContent: `Not found in this version: ${anchorName(t.anchor)}` });
-  if (state === 'pending') return el('p', { className: 'anchor', textContent: `On ${anchorName(t.anchor)}` });
-  const show = el('button', { type: 'button', textContent: `On ${anchorName(t.anchor)}` });
+  if (state === 'no') return el('p', { className: 'anchor unanchored', textContent: `Not found in this version: ${where}` });
+  if (state === 'pending') return el('p', { className: 'anchor', textContent: `On ${where}` });
+  const show = el('button', { type: 'button', textContent: `On ${where}` });
   show.addEventListener('click', () => post({ type: 'reveal', key: t.label }));
   return el('p', { className: 'anchor' }, show);
+}
+
+/**
+ * The credential a copied thread link may carry, if any.
+ *
+ * A copied link must never grant more than the reader already has and never
+ * disclose a capability the reader was given privately:
+ *   - a read link's own token IS a read credential, so keeping it is safe;
+ *   - an edit link legitimately receives the artifact's reusable READ token
+ *     (that is what its Share menu already offers), so its copy may use that
+ *     token — never the write token itself;
+ *   - a cookie-only owner may use the read token only while management access
+ *     is currently confirmed, never one cached under a lost identity;
+ *   - a comment link, or a named editor with no read token, gets the
+ *     named-access URL, which asks for sign-in.
+ */
+function threadShareCredential() {
+  if (!info) return '';
+  const read = typeof info.readToken === 'string' && /^[0-9a-f]{64}$/.test(info.readToken) ? info.readToken : '';
+  // A read link's own token, or the read token an edit link legitimately holds.
+  if (info.role === 'read' && /^[0-9a-f]{64}$/.test(link?.token ?? '')) return link.token;
+  if (info.role === 'write' && link?.token && /^[0-9a-f]{64}$/.test(link.token) && read) return read;
+  // A cookie-only owner: only a currently confirmed manager may share it.
+  return read && info.canManage === true ? read : '';
+}
+
+/**
+ * Copy a permission-safe link to this thread: the same thread and version,
+ * with at most the lowest-privilege credential the reader legitimately holds.
+ * Never an edit or comment capability, and never a URL carrying one is
+ * printed into the panel as a fallback.
+ */
+async function copyThreadLink(t, status) {
+  const scope = writeScope();
+  // A capability stands on its own. A cookie-only manager must prove both
+  // the current account and current artifact rights before exporting a token.
+  const independentCapability = !!link?.token && (info?.role === 'read' || info?.role === 'write');
+  if (!independentCapability && info?.canManage) {
+    const { id, seq } = await sessionRequest({ fresh: true });
+    if (seq !== sessionSeq || id === null) { notice('Could not confirm your account. No link was copied.'); return; }
+    acceptSessionAccount(id);
+    if (!id || !scopeCurrent(scope)) { notice('Your account changed. Review access and copy again.'); return; }
+    try {
+      const next = await art.info();
+      if (!scopeCurrent(scope)) return;
+      info = next;
+      if (shown) { renderChrome(); renderThreads(); }
+    } catch (error) {
+      if (!scopeCurrent(scope)) return;
+      if (info) { info.canManage = false; delete info.readToken; delete info.commentToken; }
+      if (error.status === 403 || error.status === 404) {
+        identityEpoch++;
+        threadRequest++;
+        commentOperation++;
+        commentBusy = false;
+        guestUI.resetViewer();
+        clearCookieContent();
+        info = null;
+        fail('This artifact does not exist, has expired, or the link is wrong.', 404);
+      }
+      notice('Could not confirm artifact access. No link was copied.');
+      return;
+    }
+  }
+  if (!scopeCurrent(scope)) return;
+  const token = threadShareCredential();
+  const url = threadLink({ origin: location.origin, pathname: location.pathname, token, version: link.at || '', thread: t.uuid });
+  // The row's status is rebuilt on every poll, so the result of a copy also
+  // goes to the toast, where the reader can still see it a moment later.
+  try {
+    await navigator.clipboard.writeText(url);
+    if (!scopeCurrent(scope)) return;
+    status.textContent = token
+      ? 'Thread link copied. It carries read access only.'
+      : 'Thread link copied. People with access can open it after signing in; no edit or comment credential is included.';
+    notice(status.textContent);
+    return;
+  } catch { /* no clipboard permission: offer a safe fallback below */ }
+  if (!scopeCurrent(scope)) return;
+  if (token) {
+    // The URL holds a read credential; do not print it into the panel. The
+    // Share menu already shows it for copying.
+    status.textContent = 'Could not copy. Open Share, copy the read link, then add this thread reference to it.';
+    notice(status.textContent);
+    return;
+  }
+  // No credential: the named-access URL is safe to show and select.
+  const input = el('input', { readOnly: true, value: url, className: 'thread-link-value' });
+  input.setAttribute('aria-label', 'Thread link');
+  status.replaceChildren('Copy failed. Select this link: ', input);
+  input.select();
+}
+
+/** Whether the reader may correct a message: the server proved it is theirs. */
+function messageEditable(m) {
+  return editable(m) && !!art.editComment && typeof art.editComment === 'function';
+}
+
+/** A message's visible text with its correction history and, when allowed, an Edit control. */
+function messageBody(t, m, index, can) {
+  const item = el('div', {});
+  const editorKey = `${t.uuid}:${m.change}`;
+  const who = el('div', { className: 'who' }, `${m.user} · ${ago(m.time)}${m.status ? ` · marked ${m.status}` : ''}`);
+  item.append(who);
+  const status = el('span', { className: 'hint' });
+  status.setAttribute('role', 'status');
+  item.append(el('p', { className: 'message', textContent: m.text }));
+  // Corrections: the server sends the canonical text and every earlier
+  // revision. The prior words stay visible in history; nothing is rewritten
+  // silently, and no Edit control appears without server proof of authorship.
+  if (m.edited) item.append(el('span', { className: 'edited-tag', textContent: 'Edited' }));
+  if (m.history.length > 1) {
+    const details = el('details', { className: 'message-history' });
+    details.append(el('summary', { textContent: `Previous ${m.history.length - 1 === 1 ? 'version' : `${m.history.length - 1} versions`}` }));
+    // The last entry is the canonical text already shown; earlier ones are history.
+    for (const revision of m.history.slice(0, -1)) details.append(el('p', { className: 'message', textContent: revision.text }));
+    item.append(details);
+  }
+  if (messageEditable(m) && can.commentBox) {
+    const edit = el('button', { type: 'button', className: 'edit-message', textContent: 'Edit' });
+    edit.setAttribute('aria-label', 'Edit your message');
+    edit.dataset.change = m.change;
+    // Reopen an editor this reader already had open, with its words intact.
+    const previous = editors.get(editorKey);
+    if (previous) {
+      item.append(previous.item);
+      edit.hidden = true;
+    }
+    edit.addEventListener('click', () => {
+      if (commentBusy) return;
+      const draft = el('textarea', { rows: 3, maxLength: 8000, value: m.text });
+      draft.setAttribute('aria-label', 'Correct your message');
+      const save = el('button', { type: 'submit', className: 'primary', textContent: 'Save correction' });
+      const cancel = el('button', { type: 'button', textContent: 'Cancel' });
+      const note = el('p', { className: 'hint', textContent: 'Only your message changes. The earlier text stays in history.' });
+      const editor = el('form', { className: 'message-editor' }, draft, note, el('div', { className: 'comment-actions' }, status, cancel, save));
+      const binding = draftBinding('edit', editorKey);
+      draft.addEventListener('input', () => {
+        if (draft.value.trim() === m.text.trim()) clearDraft(binding);
+        else saveDraft(binding, composerDraft({ text: draft.value }));
+      });
+      const finish = () => { clearDraft(binding); editors.delete(editorKey); editor.remove(); edit.hidden = false; };
+      cancel.addEventListener('click', finish);
+      edit.hidden = true;
+      editors.set(editorKey, { item: editor, draft, save, status });
+      item.append(editor);
+      draft.focus();
+      const submit = async () => {
+        if (commentBusy) return;
+        const next = draft.value.trim();
+        if (!next) { status.textContent = 'Keep some message text.'; draft.focus(); return; }
+        const scope = writeScope();
+        const operation = ++commentOperation;
+        commentBusy = save.disabled = draft.readOnly = true;
+        status.textContent = 'Saving correction…';
+        try {
+          await art.editComment(t.uuid, m.change, next, { identity: scope.identity, expectedIdentity: expectedPrincipal(scope) });
+          // A correction that raced an identity change must not be shown as
+          // this reader's, and its editor must not close on them.
+          if (!scopeCurrent(scope)) return;
+          status.textContent = '';
+          finish();
+          await loadThreads();
+        } catch (err) {
+          if (!scopeCurrent(scope)) return;
+          await refreshChangedIdentity(err);
+          if (!scopeCurrent(scope)) return;
+          // A refused correction keeps the reader's words and the editor open.
+          status.textContent = retryMessage('Could not save', err, status, save);
+        } finally {
+          // An old identity must not release a newer writer's shared lock.
+          if (operation === commentOperation) {
+            commentBusy = false;
+            draft.readOnly = false;
+            if (!waits.has(status)) save.disabled = false;
+          }
+        }
+      };
+      // The form's own submit (Enter or the button) does the patch; the button
+      // is a real submit button, so a click never falls through to nothing.
+      editor.addEventListener('submit', event => { event.preventDefault(); submit(); });
+    });
+    item.append(edit);
+  }
+  item.append(status);
+  item.dataset.change = m.change;
+  return item;
+}
+
+/** Follow a thread for in-app unread state. No email is sent; verification is separate. */
+async function toggleFollow(t, button) {
+  if (!art.discussionView) { button.disabled = true; button.textContent = 'Follow unavailable'; return; }
+  const scope = writeScope();
+  button.disabled = true;
+  try {
+    let expectedIdentity = expectedPrincipal(scope);
+    if (scope.identity === 'guest') {
+      const own = await art.guest();
+      if (!scopeCurrent(scope)) return;
+      // Following is an explicit private-review action, not a public post or
+      // a profile edit. Create an anonymous browser identity only if missing.
+      const profile = own.guest || (await art.identifyGuest({ name: '', email: '' })).guest;
+      if (!scopeCurrent(scope)) return;
+      expectedIdentity ||= profile?.id ? `guest:${profile.id}` : undefined;
+    }
+    scope.expectedIdentity = expectedIdentity;
+    const following = !t.following;
+    const result = await art.discussionView(t.uuid, undefined, following, { identity: scope.identity, expectedIdentity });
+    if (!scopeCurrent(scope, { allowGuestNaming: true })) return;
+    t.following = result?.following ?? following;
+    button.textContent = t.following ? 'Following' : 'Follow thread';
+    button.setAttribute('aria-pressed', String(t.following));
+    await loadThreads();
+  } catch (error) {
+    if (!scopeCurrent(scope)) return;
+    await refreshChangedIdentity(error);
+    if (scopeCurrent(scope)) button.textContent = 'Could not update follow';
+  } finally {
+    if (scopeCurrent(scope, { allowGuestNaming: true })) button.disabled = false;
+  }
 }
 
 function threadView(t, can) {
@@ -609,6 +1156,7 @@ function threadView(t, can) {
       e.preventDefault();
       const current = threads.find(item => item.uuid === t.uuid);
       if (!current) return;
+      discussionNavigation++;
       activateThread(current);
       if (anchored(current) === 'yes') post({ type: 'reveal', key: current.label });
     });
@@ -631,14 +1179,17 @@ function threadView(t, can) {
   if (can.commentBox && !reply) { reply = replyForm(t); body.append(reply); }
   // Keep the form itself: drafts, selection, focus, and pending/error state belong to it.
   for (const child of [...body.children]) if (child !== reply) child.remove();
+  const threadStatus = el('span', { className: 'hint thread-status' });
+  threadStatus.setAttribute('role', 'status');
+  const copy = el('button', { type: 'button', className: 'thread-link', textContent: 'Copy thread link' });
+  copy.addEventListener('click', () => copyThreadLink(t, threadStatus));
+  const follow = el('button', { type: 'button', className: 'thread-follow', textContent: t.following ? 'Following' : 'Follow thread' });
+  follow.setAttribute('aria-pressed', String(t.following));
+  follow.title = 'Keep this thread in your private Following view. In-app only; no email is sent.';
+  follow.addEventListener('click', () => toggleFollow(t, follow));
   const content = [anchorLine(t),
-    ...t.messages.filter((m, i) => i === 0 || m.text || m.status).map(m => {
-      const item = el('div', {},
-        el('div', { className: 'who', textContent: `${m.user} · ${ago(m.time)}${m.status ? ` · marked ${m.status}` : ''}` }),
-        m.text ? el('p', { className: 'message', textContent: m.text }) : null);
-      item.dataset.change = m.change;
-      return item;
-    }),
+    ...t.messages.filter((m, i) => i === 0 || m.text || m.status).map((m, i) => messageBody(t, m, i, can)),
+    el('div', { className: 'thread-actions' }, copy, follow, threadStatus),
     t.checkins.length ? el('p', { className: 'checkins' }, 'Answered in ',
       ...t.checkins.flatMap((c, i) => [i ? ', ' : null, el('a', { href: fragment({ token: link.token, at: c }), textContent: shortId(c) })])) : null,
     attachmentList(t, can)];
@@ -659,7 +1210,14 @@ function threadView(t, can) {
 function replyForm(t) {
   const text = el('textarea', { rows: 2, maxLength: 8000, value: drafts.get(t.uuid) ?? '' });
   text.setAttribute('aria-label', `Reply to ${t.title}`);
-  text.addEventListener('input', () => drafts.set(t.uuid, text.value));
+  // Every keystroke is recoverable: the in-memory map for this page, and the
+  // same-tab store so a reload reopens the words. Both are scoped to the
+  // artifact, version, thread and the identity the server named.
+  const persist = () => {
+    drafts.set(t.uuid, text.value);
+    saveDraft(draftBinding('reply', t.uuid), composerDraft({ text: text.value }));
+  };
+  text.addEventListener('input', persist);
   const status = el('span', { className: 'hint' });
   status.setAttribute('role', 'status');
   const resolve = el('button', { type: 'button', className: 'resolve', textContent: t.resolved ? 'Reopen' : 'Resolve' });
@@ -672,6 +1230,7 @@ function replyForm(t) {
     const chosen = [...files.files];
     files.value = '';
     if (!chosen.length || commentBusy) return;
+    const operation = ++commentOperation;
     commentBusy = attach.disabled = true;
     status.textContent = 'Attaching…';
     try {
@@ -681,27 +1240,49 @@ function replyForm(t) {
     } catch (err) {
       status.textContent = `Could not attach: ${err.message}`;
     } finally {
-      commentBusy = attach.disabled = false;
+      if (operation === commentOperation) commentBusy = attach.disabled = false;
     }
   });
   const form = el('form', { className: 'reply' }, text, files, el('div', { className: 'comment-actions' }, status, attach, resolve, send));
   const change = async (body, doing) => {
     if (commentBusy) return;
+    const operation = ++commentOperation;
     commentBusy = resolve.disabled = send.disabled = text.readOnly = true;
     showPosting(status, doing, !!body.text);
+    // The words stay in the composer and the store until the server confirms
+    // them; no failure path clears either.
+    const pending = body.text ? draftBinding('reply', t.uuid) : null;
+    const scope = writeScope();
     try {
-      if (body.text) await guestUI.ensureProfile();
-      await art.comment({ ticketUuid: t.uuid, ...body });
-      if (body.text) { drafts.delete(t.uuid); text.value = ''; }
+      if (!await principalReady(scope, operation, status)) return;
+      await guestUI.ensureProfile();
+      // A reply or resolve belongs to the reader who wrote it: after an
+      // identity change this continuation must not write under the new one.
+      if (!scopeCurrent(scope)) return;
+      scope.expectedIdentity ||= expectedPrincipal(scope);
+      await art.comment({ ticketUuid: t.uuid, ...body, identity: scope.identity }, { expectedIdentity: scope.expectedIdentity });
+      if (!scopeCurrent(scope)) { if (pending) saveDraft(pending, null); return; }
+      if (body.text) { drafts.delete(t.uuid); saveDraft(pending, null); text.value = ''; offerAnyDraft(); }
       if (body.status) expanded.delete(t.uuid);
       status.textContent = '';
       await loadThreads();
+      if (!scopeCurrent(scope, { allowGuestNaming: true })) return;
       // The thread moved (newest-changed first, resolved last): keep it in sight.
       views.get(t.uuid)?.scrollIntoView({ block: 'nearest' });
     } catch (err) {
-      status.textContent = `Could not save: ${err.message}`;
+      if (!scopeCurrent(scope)) return;
+      await refreshChangedIdentity(err);
+      if (!scopeCurrent(scope)) return;
+      status.textContent = retryMessage('Could not save', err, status, send);
+      if (pending && text.value.trim()) saveDraft(pending, composerDraft({ text: text.value }));
+      // A refused reply keeps its words and offers them back after a reload.
+      if (pending && text.value.trim()) offerDraft(pending, composerDraft({ text: text.value }));
     } finally {
-      commentBusy = resolve.disabled = send.disabled = text.readOnly = false;
+      // A rate-limited Send stays disabled until its own countdown ends.
+      if (operation === commentOperation) {
+        commentBusy = resolve.disabled = text.readOnly = false;
+        if (!waits.has(status)) send.disabled = false;
+      }
     }
   };
   form.addEventListener('submit', e => {
@@ -720,7 +1301,28 @@ function renderThreads() {
   const can = controls(info);
   renderResponder();
   const { open, resolved, pins: next } = arrange(threads);
+  // Filters, ordering and pagination are the server's answer. Only a server
+  // that took no query (an older deployment) needs this local approximation,
+  // and then only for the two flags a thread carries in its own shape.
+  const local = !serverDiscussion;
+  const ordered = local ? {
+    open: filterThreads(open, threadQuery.filter),
+    resolved: filterThreads(resolved, threadQuery.filter),
+  } : { open, resolved };
+  // "Page order" is the page's real reading order over what is loaded: pins
+  // the page actually placed, top to bottom, with unplaced and general
+  // discussions last. The label says so rather than implying a global sort.
+  if (pageOrderLocal) {
+    ordered.open = sortThreads(ordered.open, 'page', placedOrder);
+    ordered.resolved = sortThreads(ordered.resolved, 'page', placedOrder);
+  }
   $('commentCount').textContent = threads.length ? `${threads.length}${threadsTruncated ? '+' : ''}` : '';
+  $('threadCount').textContent = [
+    `${threads.length} shown`,
+    threadsTruncated ? 'more available' : '',
+    pageOrderLocal ? 'page order · loaded discussions' : '',
+  ].filter(Boolean).join(' · ');
+  $('loadOlder').hidden = !threadsNextCursor;
   $('commentsNote').textContent = [
     threadsTruncated ? `Showing the newest ${threads.length}` : '',
     can.commentBox ? '' : 'Read only',
@@ -732,7 +1334,7 @@ function renderThreads() {
   }
   const scroll = panelScroller()?.scrollTop ?? 0;
   const inputScroll = active?.scrollTop;
-  for (const [id, items] of [['threadList', open], ['resolvedList', resolved]]) {
+  for (const [id, items] of [['threadList', ordered.open], ['resolvedList', ordered.resolved]]) {
     const list = $(id), nodes = items.map(t => threadView(t, can));
     nodes.forEach((node, i) => { if (list.children[i] !== node) list.insertBefore(node, list.children[i] ?? null); });
     const keep = new Set(nodes);
@@ -845,6 +1447,10 @@ addEventListener('message', e => {
   if (!info || !frameReady || e.source !== $('frame').contentWindow || !d || d.__artifactPins !== 1) return;
   if (d.type === 'placed' && Array.isArray(d.keys)) {
     placed = new Set(d.keys.filter(Number.isInteger).slice(0, 500));
+    // The page's own reading order, so "Page order" follows where the pins
+    // actually are rather than the order the list happened to be built in.
+    placedOrder = Array.isArray(d.orderedKeys) ? d.orderedKeys.filter(Number.isInteger).slice(0, 500) : [];
+    if (threadQuery.sort === 'page' || pageOrderLocal) renderThreads();
     for (const view of document.querySelectorAll('#threadPanel .thread')) {
       const t = threads.find(x => String(x.label) === view.dataset.label);
       if (!t) continue;
@@ -854,15 +1460,19 @@ addEventListener('message', e => {
   } else if (d.type === 'open' && Number.isInteger(d.key)) {
     const t = threads.find(x => x.label === d.key);
     if (!t || isTyping() || commentBusy) return;
+    discussionNavigation++;
     // A pin opens its thread where the reader clicked it, as an anchored card,
     // and placement stays armed: the next blank-page click starts a new one.
     activateThread(t, pagePoint(d) ?? { x: $('frame').clientWidth / 2, y: 40 }, { keepPlacement: true, card: true });
   } else if (d.type === 'selection' && typeof d.anchor === 'string' && controls(info).commentBox) {
     selection = Array.from(d.anchor).slice(0, 500).join('');
+    selectionContext = boundedContext(d.context);
     renderAnchor();
   } else if (d.type === 'point' && placing && controls(info).commentBox && pagePoint(d)
     && decodePointAnchor(d.anchor)) {
+    discussionNavigation++;
     draftAnchor = d.anchor;
+    bubbleContext = boundedContext(d.context);
     selection = '';
     // Placement is a mode, not one shot: taking a point opens the bubble and
     // leaves the toggle on, so another click moves the bubble without re-arming.
@@ -886,23 +1496,132 @@ addEventListener('message', e => {
   }
 });
 
-async function loadThreads(background = false) {
+async function loadThreads(background = false, { append = false, cursor = '' } = {}) {
   if (!controls(info).threads || (background && (commentBusy || threadsLoading))) return;
   const request = ++threadRequest;
-  threadsLoading++;
+  threadsLoading = request; // request ownership, never a counter reset by another identity
+  if (!background) $('threadListStatus').textContent = append ? 'Loading older discussions…' : '';
   try {
-    const result = await art.tickets();
+    const result = await ticketQuery({ append, cursor });
     if (request !== threadRequest || (background && commentBusy)) return;
+    serverDiscussion = result.discussion === true || (!legacyServer && !!result.viewer && typeof result.viewer === 'object')
+      || Array.isArray(result.tickets) && result.tickets.some(t => typeof t.ref === 'number');
+    guestUI.setViewer(result.viewer ?? null);
+    if (request !== threadRequest) return;
+    adoptAnonymousDrafts();
+    // A draft written before the server named this reader now belongs to the
+    // real identity: offer it again under the binding it was moved to.
+    if (!append && !recoverable && $('threadPanel').dataset.mode === 'index') offerAnyDraft();
     const snapshot = JSON.stringify(result);
     if (snapshot === threadSnapshot) return;
-    threads = result.tickets.map(thread);
-    threadsTruncated = result.truncated;
-    responderStatus = result.responder ?? { threads: {} };
     threadSnapshot = snapshot;
+    const next = result.tickets.map(thread);
+    const opened = threads.find(t => t.uuid === focused);
+    // Reading a thread removes it from Unread, but must not remove the card
+    // the reader is using. The filtered index is restored when they go back.
+    if (!append && opened && inspectorMode === 'comments' && $('threadPanel').dataset.mode === 'thread'
+      && scopeCurrent(focusedScope, { allowGuestNaming: true }) && !next.some(t => t.uuid === opened.uuid)) next.push(opened);
+    threads = append ? [...threads, ...next.filter(t => !threads.some(old => old.uuid === t.uuid))] : next;
+    threadsTruncated = result.truncated === true;
+    threadsNextCursor = typeof result.nextCursor === 'string' ? result.nextCursor : '';
+    responderStatus = result.responder ?? { threads: {} };
+    // A request the reader made clears a stale-list notice; a deep link's own
+    // message stays until they search, filter or retry.
+    if (!noticeSticky) paintThreadNotice('');
     renderThreads();
-  } catch { /* offline or gone: keep what is shown */ }
-  finally { threadsLoading--; }
+    $('threadListStatus').textContent = threads.length ? '' : 'No discussions match this view.';
+  } catch (err) {
+    if (request !== threadRequest) return;
+    // An oversized single discussion is refused as a whole rather than shown
+    // partially. Nothing is skipped automatically: the reader is told, and a
+    // resume cursor (when the server sent one) is the only way past it, on an
+    // explicit click.
+    if (err?.code === 'discussion_too_large') {
+      // Nothing was skipped or truncated: the server refused to materialize
+      // one oversized history. The reader may step past exactly that
+      // discussion, by an explicit click, using the cursor the server bound
+      // to this query and identity. Without one, the server has no page to
+      // continue to and the message stays honest about that.
+      const resume = typeof err.resumeCursor === 'string' && err.resumeCursor ? err.resumeCursor : '';
+      const named = Number.isSafeInteger(err.ref) && err.ref > 0 ? `Discussion ${err.ref}` : 'One discussion';
+      paintThreadNotice(`${named} is too large to open safely here. Nothing was omitted from the other discussions.`,
+        { sticky: true, action: resume ? 'Continue past it' : '', actionKey: resume });
+      $('threadListStatus').textContent = '';
+      return;
+    }
+    paintThreadNotice(`Could not load discussions. ${err.message}`);
+    $('threadListStatus').textContent = 'The list may be out of date.';
+  } finally {
+    if (threadsLoading === request) { threadsLoading = 0; $('loadOlder').disabled = false; }
+  }
 }
+
+/** A bounded, retryable message above the list: a failed load is never silence. */
+function paintThreadNotice(message, { sticky = false, action = '', actionKey = '' } = {}) {
+  threadNotice = message;
+  noticeSticky = !!message && sticky;
+  const box = $('threadNotice');
+  if (!box) return;
+  box.hidden = !message;
+  $('threadNoticeText').textContent = message;
+  // The button either retries the same request or takes one explicit step the
+  // server offered (past an oversized discussion). It is never automatic.
+  $('threadNoticeRetry').hidden = !message;
+  $('threadNoticeRetry').textContent = action || 'Retry';
+  $('threadNoticeRetry').dataset.resume = actionKey;
+}
+$('threadNoticeRetry').addEventListener('click', () => {
+  if (threadsLoading) return;
+  const resume = $('threadNoticeRetry').dataset.resume || '';
+  paintThreadNotice('');
+  // A resume cursor is the server's own continuation, used once, on this click.
+  if (resume) loadThreads(false, { cursor: resume });
+  else loadThreads(false);
+});
+$('loadOlder').addEventListener('click', async () => {
+  if (threadsLoading || !threadsNextCursor) return;
+  $('loadOlder').disabled = true;
+  await loadThreads(false, { append: true });
+});
+
+// The panel's own controls: a search, the filters, and the sort order. Each
+// is sent to the server, so "mine", "unread" and older pages are the server's
+// answer, never a client-side guess over a truncated list.
+let searchTimer = 0;
+$('threadSearch').addEventListener('input', () => {
+  clearTimeout(searchTimer);
+  const value = $('threadSearch').value;
+  searchTimer = setTimeout(() => {
+    threadQuery = { ...threadQuery, q: value.trim().slice(0, 120) };
+    paintThreadNotice('');
+    loadThreads(false);
+  }, 220);
+});
+for (const button of $('threadFilters').querySelectorAll('[data-filter]')) {
+  button.addEventListener('click', () => {
+    const filter = button.dataset.filter;
+    if (filter === threadQuery.filter) return;
+    threadQuery = { ...threadQuery, filter };
+    for (const other of $('threadFilters').querySelectorAll('[data-filter]')) other.setAttribute('aria-pressed', String(other === button));
+    threadsNextCursor = '';
+    paintThreadNotice('');
+    loadThreads(false);
+  });
+}
+$('threadSort').addEventListener('change', () => {
+  // Page order is a local sort over the loaded cohort: the server cannot know
+  // where a pin actually landed in this rendering. The request keeps
+  // `activity`, so paging stays coherent; the list is re-sorted here by the
+  // page's own top-to-bottom placement, unplaced threads last.
+  pageOrderLocal = $('threadSort').value === 'page';
+  threadQuery = { ...threadQuery, sort: 'activity' };
+  threadsNextCursor = '';
+  paintThreadNotice('');
+  // Reorder what is already loaded at once; the fetch then continues the
+  // same cohort, so the reader is not left on the old order while it runs.
+  if (info) renderThreads();
+  loadThreads(false);
+});
 
 function refreshThreads() {
   if (document.visibilityState === 'visible' && art && info && !$('threadPanel').hidden) loadThreads(true);
@@ -948,10 +1667,239 @@ try {
 // elsewhere; its account UI is revalidated before it is trusted again.
 addEventListener('pageshow', e => { if (e.persisted) revalidateAccount(); });
 
-/** A comment on its way: "Sending…" with dots when a responder will get it, else `doing`. */
+/** The one draft recoverable right now, if any: explicit Restore or Discard, never auto-filled. */
+let recoverable = null; // { binding, draft }
+
+/**
+ * Every draft this tab holds for the current artifact, version and identity.
+ * Keys are read from the same-tab store directly because the store is keyed
+ * by binding and a reply's thread may not be in the loaded list yet.
+ */
+function draftIsOpen(binding, draft) {
+  if (binding.kind === 'new') {
+    if (binding.thread === 'point') return bubbleVisible() && $('bubbleText').value === draft.text;
+    return !$('inspector').hidden && !$('commentForm').hidden && $('commentText').value === draft.text;
+  }
+  if ($('inspector').hidden || $('threadPanel').hidden) return false;
+  if (binding.kind === 'reply') {
+    const view = views.get(binding.thread);
+    return !!view?.open && !!view.querySelector('.reply textarea')?.getClientRects().length && drafts.get(binding.thread) === draft.text;
+  }
+  const editor = editors.get(binding.thread)?.draft;
+  return !!editor?.getClientRects().length && editor.value === draft.text;
+}
+function storedDrafts() {
+  const identity = guestUI.identityKey() || anonIdentity;
+  // The store owns its key format and expiry rules; the viewer only ranks.
+  const out = draftStore.list({ artifact: art?.id ?? '', version: shown?.checkin ?? '', identity }).filter(entry => !draftIsOpen(entry.binding, entry.draft));
+  // A new comment first, then replies, then corrections.
+  const rank = b => b.kind === 'new' ? 0 : b.kind === 'reply' ? 1 : 2;
+  return out.sort((a, b) => rank(a.binding) - rank(b.binding));
+}
+
+/**
+ * Find a draft worth offering after a reload or a panel open: the new-comment
+ * composer, or a reply to any thread (even one outside the loaded page). Only
+ * one banner is shown at a time; restoring or discarding it reveals the next.
+ */
+function offerAnyDraft() {
+  if (recoverable) return;
+  const [first] = storedDrafts();
+  if (first) offerDraft(first.binding, first.draft);
+  else renderRecovery();
+}
+
+/**
+ * Offer a stored draft for the current binding. Called when the panel opens,
+ * after the server named an identity, and after a post failure. A draft is
+ * never applied on its own: it stays in the banner until the reader chooses.
+ */
+function offerDraft(binding, draft = null) {
+  const found = binding ? draft ?? draftStore.load(binding) : null;
+  recoverable = found ? { binding, draft: found } : null;
+  renderRecovery();
+}
+
+function renderRecovery() {
+  const box = $('threadRecovery');
+  if (!box) return;
+  box.hidden = !recoverable;
+  if (!recoverable) return;
+  const where = recoverable.binding.kind === 'reply' ? 'a reply'
+    : recoverable.binding.kind === 'edit' ? 'your correction'
+    : recoverable.binding.thread === 'point' ? 'a new comment (point)' : 'a new comment (general)';
+  box.querySelector('p').textContent = draftsPersist
+    ? `Draft for ${where}, from this tab. It has not been posted.`
+    : `Draft for ${where}, kept only while this page stays open: this browser blocks tab storage, so a reload will not bring it back.`;
+}
+
+function clearDraft(binding) {
+  if (!binding) return;
+  draftStore.remove(binding);
+  if (recoverable && sameDraftBinding(recoverable.binding, binding)) {
+    recoverable = null;
+    renderRecovery();
+  }
+}
+
+$('discardDraft').addEventListener('click', () => {
+  if (!recoverable) return;
+  clearDraft(recoverable.binding);
+  offerAnyDraft();
+});
+
+$('restoreDraft').addEventListener('click', async () => {
+  if (!recoverable) return;
+  discussionNavigation++;
+  const { binding, draft } = recoverable;
+  const scope = writeScope();
+  if (binding.artifact !== art?.id || binding.version !== shown?.checkin || binding.identity !== (scope.key || anonIdentity)) {
+    recoverable = null;
+    renderRecovery();
+    return;
+  }
+  recoverable = null;
+  renderRecovery();
+  const editing = binding.kind === 'edit';
+  const editTarget = editing ? /^([a-f0-9]{40}|[a-f0-9]{64}):([a-f0-9]{40}|[a-f0-9]{64})$/.exec(binding.thread) : null;
+  if (editing && !editTarget) { paintThreadNotice('The correction target is unavailable. This draft was not posted.', { sticky: true }); return; }
+  if (binding.kind === 'reply' || editing) {
+    // Open the thread the reply belongs to — by exact lookup when it is not
+    // in the loaded page — and put the words in its reply form, unposted.
+    const ticket = editing ? editTarget[1] : binding.thread;
+    let t = threads.find(item => item.uuid === ticket) ?? null;
+    if (!t && art.tickets) {
+      try {
+        const exact = await art.tickets({ thread: ticket, identity: scope.identity });
+        if (!scopeCurrent(scope)) return;
+        t = (exact?.tickets ?? []).map(thread)[0] ?? null;
+        if (t && !threads.some(old => old.uuid === t.uuid)) { threads = [...threads, t]; renderThreads(); }
+      } catch { if (!scopeCurrent(scope)) return; }
+    }
+    if (!scopeCurrent(scope)) return;
+    if (!t) { paintThreadNotice('That discussion is no longer available, so its draft cannot be reopened.', { sticky: true }); return; }
+    if (editing && !t.messages.some(message => message.change === editTarget[2] && messageEditable(message))) {
+      paintThreadNotice('This identity cannot correct that message. The draft has not been posted.', { sticky: true });
+      return;
+    }
+    if (!editing) drafts.set(t.uuid, draft.text);
+    expanded.set(t.uuid, true);
+    activateThread(t);
+    // Restoring words is state, not animation. Do it in this task: browsers
+    // may suspend animation frames even while a visible document is inspected.
+    if (!scopeCurrent(scope)) return;
+    if (editing) {
+      views.get(t.uuid)?.querySelector(`.edit-message[data-change="${editTarget[2]}"]`)?.click();
+      const editor = editors.get(`${t.uuid}:${editTarget[2]}`);
+      if (editor) { editor.draft.value = draft.text; editor.draft.dispatchEvent(new Event('input')); editor.draft.focus(); }
+    } else {
+      const form = views.get(t.uuid)?.querySelector('.reply textarea');
+      if (form) { form.value = draft.text; form.dispatchEvent(new Event('input')); form.focus(); }
+    }
+    offerAnyDraft();
+    return;
+  }
+  // Point and general drafts are independent even when their text is equal.
+  if (binding.thread === 'point') {
+    if ($('bubbleText').value.trim() && $('bubbleText').value !== draft.text && !confirm('Replace the current unsent point comment with this draft?')) { recoverable = { binding, draft }; renderRecovery(); return; }
+    if (!scopeCurrent(scope)) return;
+    draftAnchor = draft.anchor || '';
+    bubbleContext = draft.context ? { ...draft.context } : null;
+    $('bubbleText').value = draft.text;
+    openBubble({ x: $('frame').clientWidth / 2, y: 40 });
+    savePointDraft();
+    offerAnyDraft();
+    return;
+  }
+  if ($('commentText').value.trim() && $('commentText').value !== draft.text && !confirm('Replace the current unsent general comment with this draft?')) { recoverable = { binding, draft }; renderRecovery(); return; }
+  if (!scopeCurrent(scope)) return;
+  draftAnchor = typeof draft.anchor === 'string' ? draft.anchor : '';
+  panelDraftContext = draft.context ? { ...draft.context } : null;
+  $('commentText').value = draft.text;
+  closePopovers('inspector');
+  if (draftAnchor) openInspector('comments', 'draft', { x: $('frame').clientWidth / 2, y: 40 });
+  else openInspector('comments', 'draft');
+  trackAnchor(draftAnchor);
+  if (binding.thread !== 'general') clearDraft(binding);
+  saveComposerDraft();
+  $('commentText').focus();
+  offerAnyDraft();
+});
+
+/** Move a draft typed before the server named this reader onto the real identity. */
+function adoptAnonymousDrafts() {
+  carryDraftsTo(guestUI.identityKey());
+}
+function saveComposerDraft() {
+  const binding = draftBinding('new', 'general');
+  if (!binding) return;
+  const text = $('commentText').value;
+  const anchor = draftAnchor || selection;
+  saveDraft(binding, composerDraft({ text, anchor, context: anchor ? (draftAnchor ? panelDraftContext : selectionContext) : null }));
+}
+function pointDraftBinding() {
+  const binding = draftBinding('new', 'point');
+  return binding ? { ...binding, version: bubbleVersion || binding.version } : null;
+}
+function savePointDraft() {
+  saveDraft(pointDraftBinding(), composerDraft({ text: $('bubbleText').value, anchor: bubbleAnchor, context: bubbleContext }));
+}
 function showPosting(status, doing, comment) {
   if (comment && info?.attached?.responder) status.replaceChildren(dots(), ' Sending…');
   else status.textContent = doing;
+}
+
+/**
+ * How long a failed request says to wait, in seconds, or 0. `retryAfter` is
+ * the server's own number when the client passes it through; a 429 without
+ * one is still a rate limit, and the text says exactly that rather than
+ * inventing a delay or reposting.
+ */
+function retryWait(err) {
+  const seconds = Number(err?.retryAfter);
+  return Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
+}
+
+/**
+ * A failed request's message, with the server's own wait when it sent one.
+ * A rate limit is withheld, not retried: the reader sees the exact delay
+ * counting down and presses Post again when it is up. No timer reposts.
+ */
+const waits = new WeakMap(); // status node -> countdown
+function retryMessage(prefix, err, status = null, button = null) {
+  const wait = retryWait(err);
+  if (!wait) {
+    if (err?.status === 429) {
+      if (status) { status.textContent = `${prefix}: too many posts for now. Your text is safe; try again in a few minutes.`; return status.textContent; }
+      return `${prefix}: too many posts for now.`;
+    }
+    return `${prefix}: ${err?.message ?? 'the request failed'}`;
+  }
+  const until = Date.now() + wait * 1000;
+  const scope = writeScope();
+  if (status) {
+    clearInterval(waits.get(status));
+    if (button) button.disabled = true;
+    const paint = () => {
+      if (!scopeCurrent(scope, { allowGuestNaming: true }) || !status.isConnected) {
+        clearInterval(waits.get(status));
+        waits.delete(status);
+        return;
+      }
+      const left = until - Date.now();
+      if (left <= 0) {
+        clearInterval(waits.get(status));
+        waits.delete(status);
+        status.textContent = 'Retry is available. Your text is still here; nothing was posted automatically.';
+        if (button) button.disabled = false;
+        return;
+      }
+      status.textContent = `${prefix}: not posted. Your text is safe. Try again in ${clock(left)}.`;
+    };
+    paint();
+    waits.set(status, setInterval(paint, 1000));
+  }
+  return `${prefix}: not posted. Try again in ${clock(wait * 1000)}.`;
 }
 
 /** Dots that say "in progress"; still under prefers-reduced-motion (viewer.css). */
@@ -1170,10 +2118,20 @@ function openBubble(point) {
   bubblePoint = point;
   bubbleAnchor = draftAnchor;
   bubbleVersion = shown?.checkin ?? '';
+  const binding = pointDraftBinding(), saved = draftStore.load(binding);
+  if (saved?.text.trim() && !$('bubbleText').value.trim()) {
+    openInspector('comments');
+    offerDraft(binding, saved);
+    notice('Restore or discard the saved point draft before starting another.');
+    return;
+  }
   $('bubbleStatus').textContent = '';
+  // The compact line says whose words these will be, without a settings panel.
+  guestUI.render();
   closeInspector();
   $('commentBubble').hidden = false;
   renderAnchor();
+  if ($('bubbleText').value.trim()) savePointDraft();
   placeBubble();
   requestAnimationFrame(placeBubble);
   $('bubbleText').focus({ preventScroll: true });
@@ -1190,12 +2148,28 @@ function closeBubble(restore = false, { keepPlacing = false, keepAnchor = true }
   if (!bubbleVisible()) return;
   const text = $('bubbleText').value;
   const panelDraft = $('commentText').value;
-  // Transfer into an empty panel draft, but keep a second draft in its own
-  // textarea when both contain different words. The next placed bubble resumes it.
-  const separateDraft = !commentBusy && text.trim() && panelDraft.trim() && text !== panelDraft;
-  if (!commentBusy && text.trim() && !panelDraft.trim()) $('commentText').value = text;
-  if (!keepAnchor) { draftAnchor = ''; bubbleVersion = ''; }
-  if (!separateDraft) $('bubbleText').value = '';
+  const savedPanel = draftStore.load(draftBinding('new', 'general'));
+  const panelText = panelDraft.trim() ? panelDraft : (savedPanel?.text || '');
+  const panelAnchor = savedPanel && (!panelDraft.trim() || savedPanel.text === panelDraft) ? savedPanel.anchor : draftAnchor;
+  // A saved but not yet restored general draft is independent too.
+  const separateDraft = !commentBusy && text.trim() && panelText.trim() && (text !== panelText || panelAnchor !== bubbleAnchor);
+  if (!commentBusy && text.trim() && !panelDraft.trim() && !separateDraft) {
+    $('commentText').value = text;
+    panelDraftContext = keepAnchor ? bubbleContext : null;
+  }
+  // The words survive closing in both places: the panel composer (for another
+  // draft that is not in flight) and the same-tab store under this binding.
+  if (!commentBusy && text.trim()) {
+    if (separateDraft) savePointDraft();
+    else {
+      panelDraftContext = keepAnchor ? bubbleContext : null;
+      const binding = draftBinding('new', 'general');
+      if (binding) saveDraft({ ...binding, version: keepAnchor ? (bubbleVersion || binding.version) : binding.version }, composerDraft({ text, anchor: keepAnchor ? bubbleAnchor : '', context: keepAnchor ? bubbleContext : null }));
+      clearDraft(pointDraftBinding());
+    }
+  }
+  if (!keepAnchor) { draftAnchor = ''; bubbleVersion = ''; bubbleContext = null; }
+  if (!separateDraft && !commentBusy) $('bubbleText').value = '';
   $('bubbleStatus').textContent = '';
   bubblePoint = null;
   bubbleAnchor = '';
@@ -1245,12 +2219,18 @@ function openInspector(mode, threadMode = 'index', point = null, { keepPlacement
     $('commentForm').hidden = !controls(info).commentBox || threadMode !== 'draft';
     if (threadMode === 'index') {
       focused = '';
+      focusedScope = null;
+      threadSnapshot = ''; // discard a card retained outside the active filter
       for (const view of views.values()) view.classList.remove('focus');
       trackAnchor('');
     }
     // The card's geometry is chosen in the same task as the unhide, before any
     // paint, so a pin-opened thread never flashes the docked column.
     placeInspector();
+    // The identity line describes the reader even before the first load, and
+    // any draft saved for this binding waits in the banner for a decision.
+    guestUI.render();
+    if (threadMode === 'index') offerAnyDraft();
     loadThreads(true);
     if (!wasOpen && threadMode === 'index') $('threadClose').focus({ preventScroll: true });
   } else {
@@ -1277,16 +2257,33 @@ function closeInspector(restore = false) {
   if (back?.isConnected && typeof back.focus === 'function') back.focus({ preventScroll: true });
 }
 
+function markThreadRead(t) {
+  if (!t.unread || !t.lastChange || !art.discussionView) return;
+  const scope = writeScope();
+  art.discussionView(t.uuid, t.lastChange, undefined, { identity: scope.identity, expectedIdentity: expectedPrincipal(scope) }).then(() => {
+    if (!scopeCurrent(scope)) return;
+    t.unread = false;
+    threadSnapshot = '';
+    loadThreads(false);
+  }).catch(async error => {
+    if (!scopeCurrent(scope)) return;
+    await refreshChangedIdentity(error);
+    if (scopeCurrent(scope) && error?.code !== 'identity_changed') paintThreadNotice('Could not save your read position. Reopen the discussion to try again.');
+  });
+}
+
 function activateThread(t, point = null, { keepPlacement = false, card = false } = {}) {
   const view = views.get(t.uuid);
   if (!view) return;
   focused = t.uuid;
+  focusedScope = writeScope();
   expanded.set(t.uuid, true);
   for (const other of views.values()) other.classList.toggle('focus', other === view);
   view.open = true;
   openInspector('comments', 'thread', point, { keepPlacement, card });
   $('panelTitle').textContent = `Comment ${t.label}`;
   trackAnchor(t.anchor);
+  markThreadRead(t);
   const target = views.get(t.uuid);
   if (target && panelScroller()) panelScroller().scrollTop = 0;
   requestAnimationFrame(() => { placeInspector(); target?.scrollIntoView({ block: 'nearest' }); });
@@ -1296,6 +2293,7 @@ function activateThread(t, point = null, { keepPlacement = false, card = false }
 $('commentsBtn').addEventListener('click', e => {
   e.stopPropagation();
   if (commentBusy || !info || !controls(info).commentBox) return;
+  discussionNavigation++;
   if (placing) { setPlacement(false); return; }
   if (!markersVisible) setMarkerVisibility(true);
   closePopovers('inspector');
@@ -1306,6 +2304,7 @@ $('commentsBtn').addEventListener('click', e => {
 });
 $('discussionsBtn').addEventListener('click', e => {
   e.stopPropagation();
+  discussionNavigation++;
   if (inspectorMode === 'comments' && $('threadPanel').dataset.mode === 'index') closeInspector(true);
   else openInspector('comments');
 });
@@ -1316,7 +2315,7 @@ $('versionBtn').addEventListener('click', e => {
 });
 $('threadClose').addEventListener('click', () => closeInspector(true));
 $('historyClose').addEventListener('click', () => closeInspector(true));
-$('allComments').addEventListener('click', () => openInspector('comments'));
+$('allComments').addEventListener('click', () => { discussionNavigation++; openInspector('comments'); });
 $('inspector').addEventListener('click', e => e.stopPropagation());
 $('anchorClear').addEventListener('click', () => {
   if (commentBusy) return;
@@ -1327,18 +2326,48 @@ $('anchorClear').addEventListener('click', () => {
 });
 $('generalComment').addEventListener('click', () => {
   if (commentBusy || !controls(info).commentBox) return;
-  if (draftAnchor && $('commentText').value.trim()) {
-    $('placeComment').click();
+  discussionNavigation++;
+  const binding = draftBinding('new', 'general');
+  const saved = draftStore.load(binding);
+  if (saved?.text.trim() && !$('commentText').value.trim()) {
+    openInspector('comments');
+    offerDraft(binding, saved);
+    notice('Restore or discard the saved general draft before starting another.');
     return;
   }
-  draftAnchor = '';
+  if (saved?.text === $('commentText').value) {
+    draftAnchor = saved.anchor;
+    panelDraftContext = saved.context || null;
+  }
+  if (draftAnchor && $('commentText').value.trim()) {
+    openInspector('comments', 'draft', { x: $('frame').clientWidth / 2, y: 40 });
+    trackAnchor(draftAnchor);
+    $('commentText').focus();
+    return;
+  }
+  selection = draftAnchor = '';
+  panelDraftContext = null;
   openInspector('comments', 'draft');
+  saveComposerDraft();
   $('commentText').focus();
 });
 $('placeComment').addEventListener('click', () => {
   if (commentBusy || !controls(info).commentBox) return;
+  discussionNavigation++;
   if (!markersVisible) setMarkerVisibility(true);
-  if (draftAnchor) {
+  const point = draftStore.load(pointDraftBinding());
+  if (point && $('bubbleText').value === point.text) {
+    draftAnchor = point.anchor;
+    bubbleContext = point.context || null;
+    openBubble({ x: $('frame').clientWidth / 2, y: 40 });
+    trackAnchor(draftAnchor);
+    return;
+  }
+  if (point && !$('bubbleText').value.trim()) { openInspector('comments'); offerDraft(pointDraftBinding(), point); return; }
+  const panel = draftStore.load(draftBinding('new', 'general'));
+  if (panel?.anchor && $('commentText').value === panel.text) {
+    draftAnchor = panel.anchor;
+    panelDraftContext = panel.context || null;
     openInspector('comments', 'draft', { x: $('frame').clientWidth / 2, y: 40 });
     trackAnchor(draftAnchor);
     $('commentText').focus();
@@ -1356,6 +2385,7 @@ $('cancelPlacement').addEventListener('click', e => {
 $('bubbleClose').addEventListener('click', () => { if (!commentBusy) closeBubble(true); });
 $('bubbleCancel').addEventListener('click', () => {
   if (commentBusy) return;
+  clearDraft(pointDraftBinding());
   $('bubbleText').value = '';
   selection = draftAnchor = '';
   closeBubble(true);
@@ -1377,10 +2407,14 @@ $('bubbleGeneral').addEventListener('click', () => {
   // still exists rather than to a hidden form.
   inspectorReturn = $('discussionsBtn');
   $('commentText').value = text;
+  panelDraftContext = null;
+  saveComposerDraft();
   $('commentText').focus();
 });
 $('cancelComment').addEventListener('click', () => {
   if (commentBusy) return;
+  clearDraft(draftBinding('new', 'general'));
+  panelDraftContext = null;
   $('commentText').value = '';
   selection = draftAnchor = '';
   $('commentStatus').textContent = '';
@@ -1397,21 +2431,47 @@ $('commentBubble').addEventListener('click', e => e.stopPropagation());
 addEventListener('resize', placeBubble);
 
 /** Post a comment from either composer. `fromBubble` keeps the bubble's flow. */
-async function postComment({ text, anchor, version, status, button, inputs, fromBubble }) {
+async function postComment({ text, anchor, version, context, identity, status, button, inputs, fromBubble }) {
   if (!text || commentBusy || !controls(info).commentBox) return;
+  const operation = ++commentOperation;
   commentBusy = button.disabled = true;
   for (const input of inputs) input.readOnly = true;
   showPosting(status, 'Posting…', true);
+  // The words belong to a draft binding until the server confirms them. A
+  // failure leaves the text in place and the draft recoverable; nothing is
+  // reposted on the reader's behalf.
+  const binding = fromBubble ? pointDraftBinding() : draftBinding('new', 'general');
+  const scope = writeScope();
+  if (binding) saveDraft(binding, composerDraft({ text, anchor, context }));
   let posted = null;
   try {
+    if (!await principalReady(scope, operation, status)) return;
     await guestUI.ensureProfile();
+    // The reader may have signed in, switched account or changed identity
+    // while the profile was being assured. Their words are not this reader's
+    // to post: stop here, and leave both drafts where they belong.
+    if (!scopeCurrent(scope)) return;
     // The version on screen, so a responder can read the page as the reader saw it.
-    const result = await art.comment({ text, ...(anchor ? { anchor } : {}), ...(version ? { version } : {}) });
+    scope.expectedIdentity ||= expectedPrincipal(scope);
+    const result = await art.comment({
+      text, ...(anchor ? { anchor } : {}), ...(version ? { version } : {}),
+      ...(context ? { context } : {}), identity: scope.identity,
+    }, { expectedIdentity: scope.expectedIdentity });
+    // A completion that raced an identity change must not clear the new
+    // reader's composer or draft. Only the captured binding is removed.
+    if (!scopeCurrent(scope)) {
+      saveDraft(binding, null);
+      return;
+    }
     for (const input of inputs) input.value = '';
     selection = draftAnchor = '';
+    bubbleContext = selectionContext = null;
+    if (!fromBubble) panelDraftContext = null;
+    saveDraft(binding, null);
     status.textContent = 'Posted.';
     if (fromBubble) closeBubble(false, { keepPlacing: true });
     await loadThreads();
+    if (!scopeCurrent(scope, { allowGuestNaming: true })) return;
     posted = threads.find(t => t.uuid === result.ticketUuid);
     if (fromBubble && posted) {
       // The bubble is done; the posted thread is one click away in the panel.
@@ -1421,10 +2481,20 @@ async function postComment({ text, anchor, version, status, button, inputs, from
     } else if (posted && panelPoint && !fromBubble) activateThread(posted, panelPoint);
     else if (!fromBubble) openInspector('comments');
   } catch (err) {
-    status.textContent = `Could not post: ${err.message}`;
+    // A stale failure speaks for the reader who started it, not this one.
+    if (!scopeCurrent(scope)) return;
+    await refreshChangedIdentity(err);
+    if (!scopeCurrent(scope)) return;
+    status.textContent = retryMessage('Could not post', err, status, button);
+    // A failed or refused post keeps every word, and offers the draft back.
+    if (binding && text.trim()) offerDraft(binding, composerDraft({ text, anchor, context }));
   } finally {
-    commentBusy = button.disabled = false;
-    for (const input of inputs) input.readOnly = false;
+    if (operation === commentOperation) {
+      commentBusy = false;
+      // A rate-limited Post stays disabled until its own countdown ends.
+      if (!waits.has(status)) button.disabled = false;
+      for (const input of inputs) input.readOnly = false;
+    }
   }
 }
 
@@ -1434,6 +2504,8 @@ $('commentBubble').addEventListener('submit', e => {
     text: $('bubbleText').value.trim(),
     anchor: bubbleAnchor,
     version: bubbleVersion,
+    context: bubbleContext,
+    identity: guestUI.identity(),
     status: $('bubbleStatus'),
     button: $('commentBubble').querySelector('button[type=submit]'),
     inputs: [$('bubbleText')],
@@ -1447,12 +2519,19 @@ $('commentForm').addEventListener('submit', e => {
     text: $('commentText').value.trim(),
     anchor: draftAnchor || selection,
     version: shown?.checkin,
+    context: draftAnchor ? panelDraftContext : selectionContext,
+    identity: guestUI.identity(),
     status: $('commentStatus'),
     button: $('commentForm').querySelector('button[type=submit]'),
     inputs: [$('commentText')],
     fromBubble: false,
   });
 });
+
+// Every change to the panel composer is saved under its binding as it is
+// typed, so a reload offers it back; an emptied composer drops its draft.
+$('commentText').addEventListener('input', saveComposerDraft);
+$('bubbleText').addEventListener('input', savePointDraft);
 
 function renderVersions() {
   const count = info.timeline.length;
@@ -2103,8 +3182,9 @@ async function loadLibrary(force = false) {
     if (!stillCurrent(epoch, owner)) return;
     if (response.status === 401) {
       // Signed out: there is no inventory to show, only the routes that ask for sign-in.
+      const previous = accountId;
       accountId = '';
-      forgetAccount();
+      forgetAccount(previous);
       libraryCache = { at: Date.now(), items: [], error: '', accountId: '' };
       return;
     }
@@ -2400,6 +3480,32 @@ const guestUI = guestPanel({
   manage: manageRequest,
   path: managePath,
   refresh: () => loadPeople(true),
+  openIdentity: () => openInspector('comments'),
+  // A draft belongs to one identity. The first naming of this reader adopts
+  // what the tab wrote a moment ago (same person, now named); a change from
+  // one real identity to another discards the old one's drafts entirely, so
+  // words written as the previous identity can never be posted as the new one.
+  onIdentity(previous) {
+    if (!previous) return;
+    // Signing in while remaining the same guest changes no principal key.
+    // A real key replacement is never a continuation of that sign-in.
+    signInJustConfirmed = false;
+    clearIdentityDrafts(previous);
+    // The list's private flags belonged to the former identity; ask again.
+    loadThreads(true);
+  },
+  // Saving a name on an artifact whose discussion list has not loaded yet
+  // still gives the reader their identity line and a server-named key.
+  onSaved() { loadThreads(true); },
+  // Choosing an identity changes which principal the server answers for, so
+  // the list is asked again under that choice; drafts follow the new key.
+  onChoice() {
+    signInJustConfirmed = false;
+    const previous = guestUI.identityKey();
+    clearIdentityDrafts(previous);
+    guestUI.resetViewer({ keepProfile: true });
+    loadThreads(false);
+  },
 });
 
 async function main() {
@@ -2411,11 +3517,75 @@ async function main() {
     return fail(e.message);
   }
   art = new Artifact(location.origin, m[1], link.token);
+  // Cookie-only content belongs to a verified account context from the start;
+  // otherwise the first late session response could preserve another account's
+  // cached document as if it were an anonymous sign-in continuation.
+  if (!link.token) await confirmAccount({ fresh: true });
   paintSignin();
   await reload(true);
   await guestUI.loadProfile();
   await loadThreads();
   startSidebar();
+  await openLinkedThread();
+}
+
+/**
+ * A `?thread=` deep link opens that discussion. The reference is only ever a
+ * 40- or 64-digit hex uuid; nothing from the query selects an element. The
+ * target is looked up exactly on the server, so a thread outside the loaded
+ * page (older, resolved, filtered out) still opens, and only a server "not
+ * found" is reported as missing.
+ */
+async function openLinkedThread() {
+  const wanted = threadRef(new URLSearchParams(location.search).get('thread'));
+  if (!wanted || discussionNavigation) return;
+  if (!controls(info).threads) { notice('Discussions are not available on this link.'); return; }
+  const scope = writeScope();
+  // Wait for the list the first load started, if it is still arriving.
+  for (let i = 0; i < 40 && threadsLoading; i++) await new Promise(resolve => setTimeout(resolve, 50));
+  if (discussionNavigation || !scopeCurrent(scope)) return;
+  let target = threads.find(t => t.uuid === wanted) ?? null;
+  let missing = false;
+  if (!target) {
+    // Not in the loaded cohort: ask for exactly this thread. The query is the
+    // dedicated lookup object, never the panel's list query.
+    try {
+      const exact = await art.tickets({ thread: wanted, identity: scope.identity });
+      if (discussionNavigation || !scopeCurrent(scope)) return;
+      if (scope.key && exact.viewer?.key !== scope.key) { await refreshChangedIdentity({ code: 'identity_changed' }); return; }
+      const found = (exact?.tickets ?? []).map(thread)[0] ?? null;
+      if (found) {
+        target = found;
+        // Add the row without disturbing the reader's filters or pagination.
+        if (!threads.some(t => t.uuid === found.uuid)) threads = [...threads, found];
+        renderThreads();
+      }
+    } catch (err) {
+      if (discussionNavigation || !scopeCurrent(scope)) return;
+      if (err?.status !== 404) {
+        paintThreadNotice(`Could not open that discussion. ${err?.message ?? 'The request failed.'}`, { sticky: true });
+        openInspector('comments');
+        return;
+      }
+      missing = true;
+    }
+  }
+  if (!target) {
+    if (missing || !threads.some(t => t.uuid === wanted)) {
+      // Only a server-confirmed absence is called missing; the list is untouched.
+      paintThreadNotice('That discussion is not on this artifact. Showing the other comments.', { sticky: true });
+    }
+    openInspector('comments');
+    return;
+  }
+  if (discussionNavigation || !scopeCurrent(scope)) return;
+  expanded.set(target.uuid, true);
+  activateThread(target);
+  const reveal = () => { if (scopeCurrent(scope) && anchored(target) === 'yes') post({ type: 'reveal', key: target.label }); };
+  // Pins may still be locating; a reveal before the page answers is lost, so
+  // ask again once the page has placed them.
+  reveal();
+  setTimeout(reveal, 400);
 }
 
 addEventListener('hashchange', () => {

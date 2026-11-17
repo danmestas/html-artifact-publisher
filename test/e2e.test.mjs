@@ -524,11 +524,18 @@ test('comment link: tickets through the API, a stock fossil clone and a terminal
   assert.deepEqual(thread(t), {
     uuid: t.uuid, title: 'The heading reads oddly.', status: 'Closed', resolved: true, anchor: 'intro', version: a.tip, checkins: [],
     messages: [
-      { user: 'comment-link', time: t.changes[0].time, text: 'The heading reads oddly.\nCan it be shorter?', status: '', change: t.changes[0].artifact, authority: 'edit', intent: 'comment' },
-      { user: 'edit-link', time: t.changes[1].time, text: 'Shortened in the next version.', status: '', change: t.changes[1].artifact, authority: 'edit', intent: 'comment' },
-      { user: 'comment-link', time: t.changes[2].time, text: '', status: 'Closed', change: t.changes[2].artifact, authority: 'edit', intent: 'comment' },
+      // Every change's history starts with its own original text; `edited`
+      // says whether a correction was appended after it.
+      { user: 'comment-link', time: t.changes[0].time, text: 'The heading reads oddly.\nCan it be shorter?', status: '', change: t.changes[0].artifact, authority: 'edit', intent: 'comment', canEdit: false, edited: false, history: [{ artifact: t.changes[0].artifact, text: 'The heading reads oddly.\nCan it be shorter?', time: t.changes[0].time }] },
+      { user: 'edit-link', time: t.changes[1].time, text: 'Shortened in the next version.', status: '', change: t.changes[1].artifact, authority: 'edit', intent: 'comment', canEdit: false, edited: false, history: [{ artifact: t.changes[1].artifact, text: 'Shortened in the next version.', time: t.changes[1].time }] },
+      { user: 'comment-link', time: t.changes[2].time, text: '', status: 'Closed', change: t.changes[2].artifact, authority: 'edit', intent: 'comment', canEdit: false, edited: false, history: [{ artifact: t.changes[2].artifact, text: '', time: t.changes[2].time }] },
     ],
+    // The discussion list's server-assigned reference and per-viewer flags.
+    // lastChange is the raw latest event (including a correction the canonical
+    // list hides), which is what a read marker must name.
+    context: null, ref: t.ref, mine: false, unread: false, following: false, changed: t.changed, lastChange: t.lastChange,
   });
+  assert.match(t.lastChange, /^[0-9a-f]{40,64}$/, 'the newest raw event is named for read markers');
 
   // Bounded, validated input.
   for (const [body, why] of [

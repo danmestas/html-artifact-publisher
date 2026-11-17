@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { anchorFor, arrange, attachmentDisplay, bubblePlacement, controls, decodePointAnchor, encodePointAnchor, findQuotes, thread } from '../public/comments.js';
+import { FILTERS, SORTS, anchorFor, arrange, attachmentDisplay, boundedContext, bubblePlacement, contextLine, controls, decodePointAnchor, editable, encodePointAnchor, filterThreads, findQuotes, pageContext, searchThreads, sortThreads, thread, threadLink } from '../public/comments.js';
 
 test('a guest discussion reader can comment without editing, moderation or attachment powers', () => {
   const guest = controls({ role: 'read', canComment: true, canModerate: false });
@@ -137,4 +137,221 @@ test('bubblePlacement: beside the click, flipped to stay inside the page area', 
   // A missing or absurd point is treated as the top-left, never NaN.
   assert.deepEqual(bubblePlacement(null, size, bounds), { x: 12, y: 12, flippedX: false, flippedY: false });
   assert.deepEqual(bubblePlacement({ x: NaN, y: Infinity }, size, bounds), { x: 12, y: 12, flippedX: false, flippedY: false });
+});
+
+// A server reference is stable for a thread's life: a reply, a resolve or a
+// re-sort moves it in the list, never its number or its pin's label.
+test('arrange: server refs are labels, never renumbered by activity or resolution', () => {
+  const mk = (uuid, status, ref, anchor = '') => ({ ...thread(ticket(status, [['u', '']], { subsystem: anchor })), uuid, ref });
+  const first = arrange([mk('1', 'Open', 14, 'intro'), mk('2', 'Open', 21, 'some words')]);
+  assert.deepEqual(first.open.map(t => [t.uuid, t.label]), [['1', 14], ['2', 21]]);
+  // Thread 21 is resolved and a newer thread arrives ahead of both.
+  const later = arrange([mk('3', 'Open', 33, 'intro'), mk('2', 'Closed', 21, 'some words'), mk('1', 'Open', 14, 'intro')]);
+  assert.deepEqual(later.open.map(t => [t.uuid, t.label]), [['3', 33], ['1', 14]]);
+  assert.deepEqual(later.resolved.map(t => [t.uuid, t.label]), [['2', 21]]);
+  assert.deepEqual(later.pins.map(p => p.key), [33, 14, 21], 'a pin keeps the thread reference');
+  // A response with no refs at all is numbered once, and stably within it.
+  const legacy = arrange([{ ...thread(ticket('Open', [['u', '']])), uuid: 'a' }, { ...thread(ticket('Open', [['u', '']])), uuid: 'b' }]);
+  assert.deepEqual(legacy.open.map(t => t.label), [1, 2]);
+  // Mixed: a real ref is never lowered to a generated one.
+  const mixed = arrange([{ ...thread(ticket('Open', [['u', '']])), uuid: 'a', ref: 0 }, { ...thread(ticket('Open', [['u', '']])), uuid: 'b', ref: 7 }]);
+  assert.deepEqual(mixed.open.map(t => [t.uuid, t.label]), [['a', 8], ['b', 7]]);
+});
+
+test('thread: viewer state and context come from the server, and are never invented', () => {
+  const t = thread({
+    uuid: 'a'.repeat(40), status: 'Open', changed: '2026-11-01T00:00:00Z', ref: 14,
+    mine: true, unread: true, following: false,
+    context: { label: 'Scope', quote: 'Launch on 26 November.', extra: 'ignored' },
+    fields: { title: 'T', comment: 'opening', subsystem: 'intro' },
+    changes: [{ artifact: 'b'.repeat(40), user: 'Rae (guest)', time: '2026-11-01T00:00:00Z', comment: 'opening', canEdit: true, fields: {} }],
+  });
+  assert.equal(t.ref, 14);
+  assert.deepEqual([t.mine, t.unread, t.following], [true, true, false]);
+  assert.deepEqual(t.context, { label: 'Scope', quote: 'Launch on 26 November.' }, 'bounded to label and quote');
+  assert.equal(t.messages[0].canEdit, true);
+  assert.equal(t.changed, '2026-11-01T00:00:00Z');
+  const bare = thread(ticket('Open', [['u', 'text']]));
+  assert.deepEqual([bare.ref, bare.mine, bare.unread, bare.following, bare.context], [0, false, false, false, null]);
+  assert.equal(bare.messages[0].canEdit, false, 'no server proof means no edit control');
+});
+
+test('filterThreads: All, Open, Resolved, Mine, Unread and Following use server flags', () => {
+  const mk = (over) => ({ ...thread(ticket(over.status ?? 'Open', [['u', 'x']])), uuid: over.uuid ?? 'a', ...over });
+  const all = [mk({ uuid: '1' }), mk({ uuid: '2', status: 'Closed' }), mk({ uuid: '3', mine: true }), mk({ uuid: '4', unread: true })];
+  const ids = (filter) => filterThreads(all, filter).map(t => t.uuid);
+  assert.deepEqual(ids('all'), ['1', '2', '3', '4']);
+  assert.deepEqual(ids('open'), ['1', '3', '4']);
+  assert.deepEqual(ids('resolved'), ['2']);
+  assert.deepEqual(ids('mine'), ['3']);
+  assert.deepEqual(ids('unread'), ['4']);
+  all[1].following = true;
+  assert.deepEqual(ids('following'), ['2']);
+  assert.deepEqual(ids('unknown'), ['1', '2', '3', '4']);
+  assert.deepEqual(FILTERS, ['all', 'open', 'resolved', 'mine', 'unread', 'following']);
+  assert.deepEqual(SORTS, ['activity', 'page']);
+});
+
+test('sortThreads and searchThreads never renumber and never mutate the input', () => {
+  const rows = [
+    { uuid: 'late', label: 30, title: 'Rollout', context: null, messages: [{ text: 'Later in the page' }] },
+    { uuid: 'early', label: 12, title: 'Scope', context: { label: 'Scope', quote: 'launch date' }, messages: [{ text: 'Earlier' }] },
+    { uuid: 'off', label: 21, title: 'Unplaced', context: null, messages: [{ text: 'Not on the page' }] },
+  ];
+  const copy = [...rows];
+  assert.deepEqual(sortThreads(rows, 'activity').map(t => t.uuid), ['late', 'early', 'off'], 'activity keeps the route order');
+  assert.deepEqual(sortThreads(rows, 'page', [12, 30]).map(t => t.uuid), ['early', 'late', 'off'], 'page order follows placed pins, unplaced last');
+  assert.deepEqual(sortThreads(rows, 'page', []).map(t => t.uuid), ['late', 'early', 'off'], 'no placements keeps the route order');
+  assert.deepEqual(rows, copy, 'sorting never mutates');
+  assert.equal(searchThreads(rows, 'launch')[0].uuid, 'early', 'the context quote is searched');
+  assert.equal(searchThreads(rows, 'SCOPE')[0].uuid, 'early', 'the section label is searched, case-insensitively');
+  assert.equal(searchThreads(rows, 'rollout')[0].uuid, 'late');
+  assert.deepEqual(searchThreads(rows, '  ').map(t => t.uuid), ['late', 'early', 'off'], 'blank search keeps everything');
+  assert.deepEqual(searchThreads(rows, 'nothing here'), []);
+});
+
+test('threadLink copies a thread and version, and only a capability the reader legitimately holds', () => {
+  const uuid = 'c'.repeat(40);
+  assert.equal(threadLink({ origin: 'https://a.example', pathname: '/v/page', token: '', version: '', thread: uuid }), `https://a.example/v/page?thread=${uuid}`);
+  assert.equal(threadLink({ origin: 'https://a.example', pathname: '/v/page', token: 'd'.repeat(64), version: 'abcdef12', thread: uuid }), `https://a.example/v/page?thread=${uuid}#${'d'.repeat(64)}@abcdef12`);
+  assert.equal(threadLink({ origin: 'https://a.example', pathname: '/v/page', token: '', version: 'abcdef12', thread: 'C14' }), 'https://a.example/v/page#@abcdef12', 'a non-uuid reference is not copied as a query');
+  assert.equal(threadLink({ origin: 'https://a.example', pathname: '/v/page', token: '', version: '', thread: `${uuid}&token=${'e'.repeat(64)}` }), 'https://a.example/v/page', 'no smuggling through the reference');
+});
+
+test('editable and contextLine bound what the UI may show of a message', () => {
+  assert.equal(editable({ canEdit: true, text: 'mine' }), true);
+  assert.equal(editable({ canEdit: false, text: 'theirs' }), false);
+  assert.equal(editable({ canEdit: true, text: '   ' }), false);
+  assert.equal(editable(null), false);
+  assert.equal(contextLine({ label: 'Scope', quote: 'Launch date' }), 'Scope · “Launch date”');
+  assert.equal(contextLine({ label: '  ', quote: 'Launch date' }), '“Launch date”');
+  assert.equal(contextLine({ label: 'x'.repeat(200), quote: 'y'.repeat(400) }).length, 120 + 3 + 240 + 2);
+  assert.equal(contextLine(null), '');
+  assert.equal(contextLine({}), '');
+});
+
+test('boundedContext accepts only plain, bounded text from the page', () => {
+  assert.deepEqual(boundedContext({ label: '  Scope\n heading ', quote: 'Launch   on 26 November.' }), { label: 'Scope heading', quote: 'Launch on 26 November.' });
+  assert.equal(boundedContext({ label: '', quote: '' }), null);
+  assert.equal(boundedContext({ label: '   ', quote: '\n\t' }), null);
+  assert.equal(boundedContext(null), null);
+  assert.equal(boundedContext('Scope'), null);
+  assert.equal(boundedContext([{ label: 'x' }]), null);
+  assert.equal(boundedContext({ label: 42, quote: null }), null);
+  const long = boundedContext({ label: 'L'.repeat(300), quote: `${'word '.repeat(100)}` });
+  assert.equal(long.label.length, 120);
+  assert.ok(long.quote.length <= 240);
+  assert.ok(!/\s$/.test(long.quote), 'no dangling space in a cut excerpt');
+  assert.ok(!long.quote.endsWith('wor'), 'a long excerpt cuts at a word boundary');
+});
+
+// A tiny DOM good enough for pageContext: elements with closest/querySelector
+// semantics over an explicit parent/child tree.
+test('pageContext labels a section from its heading and quotes the clicked block', () => {
+  const node = (tag, text = '', children = [], attrs = {}) => {
+    const el = {
+      nodeType: 1, tagName: tag.toUpperCase(), textContent: text, id: attrs.id ?? '', parentElement: null,
+      previousElementSibling: null, nextElementSibling: null, children,
+      closest(selector) { const tags = selector.split(',').map(s => s.trim().toUpperCase()); for (let n = el; n; n = n.parentElement) if (tags.includes(n.tagName)) return n; return null; },
+      querySelector(selector) { const tags = selector.split(',').map(s => s.trim().toUpperCase()); const walk = n => { for (const c of n.children) { if (tags.includes(c.tagName)) return c; const f = walk(c); if (f) return f; } return null; }; return walk(el); },
+    };
+    for (let i = 0; i < children.length; i++) { children[i].parentElement = el; if (i) children[i].previousElementSibling = children[i - 1]; if (i < children.length - 1) children[i].nextElementSibling = children[i + 1]; }
+    return el;
+  };
+  const paragraph = node('p', 'Launch on 26 November, after the accessibility review.');
+  const heading = node('h2', 'Scope');
+  const other = node('p', 'Keep existing links working.');
+  const section = node('section', '', [heading, paragraph], { id: 'scope' });
+  const root = node('main', '', [section, node('section', '', [node('h2', 'Rollout'), other])]);
+  assert.deepEqual(pageContext(paragraph), { label: 'Scope', quote: 'Launch on 26 November, after the accessibility review.' });
+  assert.deepEqual(pageContext(heading), { label: 'Scope', quote: 'Launch on 26 November, after the accessibility review.' }, 'a heading click quotes the paragraph it introduces');
+  assert.deepEqual(pageContext(other), { label: 'Rollout', quote: 'Keep existing links working.' });
+  // A selection overrides the block excerpt; the section label still applies.
+  assert.deepEqual(pageContext(other, 'existing links'), { label: 'Rollout', quote: 'existing links' });
+  // No heading anywhere: no invented label, only the text that is there.
+  const bare = node('p', 'Just a line.');
+  node('div', '', [bare]);
+  assert.deepEqual(pageContext(bare), { label: '', quote: 'Just a line.' });
+  assert.equal(pageContext(null), null);
+});
+
+test('pageContext: a click on a heading quotes the paragraph it introduces, or its own text', () => {
+  const node = (tag, text = '', children = [], attrs = {}) => {
+    const el = {
+      nodeType: 1, tagName: tag.toUpperCase(), textContent: text, id: attrs.id ?? '', parentElement: null,
+      previousElementSibling: null, nextElementSibling: null, children,
+      closest(selector) { const tags = selector.split(',').map(s => s.trim().toUpperCase()); for (let n = el; n; n = n.parentElement) if (tags.includes(n.tagName)) return n; return null; },
+      querySelector(selector) { const tags = selector.split(',').map(s => s.trim().toUpperCase()); const walk = n => { for (const c of n.children) { if (tags.includes(c.tagName)) return c; const f = walk(c); if (f) return f; } return null; }; return walk(el); },
+    };
+    for (let i = 0; i < children.length; i++) { children[i].parentElement = el; if (i) children[i].previousElementSibling = children[i - 1]; if (i < children.length - 1) children[i].nextElementSibling = children[i + 1]; }
+    return el;
+  };
+  const bareHeading = node('h2', 'Standalone');
+  node('main', '', [bareHeading]);
+  assert.deepEqual(pageContext(bareHeading), { label: 'Standalone', quote: 'Standalone' }, 'nothing follows: the heading is the excerpt');
+});
+
+test('pageContext never reads injected script or style source as page text', () => {
+  const textNode = data => ({ nodeType: 3, data, textContent: data });
+  const el = (tag, children = [], attrs = {}) => {
+    const node = { nodeType: 1, tagName: tag.toUpperCase(), id: attrs.id ?? '', parentElement: null, previousElementSibling: null, nextElementSibling: null, children,
+      get firstChild() { return children[0] ?? null; },
+      get textContent() { return children.map(c => c.textContent).join(''); },
+      closest(selector) { const tags = selector.split(',').map(s => s.trim().toUpperCase()); for (let n = node; n; n = n.parentElement) if (tags.includes(n.tagName)) return n; return null; },
+      querySelector(selector) {
+        const tags = selector.split(',').map(s => s.trim().toUpperCase());
+        const walk = n => { for (const c of n.children ?? []) { if (tags.includes(c.tagName)) return c; const found = walk(c); if (found) return found; } return null; };
+        return walk(node);
+      } };
+    children.forEach((c, i) => { c.parentElement = node; c.nextSibling = children[i + 1] ?? null; if (i) c.previousElementSibling = children[i - 1]; if (i < children.length - 1) children[i].nextElementSibling = children[i + 1]; });
+    return node;
+  };
+  // The viewer's injected runtime is a first-child script; its source is not content.
+  const injected = el('script', [textNode('(function pageAppearance(){/* runtime */})')]);
+  const paragraph = el('p', [textNode('Launch on 26 November.')]);
+  const heading = el('h2', [textNode('Scope')]);
+  const section = el('section', [heading, paragraph]);
+  el('main', [injected, section]);
+  assert.deepEqual(pageContext(paragraph), { label: 'Scope', quote: 'Launch on 26 November.' });
+  // Clicking the runtime itself yields nothing rather than the script source.
+  assert.equal(pageContext(injected), null);
+  const styled = el('div', [el('style', [textNode('.x{color:red}')]), el('p', [textNode('Visible words')])]);
+  assert.deepEqual(pageContext(styled), { label: '', quote: 'Visible words' });
+});
+
+test('pageContext is self-contained: it can be injected into the sandbox as source', () => {
+  // The viewer injects these functions as text, so a reference to a helper
+  // that is not also injected would throw inside the page. pageContext must
+  // not call boundedContext (or anything else) at all.
+  const source = pageContext.toString();
+  assert.ok(!/\bboundedContext\b/.test(source), 'pageContext never calls the viewer-only helper');
+  assert.equal(typeof pageContext, 'function');
+  const node = (tag, text = '') => ({ nodeType: 1, tagName: tag.toUpperCase(), textContent: text, id: '', parentElement: null, previousElementSibling: null, nextElementSibling: null, children: [], closest() { return null; }, querySelector() { return null; } });
+  const p = node('p', 'Launch on 26 November.');
+  assert.deepEqual(pageContext(p), { label: '', quote: 'Launch on 26 November.' });
+});
+
+test('bubblePlacement keeps the clicked point inside a card too tall for either side', () => {
+  // A card taller than the space below OR above the pin cannot sit beside it
+  // without leaving the page area; it aligns to the far edge instead, so the
+  // pin stays within the card rather than beyond its bottom.
+  const bounds = { left: 0, top: 45, width: 1280, height: 855 };
+  const size = { width: 380, height: 700 };
+  const point = { x: 712, y: 255 };
+  const spot = bubblePlacement(point, size, bounds);
+  // Below needs 912px of room and above needs 723px; neither fits, so the
+  // card aligns to the bottom and the pin at y=255 lies inside it.
+  assert.equal(spot.flippedY, true);
+  assert.equal(spot.y, 45 + 855 - 700, 'bottom-aligned so the pin lies inside the card');
+  assert.ok(spot.y <= point.y && spot.y + size.height >= point.y);
+  assert.ok(spot.x >= bounds.left && spot.x + size.width <= bounds.left + bounds.width);
+});
+
+test('thread carries lastChange so a hidden correction event still marks as read', () => {
+  const t = thread({ ...ticket('Open', [['u', 'text']]), lastChange: 'e'.repeat(64), ref: 3 });
+  assert.equal(t.lastChange, 'e'.repeat(64));
+  // The canonical changes[] may hide the newest correction event; lastChange is
+  // what discussionView must be given, so the thread does not stay unread.
+  const noLast = thread(ticket('Open', [['u', 'text']]));
+  assert.equal(noLast.lastChange, '', 'an older response names no last event');
 });

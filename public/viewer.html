@@ -188,6 +188,7 @@
             </button>
           </div>
           <p id="bubbleAnchor" class="hint"></p>
+          <div class="identity-line compact"><span id="bubbleIdentity" class="identity-text"></span><button id="bubbleIdentityChange" type="button">Change</button></div>
           <label class="sr-only" for="bubbleText">Comment</label>
           <textarea id="bubbleText" rows="3" maxlength="8000" required></textarea>
           <div class="bubble-actions">
@@ -209,29 +210,46 @@
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
             </button>
           </div>
-          <div class="panel-scroll">
-            <div class="marker-preference">
-              <button id="showCommentMarkers" type="button" role="switch" aria-checked="true" aria-describedby="markerHelp"><span>Show comment markers</span><span class="switch-track" aria-hidden="true"></span></button>
-              <p id="markerHelp">Only changes your view. Comments stay available below.</p>
-              <p id="markerStatus" role="status">Markers visible on the page</p>
+          <div class="identity-line" id="identityLine" hidden>
+            <span id="identityText" class="identity-text"></span>
+            <button id="identityChange" type="button" aria-expanded="false" aria-controls="guestProfile">Change</button>
+          </div>
+          <section id="guestProfile" class="guest-profile" hidden aria-labelledby="guestProfileHeading">
+            <div class="guest-profile-head">
+              <h2 id="guestProfileHeading">Comment identity</h2>
+              <button id="identityDone" type="button">Done</button>
             </div>
+            <p class="hint">Commenting needs no account. A guest name shows as unverified; email is optional, private, and never in threads.</p>
+            <form id="guestProfileForm">
+              <label for="guestName">Name <span class="muted">(optional)</span></label>
+              <input id="guestName" name="guestName" type="text" maxlength="64" autocomplete="nickname">
+              <label for="guestEmail">Private email <span class="muted">(optional, unverified)</span></label>
+              <input id="guestEmail" name="guestEmail" type="email" maxlength="254" autocomplete="email" aria-describedby="guestContinuity">
+              <p id="guestContinuity" class="hint">Without a name, comments appear as Guest. This browser remembers your identity for up to 30 days. Clearing cookies loses that continuity. Your identity does not grant access without a valid artifact link.</p>
+              <button id="saveGuestProfile" type="submit">Save comment identity</button>
+            </form>
+            <p id="guestProfileStatus" class="hint" role="status" aria-live="polite"></p>
+            <button id="useAccountIdentity" type="button" hidden>Use my signed-in identity</button>
+            <button id="useGuestIdentity" type="button" hidden>Comment as a guest instead</button>
+            <p id="identityAccountNote" class="hint" hidden></p>
+            <button id="claimGuest" type="button">Link to my signed-in account</button>
+            <p class="hint">To request named access, ask the owner for an invitation, sign in, then return in this browser and link your identity. The owner must approve access separately.</p>
+            <p class="hint">Comments are shared discussion. They do not ask an agent to act.</p>
+          </section>
+          <div class="panel-scroll">
             <p id="responderNote" class="responder" role="status"><strong id="responderHead"></strong> <span id="responderName"></span> <span id="responderContact" class="muted"></span></p>
-            <section id="guestProfile" class="guest-profile" hidden aria-labelledby="guestProfileHeading">
-              <h2 id="guestProfileHeading">Your comment identity</h2>
-              <p class="hint">You can comment without an account. Your name is shown with your comments as unverified. Email is optional and visible only to you and the artifact owner or instance owner.</p>
-              <form id="guestProfileForm">
-                <label for="guestName">Name <span class="muted">(optional)</span></label>
-                <input id="guestName" name="guestName" type="text" maxlength="64" autocomplete="nickname">
-                <label for="guestEmail">Private email <span class="muted">(optional, unverified)</span></label>
-                <input id="guestEmail" name="guestEmail" type="email" maxlength="254" autocomplete="email" aria-describedby="guestContinuity">
-                <p id="guestContinuity" class="hint">Without a name, comments appear as Guest. This browser remembers your identity for up to 30 days. Clearing cookies loses that continuity. Your identity does not grant access without a valid artifact link.</p>
-                <button id="saveGuestProfile" type="submit">Save comment identity</button>
-              </form>
-              <p id="guestProfileStatus" class="hint" role="status" aria-live="polite"></p>
-              <button id="claimGuest" type="button">Link to my signed-in account</button>
-              <p class="hint">To request named access, ask the owner for an invitation, sign in, then return in this browser and link your identity. The owner must approve access separately.</p>
-              <p class="hint">Comments are shared discussion. They do not ask an agent to act.</p>
-            </section>
+            <div id="threadNotice" class="thread-notice" role="status" hidden>
+              <span id="threadNoticeText"></span>
+              <button id="threadNoticeRetry" type="button" hidden>Retry</button>
+            </div>
+            <div id="threadRecovery" class="recovery" hidden>
+              <strong>Unsent draft</strong>
+              <p>Saved in this tab for this artifact, version and thread. It has not been posted.</p>
+              <div class="recovery-actions">
+                <button id="restoreDraft" type="button">Restore draft</button>
+                <button id="discardDraft" type="button">Discard</button>
+              </div>
+            </div>
             <div class="comment-tools"><button id="placeComment" class="primary" type="button" hidden>Place a comment</button><button id="generalComment" type="button" hidden>General comment</button></div>
             <form id="commentForm" hidden>
               <label for="commentText">New comment</label>
@@ -239,9 +257,35 @@
               <textarea id="commentText" rows="3" maxlength="8000" required></textarea>
               <div class="comment-actions"><span id="commentStatus" class="hint" role="status" aria-live="polite"></span><button id="cancelComment" type="button">Cancel</button><button class="primary" type="submit">Comment</button></div>
             </form>
+            <div id="threadTools" class="thread-tools">
+              <label class="sr-only" for="threadSearch">Search discussions</label>
+              <input id="threadSearch" type="search" placeholder="Search discussions…" autocomplete="off">
+              <div id="threadFilters" class="filter-row" role="group" aria-label="Filter discussions">
+                <button type="button" data-filter="all" aria-pressed="true">All</button>
+                <button type="button" data-filter="open" aria-pressed="false">Open</button>
+                <button type="button" data-filter="resolved" aria-pressed="false">Resolved</button>
+                <button type="button" data-filter="mine" aria-pressed="false">Mine</button>
+                <button type="button" data-filter="unread" aria-pressed="false">Unread</button>
+                <button type="button" data-filter="following" aria-pressed="false">Following</button>
+              </div>
+              <div class="sort-row">
+                <span id="threadCount" class="muted"></span>
+                <label>Sort <select id="threadSort"><option value="activity">Recent activity</option><option value="page">Page order</option></select></label>
+              </div>
+            </div>
             <div id="threadList"></div>
             <h3 id="resolvedHead" hidden>Resolved</h3>
             <div id="resolvedList"></div>
+            <p id="threadListStatus" class="hint thread-list-status" role="status"></p>
+            <button id="loadOlder" class="load-older" type="button" hidden>Load older discussions</button>
+            <div id="panelDisplay" class="panel-display">
+              <p class="panel-display-label">Display</p>
+              <div class="marker-preference">
+                <button id="showCommentMarkers" type="button" role="switch" aria-checked="true" aria-describedby="markerHelp"><span>Show comment markers</span><span class="switch-track" aria-hidden="true"></span></button>
+                <p id="markerHelp">Only changes your view. Comments stay available below.</p>
+                <p id="markerStatus" role="status">Markers visible on the page</p>
+              </div>
+            </div>
           </div>
         </div>
 

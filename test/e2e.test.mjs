@@ -948,6 +948,11 @@ if (process.env.BACKDROP_BROWSER_QA === '1') test('real browser: the viewer back
   await backdropQA({ base, owner, api, output: join(root, '.wrangler/backdrop-browser-qa') });
 });
 
+if (process.env.FONTS_BROWSER_QA === '1') test('real browser: house and bundled fonts load while Google Fonts stays blocked', async () => {
+  const { fontsQA } = await import('./fonts-browser.mjs');
+  await fontsQA({ base, owner, api, output: join(root, '.wrangler/fonts-browser-qa') });
+});
+
 test('comment link: commenting is all it can do, and delete revokes it', async () => {
   const a = await create({ 'index.html': b64('<p>only comments</p>') });
   const commit = await api(`/api/artifacts/${a.id}`, { method: 'PUT', token: a.comment, body: { parent: a.tip, files: { 'index.html': b64('x') } } });

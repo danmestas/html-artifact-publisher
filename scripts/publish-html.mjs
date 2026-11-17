@@ -13,6 +13,7 @@ import { userInfo } from 'node:os';
 import { Artifact, ConflictError, createArtifact, listArtifacts, parseFragment } from '../public/client.js';
 import { ICON_NAMES, validIcon } from '../public/icons.js';
 import { loadPikchr, pikchrBlocks } from './pikchr.mjs';
+import { externalReferenceWarnings, htmlDocumentProblems } from './input-validation.mjs';
 import { redact, runWatch } from './watch.mjs';
 
 const HELP = `
@@ -23,6 +24,7 @@ Usage:
   node scripts/publish-html.mjs history <url>
   node scripts/publish-html.mjs list
   node scripts/publish-html.mjs delete <edit-url>
+  node scripts/publish-html.mjs expire <artifact-url> <ttl|never>
   node scripts/publish-html.mjs new-comment-link <edit-url>   (the old comment link, and any watch using it, stops working)
   node scripts/publish-html.mjs watch <edit-or-comment-url> [--since <hash>] [--interval 30s] [--once] [--cache <dir>]
 
@@ -42,9 +44,13 @@ Publish options:
   --help             Show this help
 
 A single file is stored as index.html; a directory is stored as-is (it needs an
-index.html or another .html file). Updating with a directory adds and changes
-files; files missing from the directory are kept from the previous version.
-A URL may end in @<check-in> to read that version.
+index.html or another .html file). Every .html file must be a whole document
+(starting with <!doctype html or <html); the viewer never wraps a fragment.
+Updating with a directory adds and changes files; files missing from the
+directory are kept from the previous version. External subresources (scripts,
+stylesheets, images, CSS url/@import) are warned about: the viewer blocks
+external resource loads, so those will not load. Ordinary links and URL text are not
+warned about. A URL may end in @<check-in> to read that version.
 
 watch prints one JSON line per new comment, reply or resolve:
   {"artifact","ticket","change","kind","author","text","time"}
@@ -55,8 +61,12 @@ a restart prints only what is new.
 It polls every --interval (5s to 1h) until Ctrl-C; --once makes one pass.
 
 Environment variables:
-  HTML_PUBLISHER_URL    Base URL of the publisher Worker (publish, list)
-  HTML_PUBLISHER_TOKEN  Owner bearer token (publish, list)
+  HTML_PUBLISHER_URL    Base URL of the publisher Worker (publish, list, expire)
+  HTML_PUBLISHER_TOKEN  Owner bearer token (publish, list, expire)
+
+expire changes the existing artifact's deadline without republishing. Durations
+run from now; never clears the deadline. Requires owner automation credentials,
+not merely an edit link. The artifact must be on HTML_PUBLISHER_URL's origin.
 
 Links:
   https://<your-domain>/v/<id>#<readToken>    read link: share this
@@ -89,7 +99,7 @@ if (hasFlag('--help') || hasFlag('-h')) {
   process.exit(0);
 }
 
-const COMMANDS = new Set(['publish', 'update', 'read', 'history', 'list', 'delete', 'new-comment-link', 'watch']);
+const COMMANDS = new Set(['publish', 'update', 'read', 'history', 'list', 'delete', 'expire', 'new-comment-link', 'watch']);
 const command = COMMANDS.has(positional[0]) ? positional.shift() : 'publish';
 
 const icon = flagValue('--icon');
@@ -121,8 +131,9 @@ function parseTtl(raw) {
   if (raw === 'never') return 0;
   const m = raw.match(/^(\d+)(h|d)$/);
   if (!m) die(`invalid --ttl "${raw}". Expected e.g. 1h, 6h, 24h, 7d, 30d, never`);
-  const n = parseInt(m[1], 10);
-  return m[2] === 'h' ? n * 3_600 : n * 86_400;
+  const seconds = Number(m[1]) * (m[2] === 'h' ? 3_600 : 86_400);
+  if (!Number.isSafeInteger(seconds) || seconds <= 0) die('TTL must be a positive duration or never');
+  return seconds;
 }
 
 /** Parse an artifact link into its origin, id, token and check-in. */
@@ -136,7 +147,7 @@ function parseLink(raw) {
   return { base: url.origin, id: m[1], ...parts, art: new Artifact(url.origin, m[1], parts.token) };
 }
 
-/** Read a file or directory into { path: bytes }, with warnings for external URLs. */
+/** Read a file or directory into { path: bytes }, warning for external subresources. */
 function readInput(path) {
   let st;
   try { st = statSync(path); } catch (err) { die(`cannot read ${path}: ${err.message}`); }
@@ -152,26 +163,24 @@ function readInput(path) {
     };
     walk(path);
     if (!Object.keys(files).some(n => /\.html?$/i.test(n))) die(`${path} has no .html file`);
+    // A single file and a directory share one rule: every HTML file the viewer
+    // might serve must be a whole document. Nothing is ever wrapped, so a
+    // stray partial is an error rather than a silently broken version.
+    const problems = htmlDocumentProblems(files);
+    if (problems.length) die(problems.join('\n\n'));
   } else {
-    const html = readFileSync(path, 'utf8');
-    const head = html.trimStart().toLowerCase();
-    if (!head.startsWith('<!doctype html') && !head.startsWith('<html')) {
-      die('file does not appear to be a standalone HTML document.\n  Expected content to start with <!doctype html or <html');
-    }
-    files['index.html'] = Buffer.from(html);
+    const data = readFileSync(path);
+    const problems = htmlDocumentProblems({ [basename(path)]: data }, true);
+    if (problems.length) die(problems.join('\n\n'));
+    files['index.html'] = data;
   }
 
-  const warnings = [];
-  for (const [name, data] of Object.entries(files)) {
-    if (!/\.(html?|css|js|mjs)$/i.test(name)) continue;
-    const urls = new Set(data.toString('utf8').match(/https?:\/\/[^\s"'>)\]]+/g) ?? []);
-    for (const u of urls) warnings.push(`external URL: ${u}`);
-  }
+  const warnings = externalReferenceWarnings(files);
   if (warnings.length > 0 && !jsonOnly) {
     console.warn(`\nWarning: ${warnings.length} external reference(s) detected.`);
     for (const w of warnings.slice(0, 10)) console.warn(`  Warning: ${w}`);
     if (warnings.length > 10) console.warn(`  … and ${warnings.length - 10} more`);
-    console.warn('  The viewer blocks network requests, so these will not load.\n');
+    console.warn('  The viewer blocks external resource loads, so these will not load.\n');
   }
   const notes = flagValue('--notes');
   if (notes !== undefined) {
@@ -316,6 +325,41 @@ async function list() {
   for (const a of artifacts) console.log(`${a.id}  ${a.updatedAt}  ${a.title}`);
 }
 
+async function expire() {
+  const [rawUrl, ttl] = positional;
+  if (!rawUrl || !ttl || positional.length !== 2) die('usage: expire <artifact-url> <ttl|never>');
+  const seconds = parseTtl(ttl);
+  const link = parseLink(rawUrl);
+  // Never send the configured owner credential to an origin taken from a link.
+  const configured = new URL(env('HTML_PUBLISHER_URL'));
+  if (!['http:', 'https:'].includes(configured.protocol) || configured.username || configured.password
+    || configured.pathname !== '/' || configured.search || configured.hash || configured.origin !== link.base) {
+    die('artifact origin must match HTML_PUBLISHER_URL');
+  }
+  const token = env('HTML_PUBLISHER_TOKEN');
+  const path = `${configured.origin}/api/artifacts/${encodeURIComponent(link.id)}`;
+  const call = async (url, options = {}) => {
+    const response = await fetch(url, {
+      ...options, redirect: 'error', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    });
+    const data = await response.json();
+    if (!response.ok) die(redact(data.error || `expiration request failed: HTTP ${response.status}`));
+    return data;
+  };
+  // Account credentials intentionally do not expose capability tokens. Obtain
+  // the shareable read link using the supplied link's own authority instead.
+  const linked = await link.art.info();
+  const readToken = linked.readToken || (linked.role === 'read' ? link.token : null);
+  if (!readToken) die('expire needs a read or edit link, plus owner automation credentials');
+  const expiresAt = seconds ? new Date(Date.now() + seconds * 1000).toISOString() : null;
+  const result = await call(`${path}/manage`, { method: 'PATCH', body: JSON.stringify({ expiresAt }) });
+  const info = await call(path);
+  const viewerUrl = `${configured.origin}/v/${link.id}#${readToken}`;
+  output({ id: link.id, viewerUrl, expiresAt: info.expiresAt, expirationPending: !!result.expirationPending,
+    linkVerified: await verifyLink(configured.origin, link.id, viewerUrl) }, viewerUrl);
+  if (result.expirationPending && !jsonOnly) console.warn('Expiration accepted; the library projection is still pending.');
+}
+
 async function remove() {
   const [rawUrl] = positional;
   if (!rawUrl) die('usage: delete <edit-url>');
@@ -372,12 +416,12 @@ function output(result, viewerUrl) {
     console.log(JSON.stringify(result));
   } else {
     console.log(JSON.stringify(result, null, 2));
-    console.log(`\nPublished: ${viewerUrl}`);
+    console.log(`\n${command === 'expire' ? 'Expiration updated' : 'Published'}: ${viewerUrl}`);
     console.log('   Post this link to the user: it opens the newest version.');
     if (result.commentUrl) console.log(`   Comment link: ${result.commentUrl}`);
     if (result.editUrl) console.log(`   Edit link (keep private): ${result.editUrl}`);
     if (result.cloneUrl) console.log(`   Clone (keep private):     fossil clone ${result.cloneUrl}`);
-    if (result.expiresAt) console.log(`   Expires:   ${new Date(result.expiresAt).toLocaleString()}`);
+    if (Object.hasOwn(result, 'expiresAt')) console.log(`   Expires:   ${result.expiresAt ? new Date(result.expiresAt).toLocaleString() : 'Never'}`);
   }
   // Clipboard — best-effort; the upload already succeeded
   if (shouldCopy) {
@@ -387,7 +431,7 @@ function output(result, viewerUrl) {
   }
 }
 
-const run = { publish, update, read, history, list, delete: remove, 'new-comment-link': newCommentLink, watch }[command];
+const run = { publish, update, read, history, list, delete: remove, expire, 'new-comment-link': newCommentLink, watch }[command];
 try {
   await run();
 } catch (e) {

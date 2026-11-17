@@ -153,6 +153,23 @@ export async function accountRoutes(req: Request, env: Env): Promise<Response | 
     await r.logout(await sha256hex(sessionToken(req)));
     return json({ ok:true },200,{ 'Set-Cookie':sessionCookie(req,'',true) });
   }
+  // The legacy instance credential already owns artifact content, but has no
+  // account identity. Permit only expiration here, not account management,
+  // sharing, transfers, archive or rename. Edit-link credentials stay excluded.
+  const legacyManage = /^\/api\/artifacts\/([A-Za-z0-9_-]{1,64})\/manage$/.exec(path);
+  if (actor.legacy && legacyManage && method==='PATCH') {
+    const b = await smallBody(req);
+    if (!b) return error('Invalid management request');
+    if (Object.keys(b).length!==1 || !Object.hasOwn(b,'expiresAt')) return error('Instance automation may change only expiresAt',403);
+    const requested = parseExpiration(b.expiresAt,Number.parseInt(env.MAX_TTL_SECONDS,10),Math.floor(Date.now()/1000));
+    if ('error' in requested) return error(requested.error);
+    const id = await r.resolve(legacyManage[1]!);
+    const entry = id ? await r.get(id) : null;
+    if (!id || !entry) return error('Not found',404);
+    const expiration = await env.REPO.getByName(id).setExpiration(requested.expiresAt,'instance-owner',entry.title);
+    if (!expiration.found) return error('Not found',404);
+    return expiration.projected ? json({ ok:true }) : json({ ok:true,expirationPending:true },202);
+  }
   const user = actor.user;
   if (!user) return error('Sign in required',401);
   const admin = user.role==='owner';

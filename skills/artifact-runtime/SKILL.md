@@ -12,7 +12,7 @@ can keep anything. This skill says when to use it, how, and what it cannot do.
 
 Sibling skills: **publish-html-page** (CLI, links, updating, Fossil) and
 **artifact-design** (layout, theme, CSP-safe markup). Load artifact-design too; every
-rule there (no network, no inline handlers, dark mode, 360 px) applies here.
+rule there (external resource loads blocked, no inline handlers, dark mode, 360 px) applies here.
 
 ## 1. Does the page need the runtime at all?
 
@@ -84,7 +84,7 @@ Facts that shape every design:
 | `localStorage`, `sessionStorage`, IndexedDB, cookies | The iframe has an opaque origin; these throw. Keep conveniences in memory; persist through `data` only what everyone should share. |
 | File uploads storage | A file input plus `FileReader` works. If the file is tiny (a few KB of text or JSON), store its text with `data.set`. Anything larger (images, PDFs): ask the owner to add it to the artifact directory and `update` it, then reference it relatively. |
 | Giving the viewer a file (downloads) | `<a download>` and script saves are blocked. Show the generated text in a read-only `<textarea>` with a Copy button; clipboard may be refused, so select the textarea's text as the fallback. |
-| Network (fetch to any host, CDNs, APIs) | Nothing. Ship data inside the artifact or in `data` values the owner seeds. |
+| Network (fetch/XHR to any host, CDNs, APIs) | Nothing: the sandbox CSP blocks these loads. Ordinary links can still navigate out with `target="_blank"`. Ship data inside the artifact or in `data` values the owner seeds. |
 | Camera, microphone, location, clipboard read | Nothing. Offer a text field. |
 | Asking the agent from the page | Not yet (section 7). Say on the page how to reach the owner. |
 
@@ -390,5 +390,5 @@ When woken:
 - [ ] Concurrency considered: per-entry names, or races accepted and stated.
 - [ ] `publish` only on an explicit action; conflict handled without auto-retry.
 - [ ] Polling only while visible, 30 to 60 s, never clobbering an active edit.
-- [ ] No storage APIs, downloads, network, inline handlers or `eval`.
+- [ ] No storage APIs, downloads, fetch/XHR, inline handlers or `eval`.
 - [ ] User-written text is inserted with `textContent`, never `innerHTML`.

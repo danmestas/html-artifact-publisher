@@ -6,7 +6,8 @@ description: Design rules and the page contract for HTML pages published with ht
 # Artifact design
 
 A published page is shown by our viewer inside a sandboxed iframe, under the
-viewer's own 45 px bar, with a strict Content-Security-Policy and no network.
+viewer's toolbar, with a strict Content-Security-Policy blocking external
+resource loads.
 This skill covers what the page must do to render correctly there, and how to
 make it look considered rather than generated. Publishing itself is covered by
 **publish-html-page**; the `window.artifact` API (stored data, history,
@@ -17,9 +18,13 @@ pages that publish themselves) by **artifact-runtime**; diagrams by
 
 Break any of these and the page silently fails for every viewer.
 
-**Everything ships inside the artifact.** The CSP allows no external host:
-no CDN scripts, no Google Fonts, no remote images, no `fetch` to other sites.
-The CLI warns about any `http(s)` URL it finds; treat that warning as an error.
+**Everything ships inside the artifact.** External resource loads are blocked:
+no CDN scripts, no Google Fonts stylesheets or remote fonts, no remote images,
+no `fetch` to other sites. Ordinary navigation links are not resource loads;
+use `target="_blank"` to open them outside the viewer. The CLI warns about
+external HTML/CSS resource references, not links, prose or arbitrary JavaScript
+URL strings. Fix resource warnings before sharing. This is a static preflight,
+not a guarantee about dynamically constructed requests.
 - Scripts and styles: inline `<script>` / `<style>`, or relative files in the
   published directory (`<script src="app.js">`, `<link rel="stylesheet"
   href="site.css">`). The viewer inlines those and adds the CSP nonce.
@@ -113,7 +118,10 @@ The viewer embeds these four itself, and only into pages whose CSS names them:
 Latin-only woff2 subsets, roughly 15–50 KB per face. Italic files ship only if
 the page can show italics, and Plex Mono and Serif bold files only if it shows
 bold. So don't name a family you don't use, and don't add an `@font-face` for
-them. Always give a fallback stack:
+them. These are locally fetched and embedded by the viewer, not downloaded
+from Google Fonts. An absent Google request does not mean a house font failed:
+verify the family's loaded `FontFace` inside the sandboxed frame. Always give a
+fallback stack:
 `font-family: "Instrument Sans", system-ui, -apple-system, "Segoe UI", sans-serif;`
 `font-family: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;`
 

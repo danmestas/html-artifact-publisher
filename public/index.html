@@ -94,7 +94,7 @@
         <button id="page-action" class="primary" hidden></button>
       </header>
       <form id="filters" class="toolbar" role="search">
-        <div class="search"><label id="search-label" class="sr-only" for="search">Search artifacts</label><input id="search" type="search" placeholder="Search artifacts…" maxlength="300" autocomplete="off"></div>
+        <div class="search"><label id="search-label" class="sr-only" for="search">Search artifact titles and page content</label><input id="search" type="search" placeholder="Search titles and page content…" maxlength="300" autocomplete="off"></div>
         <div id="scopes" class="library-scopes" role="group" aria-label="Library scope" hidden>
           <button type="button" data-view="all" data-scope aria-pressed="false">All</button>
           <button type="button" data-view="mine" data-scope aria-pressed="false">Mine</button>
@@ -102,7 +102,7 @@
         </div>
         <button id="archived-link" class="archive-link" type="button" data-view="archived" data-scope aria-pressed="false" hidden>Archived</button>
         <span class="spacer" aria-hidden="true"></span>
-        <div id="sort-slot" class="sort-slot"><label id="sort-field" class="inline-field"><span id="sort-label" class="sr-only">Sort artifacts</span><select id="sort" aria-label="Sort artifacts"><option value="recent">Recently updated</option><option value="name">Name A–Z</option><option value="expiry" hidden>Expires soonest</option></select></label></div>
+        <div id="sort-slot" class="sort-slot"><label id="sort-field" class="inline-field"><span id="sort-label" class="sr-only">Sort artifacts</span><select id="sort" aria-label="Sort artifacts"><option value="recent">Recently updated</option><option value="name">Name A–Z</option><option value="relevance" hidden>Best match</option><option value="expiry" hidden>Expires soonest</option></select></label></div>
         <button id="filter-toggle" class="filter-button" type="button" aria-expanded="false" aria-controls="filter-popover" hidden><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 6h16M7 12h10M10 18h4"/></svg></span>Filters<span id="filter-count" class="filter-count"></span></button>
         <div id="filter-popover" class="filter-popover" role="group" aria-label="Filter inventory" hidden>
           <div class="popover-head"><h2>Filter inventory</h2><button id="popover-close" class="icon-button" type="button" aria-label="Close filters">×</button></div>
@@ -122,6 +122,15 @@
       </form>
       <div id="active-filters" class="active-filters"><div id="filter-chips" class="filter-chips"></div><button id="clear-filters" class="filter-clear" type="button" hidden>Clear filters</button></div>
       <p id="result-status" class="tiny" role="status" aria-live="polite"></p>
+      <p id="search-coverage" class="tiny search-coverage" hidden></p>
+      <details id="search-index-panel" class="search-index-panel" hidden>
+        <summary>Content search index</summary>
+        <div class="search-index-body">
+          <p id="search-index-status" class="tiny" role="status" aria-live="polite">Not started.</p>
+          <button id="search-index-start" type="button">Build content search index</button>
+          <p class="explain">Artifacts published before content search existed are not searched until you build the index. This runs in the background and can be resumed later. It never changes the artifacts themselves.</p>
+        </div>
+      </details>
       <div id="page-error" class="error" role="alert" hidden></div>
       <div id="content"></div>
       <div id="pagination" class="more" hidden><button id="more" type="button">Show more</button><span id="shown" class="tiny" aria-live="polite"></span></div>

@@ -298,6 +298,24 @@ dialog p{max-width:70ch}
 .shelf-meta .artifact-meta{margin:0;display:block;text-overflow:ellipsis;min-width:0}
 .artifact-row .shelf-meta .artifact-meta{display:none}
 .access-badge{font-size:11px;line-height:18px;color:var(--accent);background:var(--wash);border-radius:4px;padding:0 5px;white-space:nowrap;flex-shrink:0}
+/* Search results: an excerpt reads as the page's own words, with the words
+   that matched marked; its caption never competes with the title. */
+.search-excerpt{margin:7px 0 0;font-size:12.5px;line-height:1.5;color:var(--muted);overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.search-excerpt mark{background:var(--wash);color:var(--fg);border-radius:3px;padding:0 1px;font-weight:600}
+.search-path{margin:3px 0 0;color:var(--muted);overflow-wrap:anywhere;white-space:normal;font-variant-numeric:tabular-nums}
+.search-facts{margin:4px 0 0;color:var(--muted);overflow-wrap:anywhere}
+.search-detail{min-width:0;flex-basis:100%}
+.artifact-card .search-detail{padding:0 14px 12px;margin:0}
+.artifact-card .search-excerpt{margin-top:0}
+.search-coverage{margin:0 0 12px;color:var(--muted);max-width:80ch}
+.search-index-panel{margin:0 0 18px;padding:12px 14px;background:var(--panel);border:1px solid var(--line);border-radius:9px;max-width:80ch}
+.search-index-panel summary{font-size:13px;font-weight:600;cursor:pointer;min-height:32px;display:flex;align-items:center}
+.search-index-body{display:grid;gap:10px;padding-top:8px}
+.search-index-body p{margin:0}
+.search-index-body button{justify-self:start}
+.search-index-body .explain{border-top:1px solid var(--line);margin:2px 0 0;padding-top:12px}
+.empty .empty-hint{margin:10px 0 0;padding:0;text-align:center;color:var(--muted)}
+.empty .empty-hint a{display:inline-flex;align-items:center;min-height:32px}
 .artifact-preview iframe{position:absolute;top:0;left:0;width:303.031%;height:303.031%;transform:scale(.33);transform-origin:top left;border:0;pointer-events:none;background:white}
 .inventory-mobile{display:none}
 .expiry-cell{font-variant-numeric:tabular-nums}
@@ -387,6 +405,12 @@ input::placeholder,textarea::placeholder{color:var(--muted);opacity:1}
   .artifact-row>div:first-child{display:block}
   .inventory-head{display:none}
   .inventory-mobile{display:grid;gap:3px;color:var(--muted);font-size:12px;margin-top:6px}
+  .search-excerpt{-webkit-line-clamp:4;font-size:12px}
+  .search-path,.search-facts{font-size:11.5px}
+  .search-coverage{max-width:none}
+  .search-index-panel{max-width:none;padding:10px 12px}
+  .search-index-body button{justify-self:stretch}
+  .empty .empty-hint{padding:0}
   .inventory-expiration{color:var(--accent)}
   .inventory-row .shelf-meta{display:none}
   .record{padding:15px 14px;gap:10px;flex-wrap:wrap}

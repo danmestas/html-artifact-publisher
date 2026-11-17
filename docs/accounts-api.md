@@ -37,17 +37,22 @@ Changing `OWNER_EMAIL` preserves the owner ID and artifact ownership but revokes
 
 | Route | Query | Access |
 | --- | --- | --- |
-| `GET /api/library` | `view=all\|mine\|shared\|starred\|archived`, `q`, `sort=recent\|name`, `cursor`, `limit` | Account's authorized library |
-| `GET /api/admin/artifacts` | `q`, `ownerId`, `status=all\|active\|archived`, `sort=recent\|name\|expiry`, `expiry=all\|soon`, `cursor`, `limit` | Instance owner only |
+| `GET /api/library` | `view=all\|mine\|shared\|starred\|archived`, `q`, `sort=relevance\|recent\|name`, `cursor`, `limit` | Account's authorized library |
+| `GET /api/admin/artifacts` | `q`, `ownerId`, `status=all\|active\|archived`, `sort=relevance\|recent\|name\|expiry`, `expiry=all\|soon`, `cursor`, `limit` | Instance owner only |
+| `GET /api/search` | Same search/filter/cursor fields; optional `scope=inventory`, `artifactId` | Personal credentials: authorized library; legacy instance bearer: inventory; artifact Token: required exact-artifact scope |
 
-Results contain `{artifacts,total,nextCursor}`. Inventory also returns `counts:{all,active,archived}` under the same title, owner and expiration filters. Counts are computed before pagination; status counts are available for the status tabs. `limit` defaults to 25 and is bounded to 1–100. Treat `nextCursor` as opaque and reuse it only with the same query and ordering.
+See [Content search](search-api.md) for remote-agent CLI/HTTPS examples, credential boundaries, snippets, coverage and resumable backfill.
+
+Results contain `{artifacts,total,nextCursor,searchCoverage}`. Inventory also returns `counts:{all,active,archived}` under the same search, owner and expiration filters. Counts are computed before pagination; status counts are available for the status tabs. `limit` defaults to 25 and is bounded to 1–100. Treat `nextCursor` as opaque and reuse it only with the same query and ordering.
 
 Each artifact includes `id`, `title`, `ownerId`, `ownerName`, `updatedAt`, `createdAt`, `expiresAt`, `viewerUrl`, `permission`, `canManage`, `archived`, `starred`, `visibility` and `accessLabel`.
 
 - Recent order is updated time descending with a stable ID tie-breaker.
 - Name order uses SQLite's ASCII NOCASE ordering, not locale-specific Unicode collation.
 - Expiry order puts finite deadlines first, earliest first with ID ties; never expires comes last. This ordering is admin-only.
-- `expiry=soon` selects live deadlines within the next seven days, inclusive, combined with owner, title and status filters.
+- `expiry=soon` selects live deadlines within the next seven days, inclusive, combined with owner, search and status filters.
+- With a non-empty `q`, the default is relevance. Current titles and server-extracted current HTML are searched; complete term matches precede explicitly labelled partial matches. Returned excerpts are plain text with UTF-16 match ranges, never HTML. Historical versions, script execution, private discussion/profile fields and PDF/OCR are outside scope.
+- `searchCoverage` counts complete/partial/pending/error/unsupported artifacts in the authorized view before `q`. It does not count inaccessible artifacts. A stale known-version body is not used; its current title can still match while projection is pending. Existing artifacts require explicit owner-controlled backfill; a query does not start one.
 - Default library views exclude archived work; the Archived view uses the same permission checks. Expired listings are excluded, not retained as a restorable library.
 
 `GET /p/:id` serves an authorized, private/no-store static preview with restrictive response and iframe sandboxes. It does not execute artifact scripts or fetch external resources. Unsupported or oversized entries show a fallback; the interactive viewer remains authoritative.

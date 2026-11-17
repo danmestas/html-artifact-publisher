@@ -1,4 +1,5 @@
 import type { Account } from './registry';
+import { searchTerms } from './search';
 import type { Caller } from './repo';
 import { ACTIVITY_KINDS, LOGIN_TTL, LOGIN_CODE_TTL, SESSION_TTL, REMEMBERED_SESSION_TTL, parseExpiration } from './registry';
 import { safeReturnTo } from '../public/auth-return.js';
@@ -107,12 +108,87 @@ function sessionCookie(req: Request, token: string, clear = false, rememberDevic
 }
 const limitOf = (url: URL) => Math.min(100,Math.max(1,Number.parseInt(url.searchParams.get('limit') ?? '25',10)||25));
 
+async function libraryResults(req: Request, env: Env, user: Account | null, admin: boolean, scope: { artifactId?:string; artifactPermission?:'read' | 'comment' | 'write'; credentialKey?:string } = {}): Promise<Response> {
+  const url = new URL(req.url);
+  const view = url.searchParams.get('view') ?? 'all', status = url.searchParams.get('status') ?? 'all';
+  if (!['all','mine','shared','starred','archived'].includes(view) || !['all','active','archived'].includes(status)) return error('Invalid filter');
+  let cursor = url.searchParams.get('cursor') ?? '';
+  const q = (url.searchParams.get('q') ?? '').slice(0,300).trim();
+  if (searchTerms(q).length > 12) return error('Search supports at most 12 terms');
+  const sort = url.searchParams.get('sort') ?? (q ? 'relevance' : 'recent');
+  if (sort !== 'recent' && sort !== 'name' && sort !== 'relevance' && !(admin && sort === 'expiry')) return error('Invalid sort');
+  const expiry = url.searchParams.get('expiry') ?? 'all';
+  if (expiry !== 'all' && expiry !== 'soon') return error('Invalid expiry');
+  if (!admin && expiry !== 'all') return error('Invalid expiry');
+  if (sort === 'relevance' && !q) return error('Relevance requires a search');
+  const ownerId = (url.searchParams.get('ownerId') ?? '').slice(0,64);
+  const queryKey = q ? await sha256hex(JSON.stringify([searchTerms(q),sort,admin,view,status,expiry,ownerId,user?.id ?? scope.credentialKey ?? 'instance',scope.artifactId ?? ''])) : '';
+  if (cursor && q) {
+    try {
+      const wrapped = JSON.parse(cursor);
+      if (!Array.isArray(wrapped) || wrapped.length !== 3 || wrapped[0] !== 'search' || wrapped[1] !== queryKey || typeof wrapped[2] !== 'string') return error('Invalid cursor');
+      cursor = wrapped[2];
+    } catch { return error('Invalid cursor'); }
+  }
+  if (cursor) {
+    try {
+      const v: unknown = JSON.parse(cursor);
+      if (!Array.isArray(v) || (sort === 'relevance'
+        ? v.length !== 4 || v[0] !== 'relevance' || !Number.isSafeInteger(v[1]) || v[1] < 0 || v[1] > 12120 || !Number.isSafeInteger(v[2]) || v[2] < 0
+        : sort === 'name'
+          ? v.length !== 3 || v[0] !== 'name' || typeof v[1] !== 'string' || v[1].length > 300
+          : sort === 'expiry'
+            ? v.length !== 3 || v[0] !== 'expiry' || !(v[1] === null || (Number.isSafeInteger(v[1]) && (v[1] as number) >= 0))
+            : v.length !== 2 || !Number.isSafeInteger(v[0]) || v[0] < 0)
+        || typeof v.at(-1) !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(v.at(-1))) return error('Invalid cursor');
+    } catch { return error('Invalid cursor'); }
+  }
+  const result = await registry(env).library(user,{admin,view,status,cursor,sort,expiry,q,ownerId,limit:limitOf(url),...scope});
+  const artifacts = result.artifacts.map(e => {
+    const document = {id:e.id,slug:e.slug,title:e.title,tip:e.tip,icon:e.icon,searchIndex:e.searchIndex,...(e.search ? {search:e.search} : {}),
+      createdAt:isoOrNull(e.createdAt),updatedAt:isoOrNull(e.updatedAt),expiresAt:isoOrNull(e.expiresAt),viewerUrl:`${url.origin}/v/${e.slug ?? e.id}`};
+    return scope.artifactPermission ? {...document,permission:scope.artifactPermission,canManage:false} : {...e,...document};
+  });
+  return json({...result,artifacts,nextCursor:result.nextCursor && q ? JSON.stringify(['search',queryKey,result.nextCursor]) : result.nextCursor});
+}
+
 /** Account routes; null leaves the existing artifact/sync API in charge. */
 export async function accountRoutes(req: Request, env: Env): Promise<Response | null> {
   const url = new URL(req.url), path = url.pathname, method = req.method;
-  if (!/^\/api\/(session$|auth\/|library$|admin\/|people(?:\/|$)|invitations$|credentials(?:\/|$)|artifacts\/[^/]+\/(sharing|manage|star|expiration-state)$)/.test(path)) return null;
+  if (!/^\/api\/(session$|auth\/|library$|search$|admin\/|people(?:\/|$)|invitations$|credentials(?:\/|$)|artifacts\/[^/]+\/(sharing|manage|star|expiration-state)$)/.test(path)) return null;
   const r = registry(env); const actor = await identity(req,env);
   if (path==='/api/session' && method==='GET') return json({ user:actor.user ? publicUser(actor.user) : null });
+  if (path==='/api/search') {
+    if (method!=='GET') return error('Method not allowed',405);
+    const authorization = req.headers.get('Authorization') ?? '';
+    if (authorization.startsWith('Token ')) {
+      const key = url.searchParams.get('artifactId') ?? '';
+      if (!/^[A-Za-z0-9_-]{1,64}$/.test(key)) return error('Artifact Token search requires artifactId');
+      const artifactId = await r.resolve(key);
+      if (!artifactId) return error('Not found',404);
+      const token = authorization.slice(6).trim();
+      const permission = await env.REPO.getByName(artifactId).role({owner:false,token});
+      if (!permission) return error('Not found',404);
+      if ((url.searchParams.has('scope') && url.searchParams.get('scope') !== 'library')
+        || ['ownerId','status','expiry'].some(name => url.searchParams.has(name))
+        || !['all','archived'].includes(url.searchParams.get('view') ?? 'all')) return error('Artifact Token search is limited to one artifact',403);
+      return libraryResults(req,env,null,false,{artifactId,artifactPermission:permission,credentialKey:await sha256hex(token)});
+    }
+    if (!actor.legacy && !actor.user) return error('Sign in required',401);
+    const scope = url.searchParams.get('scope') ?? (actor.legacy ? 'inventory' : 'library');
+    if (scope !== 'library' && scope !== 'inventory') return error('Invalid scope');
+    if (scope === 'inventory' && !actor.legacy && actor.user?.role !== 'owner') return error('Instance owner required',403);
+    if (actor.legacy && scope !== 'inventory') return error('Instance access requires inventory scope');
+    if (scope !== 'inventory' && (url.searchParams.has('ownerId') || url.searchParams.has('status') || url.searchParams.has('expiry'))) return error('Inventory filters require inventory scope',403);
+    const key = url.searchParams.get('artifactId');
+    let artifactId: string | undefined;
+    if (key !== null) {
+      if (!/^[A-Za-z0-9_-]{1,64}$/.test(key)) return error('Not found',404);
+      artifactId = await r.resolve(key) ?? undefined;
+      if (!artifactId || (actor.user && !await r.permission(artifactId,actor.user))) return error('Not found',404);
+    }
+    return libraryResults(req,env,actor.user,scope === 'inventory',{artifactId});
+  }
   if (path==='/api/auth/request' && method==='POST') {
     const b = await smallBody(req); const address = email(b?.email);
     if (b?.challenge !== undefined && (typeof b.challenge !== 'string' || !/^[a-f0-9]{64}$/.test(b.challenge))) return error('Invalid sign-in challenge');
@@ -180,32 +256,15 @@ export async function accountRoutes(req: Request, env: Env): Promise<Response | 
   if (path.startsWith('/api/admin/') || path.startsWith('/api/people') || path==='/api/invitations') {
     if (!admin) return error('Instance owner required',403);
   }
-  if ((path==='/api/library' || path==='/api/admin/artifacts') && method==='GET') {
-    const admin = path==='/api/admin/artifacts';
-    const view = url.searchParams.get('view') ?? 'all', status = url.searchParams.get('status') ?? 'all';
-    if (!['all','mine','shared','starred','archived'].includes(view) || !['all','active','archived'].includes(status)) return error('Invalid filter');
-    const cursor = url.searchParams.get('cursor') ?? '';
-    const sort = url.searchParams.get('sort') ?? 'recent';
-    // Expiry ordering and the upcoming-deadline filter are the admin
-    // workspace's; a member's library keeps its recent and name contracts.
-    if (sort !== 'recent' && sort !== 'name' && !(admin && sort === 'expiry')) return error('Invalid sort');
-    const expiry = url.searchParams.get('expiry') ?? 'all';
-    if (expiry !== 'all' && expiry !== 'soon') return error('Invalid expiry');
-    if (!admin && expiry !== 'all') return error('Invalid expiry');
-    if (cursor) {
-      try {
-        const v: unknown = JSON.parse(cursor);
-        if (!Array.isArray(v) || (sort === 'name'
-          ? v.length !== 3 || v[0] !== 'name' || typeof v[1] !== 'string' || v[1].length > 300
-          : sort === 'expiry'
-            ? v.length !== 3 || v[0] !== 'expiry' || !(v[1] === null || (Number.isSafeInteger(v[1]) && (v[1] as number) >= 0))
-            : v.length !== 2 || !Number.isSafeInteger(v[0]) || v[0] < 0)
-          || typeof v.at(-1) !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(v.at(-1))) return error('Invalid cursor');
-      } catch { return error('Invalid cursor'); }
+  if (path==='/api/admin/search-index') {
+    if (method==='GET') return json(await r.searchBackfillStatus());
+    if (method==='POST') {
+      const input = await smallBody(req);
+      if (!input || Object.keys(input).length) return error('Expected an empty object');
+      return json(await r.startSearchBackfill(),202);
     }
-    const result = await r.library(user,{ admin,view,status,cursor,sort,expiry, q:(url.searchParams.get('q') ?? '').slice(0,300),ownerId:(url.searchParams.get('ownerId') ?? '').slice(0,64),limit:limitOf(url) });
-    return json({ ...result,artifacts:result.artifacts.map(e => ({ ...e,createdAt:isoOrNull(e.createdAt),updatedAt:isoOrNull(e.updatedAt),expiresAt:isoOrNull(e.expiresAt),viewerUrl:`${url.origin}/v/${e.slug ?? e.id}` })) });
   }
+  if ((path==='/api/library' || path==='/api/admin/artifacts') && method==='GET') return libraryResults(req,env,user,path==='/api/admin/artifacts');
   if (path==='/api/people' && method==='GET') {
     // Counts come from one grouped pass, not a query per person.
     const counts = await r.artifactCounts();

@@ -562,6 +562,9 @@ async function handleCreate(req: Request, env: Env): Promise<Response> {
   if (!(await registry(env).add({ id, slug: b.slug ?? null, title, createdAt: now, updatedAt: now, expiresAt, tip: '', ownerId: actor.user?.id ?? 'instance-owner', icon: b.icon ?? 'document' }))) {
     return json({ error: 'Slug already in use' }, 409);
   }
+  // The Repo indexes only blobs already authorized for this artifact. Retain
+  // the validated references before its first persisted snapshot is indexed.
+  const referenced = await registry(env).refBlobs(id, shas);
   const r = await repo(env, id).create({
     id, title, expiresAt, readToken, writeToken,
     user: String(b.user ?? 'owner').slice(0, 64), message: String(b.message ?? 'Publish').slice(0, 1000), files: b.files,
@@ -571,7 +574,7 @@ async function handleCreate(req: Request, env: Env): Promise<Response> {
     return reply(r);
   }
   await registry(env).touch(id, r.result.tip);
-  await registry(env).consumeUploads(principal(actor), await registry(env).refBlobs(id, shas));
+  await registry(env).consumeUploads(principal(actor), referenced);
   await registry(env).audit(actor.user?.id ?? 'instance-owner', 'publish', id, title);
 
   const origin = new URL(req.url).origin;

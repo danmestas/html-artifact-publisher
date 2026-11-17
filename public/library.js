@@ -2,6 +2,10 @@ import { encodeFiles, readFileList, withBlobs } from './client.js';
 import { isBlob } from './blobs.js';
 import { iconSvg, resolveIcon } from './icons.js';
 import { safeReturnTo } from './auth-return.js';
+import {
+  snippetParts, snippetPath, matchReason, termsNote, statusNote, coverageNote,
+  readSort, readSortState, sortAfterQuery, urlSort,
+} from './library-search.js';
 
 const $ = id => document.getElementById(id);
 const BATCH = 12;          // artifacts and publications load this many at a time: divides evenly at 4, 3 and 2 columns
@@ -64,10 +68,23 @@ function readState() {
     expiry: view === 'admin' && p.get('expiry') === 'soon' ? 'soon' : 'all',
     kind: view === 'activity' && Object.hasOwn(KIND_LABELS, p.get('kind')) ? p.get('kind') : 'all',
     n: Number.isSafeInteger(n) && n > batch ? Math.min(n, 480) : batch,
-    sort: p.get('sort') === 'name' ? 'name' : view === 'admin' && p.get('sort') === 'expiry' ? 'expiry' : 'recent',
+    // Relevance is a library/inventory ordering; every other view keeps its own.
+    sort: LIBRARY_VIEWS.includes(view) || view === 'admin' ? readSort(p, view === 'admin') : 'recent',
   };
 }
+// The sort and whether the reader chose it, for the current URL and view.
+// The chosen flag is what keeps a default recent from being mistaken for a
+// choice when a first query would otherwise switch to relevance.
+function currentSortState() {
+  const view = state.view;
+  const sortable = LIBRARY_VIEWS.includes(view) || view === 'admin';
+  const deck = readSortState(new URLSearchParams(location.search), view === 'admin');
+  return sortable ? deck : { sort: 'recent', chosen: false };
+}
 let state = readState();
+// A recent or name order the reader picked is kept when a query starts or is
+// cleared; the default that merely accompanied the previous query is not.
+let sortChosen = currentSortState().chosen;
 
 // A mail scanner must never consume a link. Keep its token only in this page's
 // memory and remove the fragment before making any network request.
@@ -217,6 +234,8 @@ function resetAccountCaches() {
   $('clear-filters').hidden = true;
   $('filter-count').textContent = '';
   $('filter-count').hidden = true;
+  renderCoverage(null);
+  hideSearchIndexPanel();
   renderRecent();
 }
 function adoptAccount(nextUser) {
@@ -446,7 +465,14 @@ function writeUrl(replace = false) {
   }
   if (state.view === 'activity' && state.kind !== 'all') p.set('kind', state.kind);
   if (state.n > (state.view === 'activity' ? EVENT_BATCH : BATCH)) p.set('n', String(state.n));
-  if (state.sort === 'name' || (state.view === 'admin' && state.sort === 'expiry')) p.set('sort', state.sort);
+  // What the URL must record. Relevance is the default under a query and recent
+  // is the default without one, so an explicit recent needs writing when a
+  // query is present; otherwise Back and reload would flip it to relevance. A
+  // recent the reader chose is written even without a query, so a reload keeps
+  // the choice and the next query treats it as chosen.
+  const sortable = LIBRARY_VIEWS.includes(state.view) || state.view === 'admin';
+  const sort = sortable ? urlSort(state.sort, state.q, sortChosen) : null;
+  if (sort) p.set('sort', sort);
   history[replace ? 'replaceState' : 'pushState'](null, '', '/' + (p.size ? '?' + p : ''));
   refreshViewerLinks();
 }
@@ -461,11 +487,16 @@ $('nav-toggle').addEventListener('click', () => {
   $('nav-toggle').setAttribute('aria-expanded', String(expanded));
 });
 function resetPagination() { state.n = state.view === 'activity' ? EVENT_BATCH : BATCH; nextCursor = null; shownCount = 0; }
+// A new view, scope, filter or Back/Forward restates the sort from its URL, so
+// a choice made in one view is neither carried into nor misread in another.
+function syncSortChosen() { sortChosen = currentSortState().chosen; }
 function navigate(view) {
   clearTimeout(searchTimer);
-  state = { view, q: '', ownerId: '', status: 'all', expiry: 'all', kind: 'all', n: BATCH, sort: view !== 'admin' && state.sort === 'expiry' ? 'recent' : state.sort };
+  const sort = view !== 'admin' && state.sort === 'expiry' ? 'recent' : state.sort;
+  state = { view, q: '', ownerId: '', status: 'all', expiry: 'all', kind: 'all', n: BATCH, sort: sortAfterQuery(sort, 'q', '', sortChosen) };
   resetPagination();
   writeUrl();
+  syncSortChosen();
   closeNavigation();
   loadPage();
   $('main').focus();
@@ -479,6 +510,7 @@ function setScope(view) {
   if (view !== 'admin' && state.sort === 'expiry') state.sort = 'recent';
   resetPagination();
   writeUrl();
+  syncSortChosen();
   closeNavigation();
   loadPage();
   $('main').focus();
@@ -489,6 +521,7 @@ document.querySelectorAll('[data-view]').forEach(b => {
 });
 window.addEventListener('popstate', () => {
   state = readState();
+  syncSortChosen();
   if (user) loadPage();
 });
 // The Filters control is progressive disclosure: owner/status/expiry/sort live
@@ -526,7 +559,15 @@ if ($('filter-toggle')) $('filter-toggle').addEventListener('click', () => { if 
 if ($('popover-close')) $('popover-close').addEventListener('click', () => { closeFilters(); filterFocus().focus(); });
 if ($('popover-done')) $('popover-done').addEventListener('click', () => { closeFilters(); filterFocus().focus(); });
 function search() {
+  const previous = state.q;
   state.q = $('search').value;
+  // Typing a query where there was none keeps a sort the reader chose;
+  // clearing the query returns the relevance default to recent.
+  if (LIBRARY_VIEWS.includes(state.view) || state.view === 'admin') {
+    const previousSort = state.sort;
+    state.sort = sortAfterQuery(state.sort, previous, state.q, sortChosen);
+    if (state.sort !== previousSort) sortChosen = false;
+  }
   resetPagination();
   writeUrl(true);
   loadPage();
@@ -535,6 +576,8 @@ $('search').addEventListener('input', () => { clearTimeout(searchTimer); searchT
 $('filters').addEventListener('submit', e => { e.preventDefault(); clearTimeout(searchTimer); search(); });
 $('sort').addEventListener('change', () => {
   state.sort = $('sort').value;
+  // The reader just picked one; keep it across later query edits.
+  sortChosen = true;
   resetPagination(); writeUrl(); loadPage();
 });
 $('owner-filter').addEventListener('change', () => {
@@ -547,9 +590,14 @@ $('expiry-filter').addEventListener('change', () => {
 });
 function clearFilters() {
   clearTimeout(searchTimer);
+  const previous = state.q;
   state.q = ''; state.ownerId = ''; state.status = 'all'; state.expiry = 'all'; state.kind = 'all';
   // Expiry ordering is presented as a removable filter; clearing must remove it.
   if (state.sort === 'expiry') state.sort = 'recent';
+  if (LIBRARY_VIEWS.includes(state.view) || state.view === 'admin') {
+    state.sort = sortAfterQuery(state.sort, previous, '', sortChosen);
+    sortChosen = false;
+  }
   resetPagination(); writeUrl(); loadPage();
 }
 $('clear-filters').addEventListener('click', clearFilters);
@@ -565,6 +613,107 @@ function renderStatusCounts(counts) {
     b.querySelector('small').textContent = Number.isFinite(n) ? String(n) : '';
   });
 }
+// Said only when the index cannot answer the whole question, and said even
+// when a search returns no rows: an empty result is not proof of absence.
+function renderCoverage(coverage) {
+  const note = coverageNote(coverage);
+  $('search-coverage').textContent = note;
+  $('search-coverage').hidden = !note;
+}
+
+// Building the content index is an explicit owner action on the inventory.
+// Nothing here runs on page load: the status is read only when the owner opens
+// this panel, a build starts only from its button, and polling stops as soon
+// as the panel closes, the view changes, or the account does. No state is
+// stored in the browser.
+let searchIndexTimer;
+let searchIndexRequest = 0;
+const searchIndexPanelOpen = () => user?.role === 'owner' && state.view === 'admin' && $('search-index-panel').open;
+function hideSearchIndexPanel() {
+  stopSearchIndexPolling();
+  $('search-index-panel').hidden = true;
+  $('search-index-panel').open = false;
+}
+function stopSearchIndexPolling() {
+  clearTimeout(searchIndexTimer);
+  searchIndexTimer = undefined;
+  ++searchIndexRequest;
+}
+function setSearchIndexStatus(text) {
+  $('search-index-status').textContent = text;
+}
+function searchIndexProgress(status) {
+  const processed = Number(status?.processed) || 0;
+  const remaining = Number(status?.remaining) || 0;
+  const failed = Number(status?.failed) || 0;
+  const total = processed + remaining + failed;
+  if (status?.status === 'running') return `Building: ${processed} of ${total} done${failed ? `, ${failed} failed` : ''}. You can leave this page; the work continues.`;
+  if (status?.status === 'complete') return `Complete: ${processed} artifact${processed === 1 ? '' : 's'} indexed.`;
+  if (status?.status === 'error') return `${failed} artifact${failed === 1 ? '' : 's'} could not be indexed. Start again to retry ${failed === 1 ? 'it' : 'them'}.`;
+  return 'Not started. Artifacts published before content search existed are not searched until the index is built.';
+}
+// Read the progress the owner may see. A failed read leaves the last line in
+// place rather than claiming a state the server did not confirm.
+async function readSearchIndexStatus() {
+  if (!searchIndexPanelOpen()) return null;
+  const request = ++searchIndexRequest;
+  const epoch = accountEpoch;
+  const current = () => epoch === accountEpoch && request === searchIndexRequest && searchIndexPanelOpen();
+  let status;
+  try { status = await api('/api/admin/search-index'); }
+  catch (err) { if (!current()) return null; throw err; }
+  if (!current()) return null;
+  setSearchIndexStatus(searchIndexProgress(status));
+  $('search-index-start').textContent = status?.status === 'running' ? 'Build in progress' : status?.status === 'complete' ? 'Build again' : status?.status === 'error' ? 'Start again' : 'Build content search index';
+  $('search-index-start').disabled = status?.status === 'running';
+  return status;
+}
+// Poll only while the panel is open and a build is running. Each poll waits
+// for its own answer before scheduling the next, so a slow server never stacks
+// requests; the interval is deliberately unhurried.
+function scheduleSearchIndexPoll() {
+  clearTimeout(searchIndexTimer);
+  searchIndexTimer = setTimeout(async () => {
+    if (!searchIndexPanelOpen()) return;
+    try {
+      const status = await readSearchIndexStatus();
+      if (!status) return;
+      if (status.status === 'running') scheduleSearchIndexPoll(); else stopSearchIndexPolling();
+    } catch { stopSearchIndexPolling(); }
+  }, 4000);
+}
+async function showSearchIndexPanel() {
+  if (user?.role !== 'owner' || state.view !== 'admin') return;
+  stopSearchIndexPolling();
+  try {
+    const status = await readSearchIndexStatus();
+    if (status?.status === 'running') scheduleSearchIndexPoll();
+  } catch (err) { setSearchIndexStatus(`Could not read the index status. ${err.message}`); }
+}
+$('search-index-panel')?.addEventListener('toggle', () => {
+  if (searchIndexPanelOpen()) showSearchIndexPanel();
+  else stopSearchIndexPolling();
+});
+$('search-index-start')?.addEventListener('click', async () => {
+  if (!searchIndexPanelOpen()) return;
+  stopSearchIndexPolling();
+  const epoch = accountEpoch;
+  const request = ++searchIndexRequest;
+  const current = () => epoch === accountEpoch && request === searchIndexRequest && searchIndexPanelOpen();
+  $('search-index-start').disabled = true;
+  try {
+    const status = await api('/api/admin/search-index', { method: 'POST', body: {} });
+    if (!current()) return;
+    setSearchIndexStatus(searchIndexProgress(status));
+    $('search-index-start').textContent = 'Build in progress';
+    scheduleSearchIndexPoll();
+  } catch (err) {
+    if (!current()) return;
+    setSearchIndexStatus(`Could not start the build. ${err.message}`);
+    $('search-index-start').disabled = false;
+  }
+});
+
 document.querySelectorAll('[data-layout]').forEach(b => b.addEventListener('click', () => {
   layout = b.dataset.layout;
   preferences.layout = layout;
@@ -645,12 +794,17 @@ function renderActiveFilters() {
 }
 function removeFilter(key) {
   clearTimeout(searchTimer);
+  const previous = state.q;
   if (key === 'q') { state.q = ''; $('search').value = ''; }
   if (key === 'ownerId') { state.ownerId = ''; $('owner-filter').value = ''; }
   if (key === 'status') { state.status = 'all'; }
   if (key === 'expiry') { state.expiry = 'all'; $('expiry-filter').value = 'all'; }
-  if (key === 'sort') { state.sort = 'recent'; $('sort').value = 'recent'; }
+  if (key === 'sort') { state.sort = 'recent'; $('sort').value = 'recent'; sortChosen = false; }
   if (key === 'kind') state.kind = 'all';
+  if (key === 'q' && (LIBRARY_VIEWS.includes(state.view) || state.view === 'admin')) {
+    state.sort = sortAfterQuery(state.sort, previous, state.q, sortChosen);
+    if (!state.q) sortChosen = false;
+  }
   resetPagination(); writeUrl(); loadPage();
 }
 
@@ -702,6 +856,13 @@ async function showApp() {
 function empty(title, text) {
   return node('div', { className: 'empty' }, node('h2', { textContent: title }), node('p', { textContent: text }));
 }
+// Points a search at Archived without assuming the reader may open it there:
+// the link is a navigation, not a claim about what it will find.
+function searchEmptyNote() {
+  const link = node('a', { href: '/?view=archived', textContent: 'Search archived work' });
+  link.addEventListener('click', e => { e.preventDefault(); setScope('archived'); });
+  return node('p', { className: 'empty-hint' }, 'Archived artifacts are searched separately. ', link);
+}
 async function loadPeople() {
   const epoch = accountEpoch;
   const data = await api('/api/people');
@@ -720,6 +881,7 @@ async function loadPage() {
   if (ADMIN_VIEWS.includes(state.view) && user.role !== 'owner') {
     state = { ...state, view: 'all', ownerId: '', status: 'all', expiry: 'all', kind: 'all', sort: state.sort === 'expiry' ? 'recent' : state.sort };
     resetPagination(); writeUrl(true);
+    syncSortChosen();
   }
   const seq = ++loadSequence;
   const view = state.view;
@@ -747,7 +909,8 @@ async function loadPage() {
   // The library's search stays a plain, labeled field; people/activity keep a
   // visible label once a search is in play.
   $('search-label').className = library && !searchFilled ? 'sr-only' : 'search-label';
-  $('search').placeholder = view === 'people' ? 'Name or email…' : view === 'activity' ? 'Person, artifact or ID…' : 'Search artifacts…';
+  $('search-label').textContent = library ? 'Search artifacts by title and page content' : searchLabel;
+  $('search').placeholder = view === 'people' ? 'Name or email…' : view === 'activity' ? 'Person, artifact or ID…' : 'Search titles and page content…';
   $('scopes').hidden = !library;
   // Archived stays one click away from the library without becoming a sixth peer.
   $('archived-link').hidden = !LIBRARY_NAV_VIEWS.includes(view);
@@ -763,11 +926,22 @@ async function loadPage() {
   $('expiry-filter').hidden = !inventory;
   $('sort').querySelector('[value="expiry"]').hidden = !inventory;
   $('sort').querySelector('[value="expiry"]').disabled = !inventory;
+  // Best match is only meaningful while a query is present, and only in the
+  // library and inventory. Other views keep their own ordering.
+  const relevance = $('sort').querySelector('[value="relevance"]');
+  relevance.hidden = !searchFilled || (!library && !inventory);
+  relevance.disabled = relevance.hidden;
+  if (relevance.hidden && state.sort === 'relevance') state.sort = 'recent';
   if (!inventory) closeFilters();
   $('expiry-filter').value = state.expiry;
   renderActiveFilters();
   $('inventory-note').hidden = !inventory;
   $('inventory-note').textContent = `Expiration permanently deletes private content and history. Public copies remain until unpublished. Times shown in ${timeZoneName()}.`;
+  // The content index belongs to the owner's inventory. Leaving it stops any
+  // progress polling and forgets the last line; reopening reads afresh.
+  const ownerInventory = inventory && user?.role === 'owner';
+  if (!ownerInventory) hideSearchIndexPanel();
+  else $('search-index-panel').hidden = false;
   $('privacy-note').hidden = !library && !inventory;
   clearPreviews();
   $('sort').value = state.sort;
@@ -788,6 +962,7 @@ async function loadPage() {
   if (!hadContent) $('content').replaceChildren(node('div', { className: 'loading', textContent: `Loading ${inventory ? 'the instance inventory' : view === 'people' ? 'people and invitations' : view === 'activity' ? 'activity' : view === 'credentials' ? 'credentials' : view === 'publications' ? 'published links' : 'your work'}…` }));
   else $('content').classList.add('is-refreshing');
   try {
+    if (!(library || inventory)) { renderCoverage(null); hideSearchIndexPanel(); }
     if (library || inventory) {
       if (inventory) {
         const users = await loadPeople();
@@ -797,17 +972,25 @@ async function loadPage() {
         $('owner-filter').value = state.ownerId;
       }
       // A linked or returned-to URL says how many rows were shown: load that many, in requests of up to 100.
-      const items = []; let total = 0; let counts = null; let cursor = '';
+      // The top-level coverage counts describe the whole authorized set before
+      // any q, so they are kept from the first page only.
+      const items = []; let total = 0; let counts = null; let cursor = ''; let coverage;
       do {
         const p = new URLSearchParams({ q: state.q, limit: String(Math.min(100, state.n - items.length)), sort: state.sort });
         if (cursor) p.set('cursor', cursor);
         if (inventory) { p.set('status', state.status); if (state.ownerId) p.set('ownerId', state.ownerId); if (state.expiry === 'soon') p.set('expiry', 'soon'); } else p.set('view', view);
         const data = await api(`${inventory ? '/api/admin/artifacts' : '/api/library'}?${p}`);
         if (seq !== loadSequence) return;
-        items.push(...data.artifacts); total = data.total; counts = data.counts ?? counts; cursor = data.nextCursor;
+        items.push(...data.artifacts); total = data.total; counts = data.counts ?? counts;
+        coverage = coverage ?? data.searchCoverage;
+        cursor = data.nextCursor;
       } while (cursor && items.length < state.n);
       renderArtifacts(items, inventory);
       renderActiveFilters();
+      // Coverage describes how well a search can answer, so it belongs beside
+      // a query, including one that returns no rows; the plain shelf says
+      // nothing about it.
+      renderCoverage(state.q.trim() ? coverage : null);
       if (inventory) renderStatusCounts(counts);
       else {
         // Recent is its own chronological collection, not the first results of
@@ -817,7 +1000,7 @@ async function loadPage() {
       }
       nextCursor = cursor; shownCount = items.length; state.n = Math.max(BATCH, items.length);
       moreStatus(shownCount, total, 'artifact');
-      $('result-status').textContent = `${total} artifact${total === 1 ? '' : 's'} · ${state.sort === 'expiry' ? 'Expires soonest · never last' : state.sort === 'name' ? 'Name A–Z' : 'Recently updated first'}`;
+      $('result-status').textContent = `${total} artifact${total === 1 ? '' : 's'} · ${state.sort === 'expiry' ? 'Expires soonest · never last' : state.sort === 'name' ? 'Name A–Z' : state.sort === 'relevance' ? 'Best match first' : 'Recently updated first'}`;
     } else if (view === 'publications') {
       const data = await api('/api/publications');
       if (seq !== loadSequence) return;
@@ -853,6 +1036,8 @@ async function loadPage() {
     $('content').classList.remove('is-refreshing');
     $('content').replaceChildren(button('Try again', loadPage));
     $('result-status').textContent = 'Could not load this page.';
+    // Counts from a failed or superseded load say nothing about this view.
+    renderCoverage(null);
     message('page-error', err.message);
   } finally {
     if (seq === loadSequence) {
@@ -971,8 +1156,14 @@ function renderArtifacts(items, inventory, append = false) {
   }
   if (!items.length) {
     const filtered = !!state.q || (inventory && (!!state.ownerId || state.status !== 'all' || state.expiry === 'soon')) || (state.view === 'activity' && state.kind !== 'all');
-    $('content').replaceChildren(empty(filtered ? 'No matching artifacts' : inventory ? 'No artifacts in this instance' : state.view === 'starred' ? 'Keep your favorites close' : 'Your shelf is ready',
-      filtered ? 'Try a different search or clear your filters.' : inventory ? 'Artifacts published by members appear here, including private and archived work. Expired content is permanently deleted.' : state.view === 'starred' ? 'Open an artifact’s menu and choose Star artifact.' : 'Publish an HTML page and the files it uses, or find work shared with you here.'));
+    // An empty search names the scope it searched and points at Archived, but
+    // never claims a count of work the reader cannot see.
+    const searchEmpty = !!state.q && !inventory;
+    const scope = { mine: 'Created by me', shared: 'Shared with me', starred: 'Starred', archived: 'Archived' }[state.view] || 'every artifact you can open';
+    const emptyBlock = empty(filtered ? 'No matching artifacts' : inventory ? 'No artifacts in this instance' : state.view === 'starred' ? 'Keep your favorites close' : 'Your shelf is ready',
+      filtered ? (searchEmpty ? `Nothing in ${scope} matched. Search looks at titles and page content${state.view === 'archived' ? '.' : '; archived work is searched in Archived.'}` : 'Try a different search or clear your filters.') : inventory ? 'Artifacts published by members appear here, including private and archived work. Expired content is permanently deleted.' : state.view === 'starred' ? 'Open an artifact’s menu and choose Star artifact.' : 'Publish an HTML page and the files it uses, or find work shared with you here.');
+    $('content').replaceChildren(emptyBlock);
+    if (searchEmpty && state.view !== 'archived') emptyBlock.append(searchEmptyNote());
     return;
   }
   const grid = !inventory && layout === 'grid';
@@ -986,6 +1177,31 @@ function expirationSummary(item, prefix = true) {
   if (!item.expiresAt) return 'Never expires';
   if (new Date(item.expiresAt).getTime() <= Date.now()) return 'Expired — refresh to update';
   return `${prefix ? 'Expires ' : ''}${dateTimeText(item.expiresAt)}`;
+}
+// A search hit's excerpt, reason, and any index caveat, rendered only from
+// text nodes. Nothing from the page source is ever interpreted as HTML.
+function searchDetailFor(item) {
+  const search = item.search && typeof item.search === 'object' ? item.search : null;
+  // Index state is only news beside a search result; the plain shelf says
+  // nothing about it.
+  if (!search) return null;
+  const index = item.searchIndex && typeof item.searchIndex === 'object' ? item.searchIndex : null;
+  const reason = matchReason(search, item.title);
+  const terms = termsNote(search);
+  const status = statusNote(index);
+  const parts = search.snippet ? snippetParts(search.snippet) : [];
+  if (!parts.length && !reason && !terms && !status) return null;
+  const detail = node('div', { className: 'search-detail' });
+  if (parts.length) {
+    const excerpt = node('p', { className: 'search-excerpt' });
+    for (const part of parts) {
+      excerpt.append(part.match ? node('mark', { textContent: part.text }) : document.createTextNode(part.text));
+    }
+    detail.append(excerpt, node('p', { className: 'search-path tiny', textContent: snippetPath(search.snippet) }));
+  }
+  const notes = [reason, terms, status].filter(Boolean);
+  if (notes.length) detail.append(node('p', { className: 'search-facts tiny', textContent: notes.join(' · ') }));
+  return detail;
 }
 function artifactEntries(items, inventory, grid) {
   const out = [];
@@ -1008,6 +1224,12 @@ function artifactEntries(items, inventory, grid) {
     if (inventory) summary.append(node('div', { className: 'inventory-mobile' },
       node('span', { textContent: `${mine(item) ? 'You' : item.ownerName || 'Instance owner'} · ${item.visibility === 'shared' ? 'Shared' : 'Private'} · ${item.archived ? 'Archived' : 'Active'}` }),
       node('span', { className: 'inventory-expiration', textContent: expirationSummary(item) })));
+    // Where this result was found, how much of the query it satisfied, and
+    // anything honest to say about its index state. All of it is text: the
+    // excerpt is assembled from textContent and <mark>, never from markup.
+    // In a row it follows the title; in a card it sits under the summary row.
+    const searchDetail = searchDetailFor(item);
+    if (searchDetail && !grid) summary.append(searchDetail);
     const menu = button('⋯', () => openManage(item), 'icon-button artifact-menu');
     menu.setAttribute('aria-label', `${item.canManage ? 'Manage' : 'Details for'} ${item.title || 'artifact'}`);
     const entry = node('article', { className: grid ? 'artifact-card' : `artifact-row${inventory ? ' inventory-row' : ''}${item.archived ? ' is-archived' : ''}`, role: 'listitem' });
@@ -1015,6 +1237,7 @@ function artifactEntries(items, inventory, grid) {
       const preview = node('a', { className: 'artifact-preview', href: viewerUrl(item), tabIndex: -1, ariaHidden: 'true' });
       preview.dataset.id = item.id;
       entry.append(preview, node('div', { className: 'artifact-summary' }, summary, node('div', { className: 'card-actions' }, starButton(item, 'icon-button star-button'), menu)));
+      if (searchDetail) entry.append(searchDetail);
     } else {
       entry.append(summary, cell('Owner: ', 'owner-cell', mine(item) ? 'You' : item.ownerName || 'Instance owner'));
       if (inventory) {
@@ -1599,7 +1822,7 @@ function openUpload() {
     const stored = await withBlobs(picked, '/api/blobs', '', path => { chosen.textContent = `Uploading ${path}…`; });
     chosen.textContent = 'Publishing…';
     await api('/api/artifacts', { method: 'POST', body: { title: trimmed, ttlSeconds: null, files: encodeFiles(stored) } });
-    state.view = 'mine'; state.q = ''; resetPagination(); writeUrl();
+    state.view = 'mine'; state.q = ''; state.sort = state.sort === 'relevance' ? 'recent' : state.sort; sortChosen = false; resetPagination(); writeUrl();
     notify('Artifact published. Find it in Created by me.');
   });
   openDialog('Publish artifact', form);

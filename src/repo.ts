@@ -13,6 +13,10 @@ import { GUEST_DISCUSSION, GUEST_TTL, guestAuthor } from './guest';
 import { ticketTitle, type ticketChange } from './ticket-body';
 import { ticketAuthor } from './ticket-author';
 import type { DiscussionContext, DiscussionQuery } from './discussion';
+import { htmlSearchDocument, searchChunks, SEARCH_LIMITS, type SearchChunk, type SearchStatus } from './search';
+import { externalRef } from './blobs';
+import { SearchSource } from './search-source';
+import { b64decode } from './util';
 
 /** Resolved by the Worker from independent session/guest credentials, never request JSON. */
 export interface DiscussionPerson { accountId?: string; accountName?: string; guestHash: string }
@@ -119,6 +123,15 @@ const NEEDS: Record<string, Role> = {
 export class Repo extends DurableObject<Env> {
   /** Set once the table and its columns are known to be current; a Durable Object's schema only changes on deploy. */
   private tableReady = false;
+  private contentQueue: Promise<void> = Promise.resolve();
+
+  private async contentChange<T>(action: () => Promise<T>): Promise<T> {
+    const previous = this.contentQueue;
+    let release!: () => void;
+    this.contentQueue = new Promise<void>(resolve => { release = resolve; });
+    await previous;
+    try { return await action(); } finally { release(); }
+  }
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -164,6 +177,8 @@ export class Repo extends DurableObject<Env> {
     if (!artifactCols.includes('projected_revision')) sql.exec(`ALTER TABLE _artifact ADD COLUMN projected_revision INTEGER NOT NULL DEFAULT 0`);
     if (!artifactCols.includes('pending_actor')) sql.exec(`ALTER TABLE _artifact ADD COLUMN pending_actor TEXT`);
     if (!artifactCols.includes('pending_title')) sql.exec(`ALTER TABLE _artifact ADD COLUMN pending_title TEXT`);
+    if (!artifactCols.includes('search_revision')) sql.exec(`ALTER TABLE _artifact ADD COLUMN search_revision INTEGER NOT NULL DEFAULT 0`);
+    if (!artifactCols.includes('search_pending')) sql.exec(`ALTER TABLE _artifact ADD COLUMN search_pending INTEGER NOT NULL DEFAULT 0`);
     this.tableReady = true;
   }
 
@@ -186,7 +201,90 @@ export class Repo extends DurableObject<Env> {
       args.readToken,
     );
     if (args.expiresAt != null) await this.ctx.storage.setAlarm(args.expiresAt * 1000);
+    await this.indexSearch();
     return reply;
+  }
+
+  async indexSearch(): Promise<boolean> {
+    return this.contentChange(async () => {
+      this.ensureTable();
+      this.ctx.storage.sql.exec('UPDATE _artifact SET search_revision=1,search_pending=1 WHERE search_revision=0');
+      return this.projectSearchIndex();
+    });
+  }
+
+  private async beginSearch(): Promise<boolean> {
+    this.ensureTable();
+    const m = this.meta();
+    if (!m) return false;
+    this.ctx.storage.sql.exec('UPDATE _artifact SET search_revision=search_revision+1,search_pending=1');
+    await this.scheduleAlarm();
+    const row = this.ctx.storage.sql.exec<{ search_revision:number }>('SELECT search_revision FROM _artifact LIMIT 1').toArray()[0];
+    if (!row) return false;
+    // Invalidate before the content write. If the inventory is unavailable the
+    // write has not happened, so a retry cannot duplicate a successful commit.
+    await this.env.REGISTRY.getByName('registry').searchPending(m.id,row.search_revision);
+    return !!this.meta();
+  }
+
+  private async projectSearchIndex(): Promise<boolean> {
+    this.ensureTable();
+    const m = this.meta();
+    const version = this.ctx.storage.sql.exec<{ search_revision:number }>('SELECT search_revision FROM _artifact LIMIT 1').toArray()[0]?.search_revision;
+    if (!m || version === undefined) return false;
+    try {
+      await this.scheduleAlarm();
+      await this.env.REGISTRY.getByName('registry').searchPending(m.id,version);
+      const tip = run<{ tip: string }>(this.ctx.storage,{ op:'tip' }).result?.tip;
+      if (!tip) throw new Error('Current check-in is unavailable');
+      // filename/mlink are Fossil's crosslinked inventory. Looking at historical
+      // candidates avoids guessing a full tree from mlink (which records changes,
+      // not every file). raw(at) verifies each candidate against the current tree.
+      // A historical oversize or too many candidates conservatively means partial.
+      const paths = this.ctx.storage.sql.exec<{ path:string; bytes:number | null }>(`SELECT f.name AS path,max(b.size) AS bytes FROM filename f LEFT JOIN mlink m ON m.fnid=f.fnid LEFT JOIN blob b ON b.rid=m.fid
+        WHERE lower(f.name) LIKE '%.html' OR lower(f.name) LIKE '%.htm' GROUP BY f.name
+        ORDER BY (lower(f.name)='index.html') DESC,f.name LIMIT ?`,SEARCH_LIMITS.files + 1).toArray();
+      const chunks: SearchChunk[] = [];
+      const source = new SearchSource(this.ctx.storage);
+      let partial = paths.length > SEARCH_LIMITS.files, bytes = 0, textBytes = 0, htmlFiles = 0;
+      for (const file of paths.slice(0, SEARCH_LIMITS.files)) {
+        if (file.bytes === null || file.bytes < 0 || file.bytes > SEARCH_LIMITS.fileBytes) { partial = true; continue; }
+        const raw = await source.read<{ data:string }>({ op:'raw',path:file.path,at:tip });
+        if (!raw.ok || !raw.result) { partial = true; continue; }
+        htmlFiles++;
+        let data = b64decode(raw.result.data);
+        const pointer = externalRef(data);
+        if (pointer) {
+          if (pointer.kind !== 'blob' || pointer.size > SEARCH_LIMITS.fileBytes || bytes + pointer.size > SEARCH_LIMITS.totalBytes) { partial = true; continue; }
+          const allowed = await this.env.REGISTRY.getByName('registry').allowedBlobs(m.id,[`artifact:${m.id}`],[pointer.sha256]);
+          if (!allowed.includes(pointer.sha256)) { partial = true; continue; }
+          const object = await this.env.BLOBS.get(`b/${pointer.sha256}`);
+          if (!object || object.size !== pointer.size) { partial = true; continue; }
+          data = new Uint8Array(await object.arrayBuffer());
+          const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',data)), b => b.toString(16).padStart(2,'0')).join('');
+          if (digest !== pointer.sha256) { partial = true; continue; }
+        }
+        bytes += data.byteLength;
+        if (bytes > SEARCH_LIMITS.totalBytes || textBytes >= SEARCH_LIMITS.text) { partial = true; break; }
+        const extracted = await htmlSearchDocument(new TextDecoder('utf-8',{ fatal:true,ignoreBOM:false }).decode(data));
+        const text = extracted.text;
+        if (extracted.partial || textBytes + text.length > SEARCH_LIMITS.text) partial = true;
+        const kept = text.slice(0,SEARCH_LIMITS.text - textBytes);
+        textBytes += kept.length;
+        chunks.push(...searchChunks(file.path,kept));
+      }
+      const status: SearchStatus = partial ? 'partial' : htmlFiles && chunks.length ? 'complete' : 'unsupported';
+      this.ensureTable();
+      if (!this.meta() || this.ctx.storage.sql.exec<{ search_revision:number }>('SELECT search_revision FROM _artifact LIMIT 1').toArray()[0]?.search_revision !== version) return false;
+      await this.env.REGISTRY.getByName('registry').projectSearch({ id:m.id,version,status,chunks });
+      this.ctx.storage.sql.exec('UPDATE _artifact SET search_pending=0 WHERE search_revision=?',version);
+      await this.scheduleAlarm();
+      return true;
+    } catch {
+      try { await this.env.REGISTRY.getByName('registry').projectSearch({ id:m.id,version,status:'error',chunks:[] }); } catch { /* Durable pending revision retries through the alarm. */ }
+      try { await this.scheduleAlarm(); } catch { /* The previously armed alarm still owns the durable job. */ }
+      return false;
+    }
   }
 
   /** The role `caller` holds on this artifact, or null for none. */
@@ -218,6 +316,12 @@ export class Repo extends DurableObject<Env> {
         if (result?.artifact) this.markChange(result.artifact, 'edit');
       });
     }
+    if (request.op === 'commit') return this.contentChange(async () => {
+      if (!await this.beginSearch()) return { error:'not found',code:'not_found' };
+      const reply = run<unknown>(this.ctx.storage,request);
+      await this.projectSearchIndex();
+      return reply;
+    });
     const reply = run<unknown>(this.ctx.storage, request);
     if (reply.ok && request.op === 'ticketChanges') this.decorateChanges(reply.result as TicketChange[]);
     if (reply.ok && request.op === 'ticketThreads') {
@@ -270,12 +374,44 @@ export class Repo extends DurableObject<Env> {
   async sync(body: Uint8Array, cookie: string): Promise<FossilReply<{ data: string; tickets?: PushedTicket[] }>> {
     this.ensureTable();
     if (!this.meta()) return { error: 'not found', code: 'not_found' };
-    // No await from here to the return: the object runs no other request in
-    // between, so `before` is exactly the last artifact stored before this one.
-    const before = this.lastArrived();
-    const r = run<{ data: string }>(this.ctx.storage, { op: 'sync', cookie }, body);
-    if (!r.ok || !r.result || !before || this.lastArrived() === before) return r;
-    return { ...r, result: { ...r.result, tickets: this.ticketsSince(before) } };
+    return this.contentChange(async () => {
+      const meta = this.meta();
+      if (!meta) return {error:'not found',code:'not_found'};
+      const before = this.lastArrived();
+      let version: number | null = null;
+      const r = run<{data:string}>(this.ctx.storage,{op:'sync',cookie},body,() => {
+        if (this.lastArrived() === before) return;
+        // The successful content write and its index outbox share run's one
+        // rollback boundary. Authentication failures and no-ops enqueue nothing.
+        this.ctx.storage.sql.exec('UPDATE _artifact SET search_revision=search_revision+1,search_pending=1');
+        version = this.ctx.storage.sql.exec<{search_revision:number}>('SELECT search_revision FROM _artifact LIMIT 1').toArray()[0]!.search_revision;
+      });
+      // Capture arrivals before any projection await; only these wake the Worker.
+      const result = r.ok && r.result && before && version !== null
+        ? {...r,result:{...r.result,tickets:this.ticketsSince(before)}} : r;
+      const defer = (this.env as unknown as Record<string,string | undefined>).TEST_NATIVE_SEARCH_FAULT === 'defer-projection-and-fail-alarm-once';
+      try {
+        let failAlarm = false;
+        if (version !== null && defer && !await this.ctx.storage.get<boolean>('native-search-alarm-fault-used')) {
+          await this.ctx.storage.put('native-search-alarm-fault-used',true); failAlarm = true;
+        }
+        this.ensureTable();
+        // Repair an earlier scheduling failure even on a later no-op, without
+        // changing its revision or reading source content. A transient failure
+        // gets one immediate retry; the durable outbox also survives restart.
+        if (version !== null || this.searchPending()) for (let attempt=0;attempt<2;attempt++) {
+          try {
+            if (failAlarm) { failAlarm = false; throw new Error('injected native alarm scheduling failure'); }
+            await this.scheduleAlarm(); break;
+          } catch { /* The next attempt/access or owner backfill can repair scheduling. */ }
+        }
+      } catch { /* A successful native write must not become an index retry request. */ }
+      if (version !== null) {
+        try { await this.env.REGISTRY.getByName('registry').searchPending(meta.id,version); } catch { /* The durable outbox retries notification. */ }
+        if (!defer) try { await this.projectSearchIndex(); } catch { /* Preserve the successful protocol reply and its pending outbox. */ }
+      }
+      return result;
+    });
   }
 
   /**
@@ -850,6 +986,10 @@ export class Repo extends DurableObject<Env> {
     return !!row && row.projected_revision < row.expiration_revision;
   }
 
+  private searchPending(): boolean {
+    return !!this.ctx.storage.sql.exec<{ search_pending:number }>('SELECT search_pending FROM _artifact LIMIT 1').toArray()[0]?.search_pending;
+  }
+
   /** Arm the one alarm at the earliest of the deadline and any retry it owes. */
   private async scheduleAlarm(): Promise<void> {
     this.ensureTable();
@@ -858,7 +998,7 @@ export class Repo extends DurableObject<Env> {
     if (!row) { await this.ctx.storage.deleteAlarm(); return; }
     const times: number[] = [];
     if (row.expires_at != null) times.push(row.expires_at * 1000);
-    if (this.pending()) times.push(Date.now() + this.retryMs());
+    if (this.pending() || this.searchPending()) times.push(Date.now() + this.retryMs());
     if (!times.length) await this.ctx.storage.deleteAlarm();
     else await this.ctx.storage.setAlarm(Math.min(...times));
   }
@@ -908,8 +1048,8 @@ export class Repo extends DurableObject<Env> {
       await this.destroy();
       return;
     }
-    // Nothing is due yet: the deadline lies ahead, or there is none and only a
-    // retry it already attempted is still owed.
+    if (this.searchPending()) await this.contentChange(() => this.projectSearchIndex());
+    // Expiration and content projection share this object's one alarm.
     await this.scheduleAlarm();
   }
 }

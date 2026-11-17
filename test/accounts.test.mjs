@@ -309,6 +309,35 @@ if (process.env.ACCOUNTS_BROWSER_QA_EXPIRATION === '1') test('real browser: expi
   await expirationQA({base,api,run,evaluate,wait,click,output,artifact:{id:artifact.id,cookie:creator.cookie}});
 });
 
+if (process.env.LIBRARY_FOCUS_QA === '1') test('real browser: closing publish never outlines the main container', {timeout:120000}, async()=>{
+  const owner=await login('owner@example.com');
+  const { browserDriver }=await import('./library-browser.mjs');
+  const {run,evaluate,wait,click}=browserDriver('library-focus-qa-'+process.pid,{asyncCommands:true});
+  try {
+    await run('cookies','set','artifact_session',owner.cookie.split('=')[1],'--url',base,'--httpOnly','--sameSite','Lax');
+    await run('set','viewport','1440','900');
+    for(const theme of ['light','dark']) {
+      await run('open',base+'/');await wait('#page-action');
+      await evaluate(`document.documentElement.dataset.theme=${JSON.stringify(theme)}`);
+      await click('#page-action');await wait('#upload-files');
+      await click('#dialog-close');
+      assert.equal(await evaluate('document.activeElement.id'),'page-action','closing normally restores the publish button');
+      await click('#page-action');await wait('#upload-files');
+      // A library refresh can replace the opener while the dialog is open.
+      await evaluate(`document.getElementById('page-action').replaceWith(document.getElementById('page-action').cloneNode(true));document.getElementById('dialog-close').focus()`);
+      await run('press','Enter');
+      assert.equal(await evaluate('document.activeElement.id'),'main','a replaced opener falls back to the main landmark');
+      assert.equal(await evaluate('getComputedStyle(document.getElementById("main")).outlineStyle'),'none','focus restoration must not outline the whole content area');
+      await run('screenshot',join(tmpdir(),'library-focus-'+process.pid+'-'+theme+'.png'));
+      await run('press','Tab');
+      const control=await evaluate(`(()=>{const e=document.activeElement,s=getComputedStyle(e);return {interactive:e.matches('a,button,input,select,textarea'),visible:e.matches(':focus-visible'),style:s.outlineStyle,width:s.outlineWidth}})()`);
+      assert.equal(control.interactive,true);
+      assert.equal(control.visible,true,'keyboard navigation still exposes focus');
+      assert.equal(control.style,'solid');assert.equal(control.width,'2px');
+    }
+  } finally {await run('close');}
+});
+
 if (process.env.LIBRARY_SIDEBAR_QA === '1') test('real browser: long recent titles fit the library sidebar', {timeout:120000}, async()=>{
   const owner=await login('owner@example.com');
   const titles=['Mesh Health Design','SaurOn — ways to see problems far beyond the visible navigation edge','Artifact workspace'];

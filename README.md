@@ -187,10 +187,11 @@ node scripts/publish-html.mjs read <url>[@<check-in>] [--out <dir>]
 node scripts/publish-html.mjs history <url>
 node scripts/publish-html.mjs list
 node scripts/publish-html.mjs delete <edit-url>
+node scripts/publish-html.mjs expire <artifact-url> <ttl|never>
 node scripts/publish-html.mjs watch <edit-or-comment-url> [--since <hash>] [--interval 30s] [--once] [--cache <dir>]
 ```
 
-`watch` is described under [Answering comments](#answering-comments-watch-and-the-reference-responder). A single file is stored as `index.html`; a directory is stored as-is and needs an `index.html` (or another `.html` file). Updating adds and changes files; files missing from the directory are kept from the previous version.
+`watch` is described under [Answering comments](#answering-comments-watch-and-the-reference-responder). A single file is stored as `index.html`; a directory is stored as-is and needs an `index.html` (or another `.html` file). Every served HTML file must be a whole document: after an optional BOM and leading whitespace it starts with `<!doctype html` or `<html` (attributes allowed). The CLI refuses a fragment, naming the file, and never wraps one. Updating adds and changes files; files missing from the directory are kept from the previous version.
 
 | Flag | Description | Default |
 |------|-------------|---------|
@@ -205,7 +206,9 @@ node scripts/publish-html.mjs watch <edit-or-comment-url> [--since <hash>] [--in
 
 `NOTES.md` carries the page's context (what it is for, what has been decided, what not to touch) for whoever answers comments on it. It is an ordinary file in the repository: it appears in the clone and in `read --out`, is listed with the other files, and is never shown as the page. `update` without `--notes` leaves the existing `NOTES.md` as it is; with `--notes` it replaces it (tracked in #22).
 
-`HTML_PUBLISHER_URL` and `HTML_PUBLISHER_TOKEN` are needed for `publish` and `list`; the other commands take everything from the link.
+`HTML_PUBLISHER_URL` and `HTML_PUBLISHER_TOKEN` are needed for `publish`, `list`, and `expire`; the other commands take everything from the link.
+
+`expire <artifact-url> <ttl|never>` changes an existing artifact's deadline without republishing or changing its URL, files or history. Use a read or edit link plus the artifact creator's or instance owner's account-backed automation credential, or the legacy instance bearer token; an edit link alone cannot manage expiration. Durations such as `6h` or `30d` run from now; `never` clears the deadline. `HTML_PUBLISHER_URL` must be a bare origin (no path, query or fragment), and the link must be on that origin, so the configured credential is never forwarded to a host supplied by an unrelated link. JSON output includes the read `viewerUrl`, `expiresAt`, `linkVerified`, and `expirationPending` (true means the deadline was accepted but its library projection is still retrying). For shared review pages and durable reports, publish explicitly with `--ttl never`; the general CLI default remains seven days.
 
 `update` exits with code `3` when someone published after it read the tip: nothing was saved, and running it again builds on the newer version. It exits `1` with "nothing changed" when every file matches the tip.
 
@@ -299,7 +302,7 @@ Inside the viewer, a page can use `window.artifact` (every call returns a promis
 | `data.get(name)`, `data.set(name, value)`, `data.list()` | Small JSON values stored with the artifact but outside its history; last writer wins |
 | `pikchr(source)` | Render Pikchr to SVG: `{light, dark, width, height}` |
 
-The viewer's CSP blocks every network request from the page, so bundle everything: relative `<script src>`, stylesheet, image, font and media references to files in the same check-in are inlined when rendering. ES module imports and `fetch()` of relative files are not.
+The viewer blocks external resource loads, including CDN scripts, Google Fonts stylesheets/font files and external API requests. Bundle dependencies: relative `<script src>`, stylesheet, image, font and media references to files in the same check-in are inlined or resolved to authorized blob links when rendering. ES module imports and `fetch()` of relative files are not resolved. Ordinary navigation links are different from resource loads; use `target="_blank"` to open them outside the viewer. The CLI warns for external HTML/CSS resource references, not ordinary links, prose or arbitrary JavaScript URL strings. This static preflight cannot detect dynamically constructed requests.
 
 ## Diagrams and fonts
 
@@ -307,6 +310,8 @@ The viewer adds two things to a page, and only when the page uses them:
 
 - **Pikchr diagrams.** A page writes [Pikchr](https://pikchr.org) source in `<pre class="pikchr" aria-label="...">`. The viewer renders each block to a light and a dark SVG, which switch with the theme, before showing the page. A block with an error shows the error in its place. Rendering runs Pikchr's wasm (from [Pikchr Studio](https://github.com/danmestas/pikchr-studio), about 56 KB compressed) in a Web Worker, so the page's CSP still blocks WebAssembly. Pages without a diagram never fetch it. `publish` and `update` refuse a page whose diagrams don't render; `node skills/pikchr/render.mjs page.html --check` runs the same check.
 - **House fonts.** If a page's CSS names Instrument Sans, IBM Plex Sans, IBM Plex Mono or IBM Plex Serif, the viewer embeds that family (Latin woff2 subsets in `public/fonts/`, SIL OFL). Italic files are added only if the page can show italics, and the Plex Mono and Serif bold files only if it can show bold. A page that declares its own `@font-face` for a family keeps it.
+
+House fonts come from this app's `/fonts/` assets and are embedded into the page; no Google Fonts request is needed. External Google Fonts stylesheet and font hosts remain blocked. For another font, bundle a `.woff2` file and declare a relative `@font-face`. To verify actual loading, inspect loaded `FontFace` entries inside the sandboxed page; a CSS family name or an absent Google request alone is not proof.
 
 The renderer and fonts are cached by the browser for a week (`public/_headers`).
 
@@ -420,7 +425,7 @@ It accepts only `POST`, answers `413` to a body over 16 KiB, `401` to a bad or m
 | `POST /api/artifacts` | owner | Create: `{title, files: {path: base64}, slug?, ttlSeconds?, message?}` → `{id, tip, viewerUrl, editUrl, commentUrl, cloneUrl, expiresAt}` |
 | `GET /api/artifacts` | owner | List, most recently updated first |
 | `GET /api/artifacts/:id` | read | `{title, role, tip, timeline, expiresAt, attached}` (`attached` is the responder flag or `null`; `role` is `read`, `comment` or `write`); `?tip` returns only the tip |
-| `PATCH /api/artifacts/:id/manage` | creator or instance owner | `{archived?, title?, ownerId?, expiresAt?}` → `200 {ok:true}` when confirmed, or `202 {ok:true, expirationPending:true}` when the expiration is stored but its library update is still pending. Pending updates retry automatically; reload the library to confirm convergence. `expiresAt` is an ISO 8601 UTC instant ending in `Z`, or `null` for never; omitting it keeps the current expiration. A finite value must be in the future and within `MAX_TTL_SECONDS`. Changing expiration does not alter the tip, contents or history |
+| `PATCH /api/artifacts/:id/manage` | creator or instance owner; legacy instance bearer for an expiration-only body | `{archived?, title?, ownerId?, expiresAt?}` → `200 {ok:true}` when confirmed, or `202 {ok:true, expirationPending:true}` when the expiration is stored but its library update is still pending. Pending updates retry automatically; reload the library to confirm convergence. `expiresAt` is an ISO 8601 UTC instant ending in `Z`, or `null` for never; omitting it keeps the current expiration. A finite value must be in the future and within `MAX_TTL_SECONDS`. Changing expiration does not alter the tip, contents or history |
 | `PUT /api/artifacts/:id` | write | `{parent, files, message?, title?}` → `{tip, parent}`; `409` when `parent` is not the tip |
 | `DELETE /api/artifacts/:id` | write | Delete |
 | `GET /api/artifacts/:id/bundle?at=` | read | `{checkin, files: {path: base64}, missing, blobs: {path: {sha256, size, type, url}}}`; a blob's `files` entry is its pointer |

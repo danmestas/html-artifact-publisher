@@ -6,7 +6,7 @@ Reference for account sign-in, library queries and instance administration. Arti
 
 - Accounts are invite-only. An account has `id`, `email`, `name`, role (`owner` or `member`) and status (`active`, `invited` or `disabled`).
 - The instance owner can inspect and manage every artifact, including private and archived work. The stable owner ID is `instance-owner`; legacy artifacts without an owner belong to that account.
-- Account endpoints require an account identity: the `artifact_session` cookie or a personal bearer credential. The legacy instance bearer retains artifact/CLI compatibility but does not itself identify an account for these endpoints.
+- Account endpoints require an account identity: the `artifact_session` cookie or a personal bearer credential. The legacy instance bearer retains artifact/CLI compatibility but does not itself identify an account. Its only management exception is `PATCH /api/artifacts/:id/manage` with exactly `{expiresAt: ISO|null}`; it cannot rename, archive, transfer or manage sharing through that endpoint. Read/edit/comment links do not authorize expiration changes.
 - A creator or instance owner manages named sharing, title, expiration, archive and deletion. A named editor can edit content but cannot manage access, ownership or deletion. Read grants do not permit content mutations or comment moderation. With guest discussion enabled, readers may identify separately and post text-only discussion.
 - `GET /api/artifacts/:id` includes `readToken` for the artifact owner and instance owner so Share can offer a reusable read link without signing out. Named readers and editors do not receive that token through account access; edit tokens are never returned. A read link permits viewing and guest discussion, not page editing or deletion. Existing read, edit and comment links remain separate access mechanisms.
 - JSON responses are private/no-store. Errors use `{error:string}`. A supplied Origin must match the request origin; browser writes without an explicit credential require that matching Origin. Explicit authenticated CLI clients remain supported.
@@ -73,7 +73,7 @@ Suspension revokes authentication, personal credentials and pending login links;
 | --- | --- | --- |
 | `GET /api/artifacts/:id/sharing` | `{ownerId,grants:[{userId,email,name,status,permission}],users:[{id,email,name,status}]}` | Creator or instance owner; eligible people include invited and active accounts |
 | `PUT /api/artifacts/:id/sharing` | `{userId,permission:'read'\|'write'\|null}` → `{ok:true}` | Creator or instance owner; new grants require an invited or active eligible account; revocation also permits suspended accounts |
-| `PATCH /api/artifacts/:id/manage` | `{archived?,ownerId?,title?,expiresAt?}` → `{ok:true}` or `202 {ok:true,expirationPending:true}` | Creator or instance owner; transfer is instance-owner only |
+| `PATCH /api/artifacts/:id/manage` | `{archived?,ownerId?,title?,expiresAt?}` → `{ok:true}` or `202 {ok:true,expirationPending:true}` | Creator or instance owner; transfer is instance-owner only. Legacy instance bearer accepts only an expiration-only body |
 | `PUT /api/artifacts/:id/star` | `{starred:boolean}` → `{ok:true}` | Account with access; stars are per account |
 | `DELETE /api/artifacts/:id` | 204 | Account creator/instance owner, or an authorized legacy edit link |
 

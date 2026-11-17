@@ -102,7 +102,7 @@ command has to name it.
 | Skill | Use it for |
 |---|---|
 | `skills/publish-html-page` | Required. Publish and update pages, link handling. |
-| `skills/artifact-design` | Page contract: themes, no network, layout, phones. |
+| `skills/artifact-design` | Page contract: themes, no external loads, layout, phones. |
 | `skills/artifact-runtime` | `window.artifact`: saved data, self-editing pages, history. |
 | `skills/artifact-diagrams` | When a diagram helps, and what it should show. |
 | `skills/artifact-dataviz` | Charts, palette, contrast checks. |
@@ -114,7 +114,7 @@ deployment are not needed for CLI publishing.
 
 ## Environment
 
-`publish` and `list` read two variables:
+`publish`, `list` and `expire` read two variables:
 
 ```bash
 export HTML_PUBLISHER_URL="https://this-instance.example"
@@ -140,12 +140,14 @@ node "$HOME/tools/html-artifact-publisher/scripts/publish-html.mjs" read "$READ_
 node "$HOME/tools/html-artifact-publisher/scripts/publish-html.mjs" history "$URL"
 node "$HOME/tools/html-artifact-publisher/scripts/publish-html.mjs" list
 node "$HOME/tools/html-artifact-publisher/scripts/publish-html.mjs" delete "$EDIT_URL"
+node "$HOME/tools/html-artifact-publisher/scripts/publish-html.mjs" expire "$ARTIFACT_URL" "$TTL"
 ```
 
 Set `EDIT_URL` to the edit link, `READ_OR_EDIT_URL` to a read or edit link, `URL` to
-the artifact link, and `OUT_DIR` to a directory path before running these; quoting
-keeps tokens and spaces intact. `--out` is optional: without it `read` prints the
-page's HTML to stdout instead of writing files.
+the artifact link, `ARTIFACT_URL` to a read or edit link for `expire`, `TTL` to a
+duration such as `6h` or `30d` or `never`, and `OUT_DIR` to a directory path before
+running these; quoting keeps tokens and spaces intact. `--out` is optional: without it
+`read` prints the page's HTML to stdout instead of writing files.
 
 Alternatively `cd "$HOME/tools/html-artifact-publisher"` and use
 `node scripts/publish-html.mjs …` with absolute artifact paths.
@@ -157,6 +159,15 @@ tip exits 1 with "nothing changed". Use the URL and history the instance returns
 construct links by hand.
 
 The default TTL is 7d (7 days); `--ttl never` keeps the artifact until it is deleted.
+
+`expire <artifact-url> <ttl|never>` changes an existing artifact's deadline only: the
+read link, content and history stay the same. It needs `HTML_PUBLISHER_URL` set to a
+bare origin (no path, query or fragment) and a read or edit link on that origin, plus
+the creator's or instance owner's account-backed automation credential (or the legacy
+instance bearer); an edit link alone cannot change expiration. JSON output includes
+`viewerUrl`, `expiresAt`, `linkVerified` and `expirationPending` (true means the deadline
+was accepted but its library projection is still retrying). For shared review pages and
+durable reports, publish with `--ttl never`.
 
 ## Links
 
@@ -170,10 +181,22 @@ A read link cannot update.
 
 ## What a published page can do
 
-- The viewer sandbox blocks external network requests. Pages must be self-contained:
-  inline CSS and scripts, and reference attachments by relative paths in the same
-  published directory. Small text files travel with the page; images, video, fonts, and
-  files over 256 KB are stored separately and uploaded automatically (up to 100 MB each).
+- The viewer sandbox blocks external resource loads, including CDN scripts, Google Fonts
+  stylesheets/font files, remote images and external API requests (`fetch`/XHR). Scripts
+  and styles run only when local or carrying the viewer's per-response nonce, and the
+  viewer never adds that nonce to an unresolved external element. Ordinary navigation
+  links are not resource loads: use `target="_blank"` to open them outside the viewer.
+  Pages must be self-contained: inline CSS and scripts, and reference attachments by
+  relative paths in the same published directory. Small text files travel with the page;
+  images, video, fonts, and files over 256 KB are stored separately and uploaded
+  automatically (up to 100 MB each).
+- House fonts (Instrument Sans, IBM Plex Sans, IBM Plex Mono and IBM Plex Serif) need only
+  be named in CSS: the viewer embeds them from this instance, with no Google Fonts request.
+  Bundle any other font as a relative `.woff2` with `@font-face`.
+- Every served HTML file must be a whole document: after an optional BOM and leading
+  whitespace it starts with `<!doctype html` or `<html` (attributes allowed). The CLI
+  refuses a fragment, naming the file, and never wraps one; this applies to single-file
+  and directory publishes.
 - Pages follow light and dark appearance. Ship complete light and dark palettes and do
   not pin a theme in the root element.
 - When the viewer injects `window.artifact`, a page can read its files and history, save

@@ -364,8 +364,11 @@ async function render() {
   await embedFonts(doc, NONCE);
   if (run !== renders) return;
 
-  // The iframe inherits this page's CSP: only nonce-stamped scripts and styles run.
-  for (const el of doc.querySelectorAll('script, style, link[rel~="stylesheet"]')) el.setAttribute('nonce', NONCE);
+  // Only inline content gets our nonce. Bundled scripts/styles were inlined
+  // above; stamping unresolved external references would authorize their loads
+  // despite the CSP's host restrictions.
+  for (const el of doc.querySelectorAll('script[src], link[rel~="stylesheet"]')) el.removeAttribute('nonce');
+  for (const el of doc.querySelectorAll('script:not([src]), style')) el.setAttribute('nonce', NONCE);
   const runtime = doc.createElement('script');
   runtime.setAttribute('nonce', NONCE);
   // Carry the choice into the sandbox before paint, retaining the author's

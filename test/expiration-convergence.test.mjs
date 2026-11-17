@@ -14,9 +14,9 @@ const work = mkdtempSync(join(tmpdir(), 'artifact-expiration-convergence-'));
 after(() => rmSync(work, { recursive: true, force: true }));
 
 /**
- * A Worker with its own state and a signed-in instance owner. Sessions are
- * used rather than the bearer token because only an account may manage an
- * artifact, and the sign-in transport needs the Worker's own port as origin.
+ * A Worker with its own state and a signed-in instance owner. These scenarios
+ * exercise account-managed artifacts; the sign-in transport needs the Worker's
+ * own port as origin. Legacy automation is tested separately below.
  */
 async function withWorker(vars, body) {
   const dir = mkdtempSync(join(work, 'state-'));
@@ -77,6 +77,19 @@ async function waitForDeadline(call, id, want) {
   }
   return false;
 }
+
+test('legacy expiration automation uses the same durable projection and retry path', async () => {
+  await withWorker({ TEST_EXPIRATION_FAULT: 'fail-once', TEST_EXPIRATION_RETRY_MS: '500' }, async (w, call) => {
+    const a = await create(call, { title: 'Automation deadline', ttlSeconds: 3600 });
+    const response = await fetch(`${w.base}/api/artifacts/${a.id}/manage`, {
+      method: 'PATCH', headers: { Authorization: `Bearer ${w.owner}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ expiresAt: null }),
+    });
+    assert.equal(response.status, 202);
+    assert.equal((await response.json()).expirationPending, true);
+    assert.equal(await waitForDeadline(call, a.id, null), true);
+    assert.equal((await call(`/api/artifacts/${a.id}`)).json.expiresAt, null);
+  });
+});
 
 test('a failed projection is retried by the Repo alarm and converges', async () => {
   await withWorker({ TEST_EXPIRATION_FAULT: 'fail-once', TEST_EXPIRATION_RETRY_MS: '500' }, async (w, call) => {

@@ -25,9 +25,18 @@ fragment — a read token for viewers and a write token for editors.
 
 After generating a standalone HTML explainer or artifact file. Confirm the
 file is fully self-contained (assets inlined, no CDN deps) before uploading:
-the viewer blocks all network requests, so external URLs will not load. To
-revise an artifact you already published, update it instead of publishing a
-new one.
+the viewer blocks external resource loads, including Google Fonts stylesheets,
+remote font files and external API requests. Ordinary navigation links are not
+resource loads; use `target="_blank"` to open them outside the viewer. To revise
+an artifact you already published, update it instead of publishing a new one.
+
+For shared review pages and durable reports, explicitly pass `--ttl never`.
+The general CLI default remains seven days.
+
+House fonts (Instrument Sans, IBM Plex Sans, IBM Plex Mono and IBM Plex Serif)
+need only be named in inline CSS: the viewer fetches its local font files and
+embeds them. No request to Google is needed or allowed. Bundle other fonts as
+relative `.woff2` files with `@font-face`; see **artifact-design**, Typography.
 
 ## Checkout and working directory
 
@@ -94,6 +103,7 @@ node scripts/publish-html.mjs read <url> [--out <dir>]    # URL may end in @<che
 node scripts/publish-html.mjs history <url>
 node scripts/publish-html.mjs list
 node scripts/publish-html.mjs delete <edit-url>
+node scripts/publish-html.mjs expire <artifact-url> <ttl|never>
 
   --title <text>     Human-readable title (default: filename)
   --icon <name>      Trusted topic icon (see the accepted names below)
@@ -147,12 +157,24 @@ Environment (must be set before running):
 - `HTML_PUBLISHER_URL`   — Worker base URL, e.g. `https://artifacts.example.com`
 - `HTML_PUBLISHER_TOKEN` — API bearer token
 
+`expire` needs both variables and a read or edit link on `HTML_PUBLISHER_URL`'s
+origin. Use the artifact creator's or instance owner's personal automation
+credential, or the legacy instance bearer. An edit link alone cannot manage
+expiration. `expire "$ARTIFACT_URL" never` clears the deadline; `6h` or `30d`
+sets it relative to now. This is a metadata-only change: no republish, new URL
+or content check-in. JSON reports `viewerUrl`, `expiresAt`, `linkVerified` and
+`expirationPending`; a pending projection is accepted and retried automatically.
+Expired artifacts cannot be revived.
+
 ## Step-by-step
 
-1. Confirm the HTML file starts with `<!doctype html` or `<html`. To include
+1. Confirm every HTML file starts with `<!doctype html>` or `<html>` (attributes
+   are allowed on `<html>`). The same check applies to single-file and directory
+   publishing: fragments are rejected with the filename, never auto-wrapped. To include
    images, video, fonts or other files, publish a directory and reference them
    by relative path. Images, video, audio, fonts, PDFs and other binary files, and any file over 256 KB, are stored in R2 instead of Fossil (the CLI uploads them automatically, up to 100 MB each); smaller text files must compress under about 1.99 MB.
-2. Run the script with `--title` matching the artifact's purpose.
+2. Run the script with `--title` matching the artifact's purpose and `--ttl never`
+   for a shared review page or durable report.
    If the page has Pikchr diagrams (`<pre class="pikchr">`), the script renders them
    first and refuses to publish on a Pikchr error (exit 1, with the diagram's line).
    Fix the diagram and rerun.
@@ -182,8 +204,9 @@ Environment (must be set before running):
   files you did not create in the current generation step.
 - NEVER attempt to delete the file manually before upload completes.
 - ALWAYS surface external-URL warnings to the user — in `--json` mode these
-  are listed under `warningMessages`; the viewer blocks network requests, so
-  those resources will not load.
+  are listed under `warningMessages`. These identify external resource loads,
+  not ordinary navigation links; the external resources will not load. The
+  scanner does not infer runtime-built requests from JavaScript.
 - If upload fails (non-2xx or network error), leave the file untouched and
   report the error verbatim.
 - The `editUrl` (`…/v/<id>#<writeToken>`) can update and delete the artifact

@@ -42,12 +42,23 @@ export async function htmlSearchDocument(html: string): Promise<{ text:string; p
       if (tag === 'title') title++;
       if (skip && !voids.has(tag)) blocked++;
       if (blocks.has(tag) && !blocked && (!head || title)) text += ' ';
-      if (!voids.has(tag)) element.onEndTag(() => {
-        if (skip) blocked--;
-        if (tag === 'head') head--;
-        if (tag === 'title') title--;
-        if (blocks.has(tag) && !blocked && !head) text += ' ';
-      });
+      if (!voids.has(tag) && (skip || blocks.has(tag))) {
+        try {
+          element.onEndTag(() => {
+            if (skip) blocked--;
+            if (tag === 'head') head--;
+            if (tag === 'title') title--;
+            if (blocks.has(tag) && !blocked && !head) text += ' ';
+          });
+        } catch (error) {
+          // Foreign self-closing elements have no end tag or descendant scope.
+          // Undo their counters; never suppress other parser/runtime failures.
+          if (element.namespaceURI === 'http://www.w3.org/1999/xhtml' || !/(?:^|: )No end tag\.?$/.test(String(error))) throw error;
+          if (skip) blocked--;
+          if (tag === 'head') head--;
+          if (tag === 'title') title--;
+        }
+      }
     },
     text(chunk) { if (!blocked && (!head || title) && text.length < SEARCH_LIMITS.text) text += chunk.text; },
   });

@@ -127,12 +127,18 @@ alarm scheduler with expiration; they do not postpone permanent expiration.
 
 Older artifacts are not all read during a search. An instance-owner account can
 explicitly start/resume a bounded backfill from Inventory's content-index
-controls or the API:
+controls or the API. Existing instance automation credentials can use the same
+API directly; no browser session or fabricated account identity is required:
 
 | Route | Result | Access |
 | --- | --- | --- |
-| `GET /api/admin/search-index` | `{status,processed,remaining,failed}` | Instance-owner account session or personal credential |
-| `POST /api/admin/search-index` with `{}` | `202` and the same progress fields | Same; legacy instance bearer alone does not identify an owner account |
+| `GET /api/admin/search-index` | `{status,processed,remaining,failed}` | Instance-owner account session/personal credential, or existing instance automation bearer |
+| `POST /api/admin/search-index` with `{}` | `202` and the same progress fields | Same; ordinary members and artifact capabilities are denied |
+
+The instance bearer retains its existing full-inventory authority without becoming
+an account. This exception does not authorize account administration, credential
+issuance or named sharing. A supplied Origin must match, including for bearer
+requests. Only an empty JSON object starts/resumes the fixed-size batches.
 
 Progress status is `idle`, `running`, `complete` or `error`. GET is read-only;
 loading the library does not implicitly start a backfill. Backfill is resumable

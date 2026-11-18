@@ -312,8 +312,8 @@ test('instance-owner backfill is bounded, resumable, read-only to history and in
     const b = await create(cookie,'Backfill archive','<p>backfillword archive</p>');
     await call(`/api/artifacts/${b.id}/manage`,{archived:true},cookie,'PATCH');
     const before = (await call('/api/admin/artifacts',undefined,cookie)).data.artifacts;
-    const denied = await fetch(app.base+'/api/admin/search-index',{method:'POST',headers:{Authorization:`Bearer ${app.owner}`,'Content-Type':'application/json'},body:'{}'});
-    assert.equal(denied.status,401);
+    const automation = await fetch(app.base+'/api/admin/search-index',{method:'POST',headers:{Authorization:`Bearer ${app.owner}`,'Content-Type':'application/json'},body:'{}'});
+    assert.equal(automation.status,202);
     assert.equal((await call('/api/admin/search-index')).status,401);
     const started = await call('/api/admin/search-index',{},cookie);
     assert.equal(started.status,202);

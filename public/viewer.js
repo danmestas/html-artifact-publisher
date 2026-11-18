@@ -16,6 +16,7 @@ import { typeOf } from './blobs.js';
 import { pagePins } from './page-pins.js';
 import { pageAppearance } from './page-appearance.js';
 import { backdropColor, pageBackdrop, chooseCanvas } from './backdrop.js';
+import { COPY_MAX_BYTES, COPY_PRINT_CSS, pageRenderedCopy, prepareRenderedCopy } from './rendered-copy.js';
 import { safeReturnTo, signinUrl, threadRef } from './auth-return.js';
 import { createDraftStore } from './comment-drafts.js';
 
@@ -304,6 +305,7 @@ function clearCookieContent() {
 
 function forgetAccount(previous = null) {
   identityEpoch++;
+  cancelRenderedCopies();
   // Draft keys are principals (account:<id> / guest:<id>), not bare account
   // ids. Drop the cached principal before another response can name a new one.
   const previousPrincipal = guestUI.identityKey() || (previous ? `account:${previous}` : null);
@@ -533,6 +535,7 @@ const RUNTIME = `(function(){
 // Pikchr diagrams are rendered to SVG, and the fonts the page names embedded.
 async function render() {
   const run = ++renders;
+  cancelRenderedCopies();
   const names = Object.keys(shown.files);
   const entry = names.includes('index.html') ? 'index.html' : names.find(n => /\.html?$/i.test(n));
   if (!entry) throw new Error('this version has no .html file to show');
@@ -592,13 +595,16 @@ async function render() {
   // despite the CSP's host restrictions.
   for (const el of doc.querySelectorAll('script[src], link[rel~="stylesheet"]')) el.removeAttribute('nonce');
   for (const el of doc.querySelectorAll('script:not([src]), style')) el.setAttribute('nonce', NONCE);
+  const printStyle = doc.createElement('style');
+  printStyle.setAttribute('nonce', NONCE); printStyle.textContent = COPY_PRINT_CSS;
+  doc.head.append(printStyle);
   const runtime = doc.createElement('script');
   runtime.setAttribute('nonce', NONCE);
   // Carry the choice into the sandbox before paint, retaining the author's
   // original root theme so System can restore it without changing saved files.
   const theme = document.documentElement.dataset.theme;
   const preference = theme === 'light' || theme === 'dark' ? theme : 'system';
-  runtime.textContent = `(${pageAppearance})(${JSON.stringify(preference)});\n${RUNTIME}`;
+  runtime.textContent = `(${pageAppearance})(${JSON.stringify(preference)});\n(${pageRenderedCopy})(${run});\n${RUNTIME}`;
   doc.head.prepend(runtime);
   if (frameUrl) URL.revokeObjectURL(frameUrl);
   frameUrl = URL.createObjectURL(new Blob(['<!DOCTYPE html>\n' + doc.documentElement.outerHTML], { type: 'text/html' }));
@@ -3343,6 +3349,151 @@ for (const [btn, input] of [['uploadFilesBtn', 'uploadFiles'], ['uploadFolderBtn
     }
   });
 }
+
+// A rendered copy carries page content, never viewer chrome, identity or an
+// access grant. The response belongs to one frame, version and confirmed account.
+const renderedCopies = new Map();
+let renderedCopyBusy = false;
+function cancelRenderedCopies() {
+  for (const pending of renderedCopies.values()) { clearTimeout(pending.timer); pending.reject(new Error('The document or account changed. Try again.')); }
+  renderedCopies.clear();
+  for (const id of ['renderedCopyDialog', 'renderedCopyReady']) document.getElementById(id)?.close();
+}
+function copyScope() {
+  return { epoch: identityEpoch, artifact: art?.id, version: shown?.checkin, render: renders, page: $('frame').contentWindow };
+}
+function copyCurrent(scope) {
+  const current = scope.epoch === identityEpoch && scope.artifact === art?.id && scope.version === shown?.checkin
+    && scope.render === renders && scope.page === $('frame').contentWindow && frameReady;
+  return current;
+}
+function captureRenderedCopy(scope) {
+  return new Promise((resolve, reject) => {
+    const request = crypto.randomUUID();
+    const timer = setTimeout(() => { renderedCopies.delete(request); reject(new Error('The page did not respond. Refresh it and try again.')); }, 15000);
+    renderedCopies.set(request, { scope, resolve, reject, timer });
+    scope.page.postMessage({ __artifactRenderedCopy: 1, render: scope.render, request }, '*');
+  });
+}
+addEventListener('message', event => {
+  const d = event.data;
+  if (d?.__artifactRenderedCopy === 1) {
+    const pending = renderedCopies.get(d.request);
+    if (!pending || event.source !== pending.scope.page || d.render !== pending.scope.render) return;
+    clearTimeout(pending.timer); renderedCopies.delete(d.request);
+    if (!copyCurrent(pending.scope)) { pending.reject(new Error('The document or account changed. Try again.')); return; }
+    if (typeof d.error === 'string') { pending.reject(new Error('The page could not prepare a rendered copy.')); return; }
+    if (typeof d.html !== 'string' || enc.encode(d.html).byteLength > COPY_MAX_BYTES) { pending.reject(new Error('The rendered document is too large. Download its files instead.')); return; }
+    pending.resolve(d.html);
+  } else if (d?.__artifactCopyShortcut === 1 && event.source === $('frame').contentWindow && d.render === renders
+    && ['save', 'print'].includes(d.action) && navigator.userActivation.isActive) {
+    // Same-frame scripts can forge a message during an unrelated click. A
+    // parent-owned confirmation, not activation alone, authorizes the action.
+    confirmRenderedCopy(d.action);
+  }
+});
+function confirmRenderedCopy(action) {
+  if (document.getElementById('renderedCopyDialog') || document.getElementById('renderedCopyReady') || !shown || !frameReady) return;
+  const scope = copyScope();
+  const dialog = el('dialog', { id: 'renderedCopyDialog', className: 'rendered-copy-dialog' });
+  const heading = el('h2', { id: 'renderedCopyHeading', textContent: action === 'save' ? 'Save rendered HTML?' : 'Print this artifact?' });
+  dialog.setAttribute('aria-labelledby', heading.id);
+  const description = el('p', { textContent: 'A read-only copy of the rendered document will be prepared. It has no live artifact API or viewer access grant.' });
+  const cancel = el('button', { id: 'renderedCopyCancel', type: 'button', textContent: 'Cancel' });
+  const proceed = el('button', { id: 'renderedCopyConfirm', type: 'button', className: 'accent', textContent: action === 'save' ? 'Save HTML' : 'Print' });
+  cancel.addEventListener('click', () => dialog.close());
+  proceed.addEventListener('click', () => {
+    dialog.close();
+    if (copyCurrent(scope)) exportRenderedCopy(action);
+    else notice('The document or account changed. Review it and try again.');
+  });
+  dialog.addEventListener('close', () => dialog.remove(), { once: true });
+  dialog.append(heading, description, el('div', { className: 'rendered-copy-actions' }, cancel, proceed));
+  document.body.append(dialog); dialog.showModal(); cancel.focus();
+}
+async function verifyCopyAccess(scope) {
+  if (!link?.token) {
+    const { id, seq } = await sessionRequest({ fresh: true });
+    if (seq !== sessionSeq || id === null) throw new Error('Could not confirm account access. No copy was exported.');
+    acceptSessionAccount(id);
+    if (!id || !copyCurrent(scope)) throw new Error('Your account changed. Review access and try again.');
+  }
+  await art.info();
+  if (!copyCurrent(scope)) throw new Error('The document or account changed. Try again.');
+}
+function offerRenderedDownload(url, filename, scope, warnings) {
+  const dialog = el('dialog', { id: 'renderedCopyReady', className: 'rendered-copy-dialog' });
+  const title = el('h2', { id: 'renderedCopyReadyTitle', textContent: 'Your rendered copy is ready' });
+  dialog.setAttribute('aria-labelledby', title.id);
+  const description = el('p', { textContent: warnings.length ? warnings[0] : 'Save this portable, read-only HTML file. It contains no live artifact API or viewer access grant.' });
+  const cancel = el('button', { type: 'button', textContent: 'Cancel' });
+  const download = el('a', { id: 'renderedCopyDownload', className: 'button accent', href: url, download: filename, textContent: 'Save HTML' });
+  let delivered = false;
+  cancel.addEventListener('click', () => dialog.close());
+  download.addEventListener('click', event => {
+    if (!copyCurrent(scope)) {
+      event.preventDefault(); dialog.close(); notice('The document or account changed. Prepare the copy again.'); return;
+    }
+    // Let the browser handle a real user click. A second synthetic automatic
+    // download can otherwise be blocked even after the copy was prepared.
+    delivered = true; notice('Rendered HTML download requested.');
+    setTimeout(() => dialog.close(), 0);
+  });
+  const deadline = setTimeout(() => { if (dialog.open) dialog.close(); }, 120000);
+  dialog.addEventListener('close', () => { clearTimeout(deadline); if (!delivered) URL.revokeObjectURL(url); dialog.remove(); }, { once: true });
+  dialog.append(title, description, el('div', { className: 'rendered-copy-actions' }, cancel, download));
+  document.body.append(dialog); dialog.showModal(); download.focus();
+}
+async function exportRenderedCopy(action) {
+  if (renderedCopyBusy || document.getElementById('renderedCopyReady') || !shown || !frameReady) return;
+  const scope = copyScope();
+  const popup = action === 'print' ? window.open('about:blank', '_blank') : null;
+  if (action === 'print' && !popup) { notice('Allow the print window, then choose Print again.'); return; }
+  if (popup) popup.opener = null;
+  renderedCopyBusy = true; closePopovers();
+  notice(action === 'print' ? 'Preparing the whole document for printing…' : 'Preparing a portable rendered copy…');
+  try {
+    await verifyCopyAccess(scope);
+    const source = await captureRenderedCopy(scope);
+    if (!copyCurrent(scope)) throw new Error('The document changed. Try again.');
+    const copy = await prepareRenderedCopy(source, { origin: location.origin, blobs: shown.blobs, nonce: NONCE, omit: [link?.token, info?.readToken, info?.commentToken] });
+    await verifyCopyAccess(scope);
+    const url = URL.createObjectURL(new Blob([copy.html], { type: 'text/html;charset=utf-8' }));
+    setTimeout(() => URL.revokeObjectURL(url), 120000);
+    if (action === 'save') {
+      const name = (copy.title || info.title || 'artifact').replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '') || 'artifact';
+      offerRenderedDownload(url, `${name.slice(0, 100)}-${shortId(scope.version)}.html`, scope, copy.warnings);
+      notice('Rendered copy ready. Choose Save HTML to save the file.');
+    } else {
+      popup.location.replace(url);
+      const deadline = Date.now() + 15000;
+      const timer = setInterval(() => {
+        if (popup.closed || !copyCurrent(scope) || Date.now() > deadline) {
+          clearInterval(timer);
+          if (!popup.closed && !copyCurrent(scope)) popup.close();
+          return;
+        }
+        try {
+          if (popup.location.protocol === 'blob:' && popup.document.readyState === 'complete') {
+            clearInterval(timer); popup.focus(); popup.print();
+          }
+        } catch { clearInterval(timer); notice('The print window is ready. Use its browser Print command.'); }
+      }, 100);
+      notice(copy.warnings.length ? 'Print copy ready with a media warning. ZIP retains the original files.' : 'Print copy ready. The whole rendered document is included.');
+    }
+  } catch (error) {
+    if (popup && !popup.closed) popup.close();
+    if (copyCurrent(scope)) notice(`Could not export: ${error.message}`);
+  } finally { renderedCopyBusy = false; }
+}
+$('saveHtmlBtn').addEventListener('click', () => exportRenderedCopy('save'));
+$('printCopyBtn').addEventListener('click', () => exportRenderedCopy('print'));
+addEventListener('keydown', event => {
+  if (!event.isTrusted || !(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey) return;
+  const action = event.key.toLowerCase() === 's' ? 'save' : event.key.toLowerCase() === 'p' ? 'print' : '';
+  if (!action || !shown || !frameReady) return;
+  event.preventDefault(); if (!event.repeat) exportRenderedCopy(action);
+}, true);
 
 // Every file of the version shown, with the real bytes of images and other blobs.
 for (const id of ['downloadBtn', 'downloadFilesBtn']) $(id).addEventListener('click', async () => {

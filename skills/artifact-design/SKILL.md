@@ -58,7 +58,12 @@ offering any control that writes; a read link must show a read-only state.
 **No downloads, no printing to file.** `<a download>` and script-driven saves
 do nothing. Never offer "Download" or "Export file". Show the output in a
 `<textarea>` or `<pre>` with a Copy button; the clipboard may be refused, so
-catch the rejection and select the text instead.
+catch the rejection and select the text instead. The viewer's own Share → Export
+controls provide **Print** and **Save HTML** (also Cmd/Ctrl+P and Cmd/Ctrl+S): these
+are parent-authorized, read-only rendered copies, not a download API available to
+artifact scripts. A shortcut from the page requires parent confirmation. Copies
+contain no live artifact bridge or viewer access grant; unsupported/oversized media
+is explicit, and Download ZIP preserves the original source files.
 
 **Other sandbox facts.** `alert`/`confirm`/`prompt` work, but a designed
 in-page confirmation reads better. Forms post nowhere: handle `submit` with

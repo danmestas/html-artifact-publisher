@@ -724,7 +724,8 @@ test('responder status: written by editors only, resolved by change prefix, read
   assert.equal((await api(`/api/artifacts/nosuchartifact/responder-status`, { method: 'PUT', token: a.write, body: { change: change.slice(0, 10), state: 'seen' } })).status, 404);
   for (const bad of [{}, { change: change.slice(0, 9), state: 'seen' }, { change: change.slice(0, 10), state: 'busy' },
     { change: change.slice(0, 10), state: 'seen', step: '' }, { change: change.slice(0, 10), state: 'seen', extra: 1 },
-    { change: change.slice(0, 10), state: 'seen', step: 'x'.repeat(81) }, { change: change.slice(0, 10).toUpperCase(), state: 'seen' }]) {
+    // A random prefix can contain only digits, which uppercasing does not change.
+    { change: change.slice(0, 10), state: 'seen', step: 'x'.repeat(81) }, { change: 'ABCDEF0123', state: 'seen' }]) {
     const r = await status(a.write, bad);
     assert.equal(r.status, 400, JSON.stringify(bad));
   }

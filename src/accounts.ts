@@ -246,6 +246,19 @@ export async function accountRoutes(req: Request, env: Env): Promise<Response | 
     if (!expiration.found) return error('Not found',404);
     return expiration.projected ? json({ ok:true }) : json({ ok:true,expirationPending:true },202);
   }
+  if (path==='/api/admin/search-index') {
+    // Existing instance authority owns this inventory operation, not an account
+    // identity. It gains no access to people, grants or credential issuance.
+    if (!actor.legacy && !actor.user) return error('Sign in required',401);
+    if (!actor.legacy && actor.user?.role!=='owner') return error('Instance owner required',403);
+    if (method==='GET') return json(await r.searchBackfillStatus());
+    if (method==='POST') {
+      const input = await smallBody(req);
+      if (!input || Object.keys(input).length) return error('Expected an empty object');
+      return json(await r.startSearchBackfill(),202);
+    }
+    return error('Method not allowed',405);
+  }
   const user = actor.user;
   if (!user) return error('Sign in required',401);
   const admin = user.role==='owner';
@@ -255,14 +268,6 @@ export async function accountRoutes(req: Request, env: Env): Promise<Response | 
   const reauth = reauthenticationError;
   if (path.startsWith('/api/admin/') || path.startsWith('/api/people') || path==='/api/invitations') {
     if (!admin) return error('Instance owner required',403);
-  }
-  if (path==='/api/admin/search-index') {
-    if (method==='GET') return json(await r.searchBackfillStatus());
-    if (method==='POST') {
-      const input = await smallBody(req);
-      if (!input || Object.keys(input).length) return error('Expected an empty object');
-      return json(await r.startSearchBackfill(),202);
-    }
   }
   if ((path==='/api/library' || path==='/api/admin/artifacts') && method==='GET') return libraryResults(req,env,user,path==='/api/admin/artifacts');
   if (path==='/api/people' && method==='GET') {

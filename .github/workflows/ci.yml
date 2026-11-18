@@ -88,6 +88,16 @@ jobs:
       - name: End-to-end tests
         run: npm test
 
+      - name: Rendered-copy browser and PDF security regression
+        env:
+          RENDERED_COPY_BROWSER_QA: '1'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y poppler-utils
+          export AGENT_BROWSER_EXECUTABLE_PATH="$(command -v google-chrome)"
+          test -n "$AGENT_BROWSER_EXECUTABLE_PATH"
+          npm exec --yes --package=agent-browser@0.39.4 -- node --test test/rendered-copy-browser.mjs
+
       - name: Keep the tested build for deploy
         uses: actions/upload-artifact@v4
         with:

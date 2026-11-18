@@ -136,7 +136,8 @@ let frameReady = false; // the page has loaded and can take pins
 // re-reads it after its awaits and is dropped if the epoch moved. A stale 401
 // therefore cannot sign out an account that was confirmed after it was sent.
 let accountId = null;   // null until /api/session answers, '' when signed out
-let identityEpoch = 0;  // bumped whenever the confirmed identity changes
+let identityEpoch = 0;  // posting identity and account-scoped discussion state
+let readerEpoch = 0;    // known account transitions, not initial discovery or guest persona changes
 let sessionCheckedAt = 0;
 let sessionCheckedEpoch = -1;
 let sessionSeq = 0;      // newest /api/session request wins over older ones
@@ -187,7 +188,11 @@ function acceptSessionAccount(id) {
     signInContinuation = !adopted && !!id;
     signInJustConfirmed = signInContinuation;
     try {
-      if (adopted) forgetAccount(previous); else identityEpoch++;
+      if (adopted) forgetAccount(previous);
+      else {
+        identityEpoch++;
+        if (previous !== null) { readerEpoch++; cancelRenderedCopies(); }
+      }
     } finally { signInContinuation = false; }
   }
   sessionCheckedAt = Date.now();
@@ -304,7 +309,7 @@ function clearCookieContent() {
 }
 
 function forgetAccount(previous = null) {
-  identityEpoch++;
+  identityEpoch++; readerEpoch++;
   cancelRenderedCopies();
   // Draft keys are principals (account:<id> / guest:<id>), not bare account
   // ids. Drop the cached principal before another response can name a new one.
@@ -3360,10 +3365,10 @@ function cancelRenderedCopies() {
   for (const id of ['renderedCopyDialog', 'renderedCopyReady']) document.getElementById(id)?.close();
 }
 function copyScope() {
-  return { epoch: identityEpoch, artifact: art?.id, version: shown?.checkin, render: renders, page: $('frame').contentWindow };
+  return { epoch: readerEpoch, artifact: art?.id, version: shown?.checkin, render: renders, page: $('frame').contentWindow };
 }
 function copyCurrent(scope) {
-  const current = scope.epoch === identityEpoch && scope.artifact === art?.id && scope.version === shown?.checkin
+  const current = scope.epoch === readerEpoch && scope.artifact === art?.id && scope.version === shown?.checkin
     && scope.render === renders && scope.page === $('frame').contentWindow && frameReady;
   return current;
 }

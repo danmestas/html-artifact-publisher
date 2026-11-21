@@ -199,6 +199,7 @@ The build fails if the result is over the size budget, 800,000 bytes gzipped (`F
 ```bash
 node scripts/publish-html.mjs [publish] [options] <file.html | dir>
 node scripts/publish-html.mjs update <edit-url> <file.html | dir> [--message <text>] [--title <text>] [--notes <file>]
+node scripts/publish-html.mjs update <url>/v/<id> <file.html | dir>   # no edit link: uses HTML_PUBLISHER_TOKEN (creator, editor or instance owner)
 node scripts/publish-html.mjs read <url>[@<check-in>] [--out <dir>]
 node scripts/publish-html.mjs history <url>
 node scripts/publish-html.mjs list
@@ -223,7 +224,9 @@ node scripts/publish-html.mjs watch <edit-or-comment-url> [--since <hash>] [--in
 
 `NOTES.md` carries the page's context (what it is for, what has been decided, what not to touch) for whoever answers comments on it. It is an ordinary file in the repository: it appears in the clone and in `read --out`, is listed with the other files, and is never shown as the page. `update` without `--notes` leaves the existing `NOTES.md` as it is; with `--notes` it replaces it (tracked in #22).
 
-`HTML_PUBLISHER_URL` and `HTML_PUBLISHER_TOKEN` are needed for `publish`, `list`, `expire`, and account/instance `search`; link-based commands, including `search --artifact <capability-url>`, take their authority from the supplied link.
+`HTML_PUBLISHER_URL` and `HTML_PUBLISHER_TOKEN` are needed for `publish`, `list`, `expire`, account/instance `search`, and `update` with a plain artifact address. Edit-link updates and `search --artifact <capability-url>` take their authority from the supplied link.
+
+If an edit link is lost, `update https://<publisher>/v/<id> <file.html|dir>` uses the configured personal or instance credential. The configured URL must be a bare HTTP(S) origin with no credentials, path, query or fragment; the artifact must be on that exact origin. Artifact URL queries are ignored. Creators, named editors and the instance owner may update only where the server grants write access. Explicit read/comment links never fall back to stronger environment credentials. These account-update API and blob-upload requests refuse redirects. Owners receive the verified reusable read link; a named editor without a read token receives the plain sign-in-required address with `linkVerified:false`, not a new anonymous grant.
 
 `search 'remembered words' --json` finds current titles, headings and readable HTML body text remotely without a browser. Personal credentials keep account-library scope; instance automation keeps inventory scope; `--artifact` uses only that supplied capability for exactly one artifact. One bounded page includes partial-match information, plain-text excerpts, index coverage and `nextCursor` (reuse with the same query). Result viewer URLs are tokenless navigation, not new grants. Search refuses redirects and never publishes, posts comments or copies to the clipboard. Use [Content search](docs/search-api.md) for exact HTTPS scopes/filters, historical/JavaScript/PDF limitations, and owner-controlled resumable backfill.
 
@@ -296,7 +299,7 @@ pinned SVG rasterizer is a development dependency, never Worker runtime code.
 }
 ```
 
-Share `viewerUrl`, after every publish and every update; `update` prints it too, and both check that it opens (`linkVerified`). Keep `editUrl` and `cloneUrl` private. Hand out `commentUrl` to people who should comment without editing; deleting the artifact revokes all three links. An artifact published before comment links gets one the first time an edit-link holder opens it or runs `update`.
+Share `viewerUrl` after every publish and every update. Reusable read links are checked (`linkVerified`); a plain named-access link returned to an editor without a read token is not anonymously verified (`false`), so say it requires sign-in. Keep `editUrl` and `cloneUrl` private. Hand out `commentUrl` to people who should comment without editing; deleting the artifact revokes all three links. An artifact published before comment links gets one the first time an edit-link holder opens it or runs `update`.
 
 ### Working with Fossil directly
 

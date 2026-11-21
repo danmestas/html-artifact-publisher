@@ -1112,10 +1112,24 @@ test('CLI', async () => {
   assert.equal(cli('update', '--no-clipboard', out.editUrl, dir).code, 1, 'nothing changed');
   assert.notEqual(cli('update', '--no-clipboard', out.viewerUrl, dir).code, 0, 'read link cannot update');
 
+  // A lost edit link: the plain address plus the owner credential still updates.
+  const plain = out.viewerUrl.split('#')[0];
+  writeFileSync(join(dir, 'index.html'), '<!doctype html><link rel="stylesheet" href="style.css"><h1>v3</h1>');
+  const byAccount = cli('update', '--json', '--no-clipboard', '--message', 'by account', `${plain}?returnTo=%2F`, dir);
+  assert.equal(byAccount.code, 0, byAccount.out);
+  const byAccountOut = JSON.parse(byAccount.out);
+  assert.equal(byAccountOut.viewerUrl, out.viewerUrl, 'hands back the read link');
+  assert.equal(byAccountOut.linkVerified, true);
+  const elsewhere = plain.replace('127.0.0.1', 'localhost');
+  const refused = cli('update', '--no-clipboard', elsewhere, dir);
+  assert.notEqual(refused.code, 0, 'the credential is never sent to another origin');
+  assert.match(refused.out, /origin must match/);
+  writeFileSync(join(dir, 'index.html'), '<!doctype html><link rel="stylesheet" href="style.css"><h1>v2</h1>');
+
   const hist = JSON.parse(cli('history', '--json', out.viewerUrl).out);
-  assert.deepEqual(hist.map(c => c.comment), ['second', 'Publish site']);
-  assert.match(cli('read', out.viewerUrl).out, /<h1>v2<\/h1>/);
-  assert.match(cli('read', `${out.viewerUrl}@${hist[1].uuid.slice(0, 12)}`).out, /<h1>v1<\/h1>/);
+  assert.deepEqual(hist.map(c => c.comment), ['by account', 'second', 'Publish site']);
+  assert.match(cli('read', out.viewerUrl).out, /<h1>v3<\/h1>/);
+  assert.match(cli('read', `${out.viewerUrl}@${hist[2].uuid.slice(0, 12)}`).out, /<h1>v1<\/h1>/);
   assert.match(cli('list').out, /CLI/);
   assert.equal(cli('delete', out.editUrl).code, 0);
 

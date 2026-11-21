@@ -20,7 +20,7 @@ import { remoteSearch } from './search.mjs';
 const HELP = `
 Usage:
   node scripts/publish-html.mjs [publish] [options] <file.html | dir>
-  node scripts/publish-html.mjs update <edit-url> <file.html | dir> [--message <text>] [--title <text>] [--notes <file>]
+  node scripts/publish-html.mjs update <edit-or-plain-url> <file.html | dir> [--message <text>] [--title <text>] [--notes <file>]
   node scripts/publish-html.mjs read <url> [--out <dir>]
   node scripts/publish-html.mjs history <url>
   node scripts/publish-html.mjs list
@@ -49,7 +49,12 @@ A single file is stored as index.html; a directory is stored as-is (it needs an
 index.html or another .html file). Every .html file must be a whole document
 (starting with <!doctype html or <html); the viewer never wraps a fragment.
 Updating with a directory adds and changes files; files missing from the
-directory are kept from the previous version. External subresources (scripts,
+directory are kept from the previous version. update accepts a plain /v/<id>
+link on HTML_PUBLISHER_URL's bare HTTP(S) origin using HTML_PUBLISHER_TOKEN.
+The account must be a creator, named editor or instance owner. Explicit read or
+comment links never fall back to that credential. A named editor without a reusable
+read token gets a sign-in-required plain link with linkVerified:false.
+Credentialed API and upload requests refuse redirects. External subresources (scripts,
 stylesheets, images, CSS url/@import) are warned about: the viewer blocks
 external resource loads, so those will not load. Ordinary links and URL text are not
 warned about. A URL may end in @<check-in> to read that version.
@@ -276,14 +281,41 @@ async function publish() {
   }
 }
 
+/** Explicit capability authority wins; tokenless updates use one pinned origin. */
+function updateLink(raw) {
+  let url;
+  try { url = new URL(raw); } catch { die(`not a URL: ${redact(raw)}`); }
+  if (url.hash) return parseLink(raw);
+  const match = /^\/v\/([A-Za-z0-9_-]{1,64})$/.exec(url.pathname);
+  if (!match) die(`not an artifact link (expected /v/<id>): ${redact(raw)}`);
+  let configured;
+  try { configured = new URL(env('HTML_PUBLISHER_URL')); }
+  catch { die('HTML_PUBLISHER_URL must be a bare HTTP(S) origin'); }
+  if (!['http:', 'https:'].includes(configured.protocol) || configured.username || configured.password
+    || configured.pathname !== '/' || configured.search || configured.hash || url.username || url.password
+    || url.origin !== configured.origin) {
+    die('artifact origin must match HTML_PUBLISHER_URL as a bare HTTP(S) origin');
+  }
+  const art = new Artifact(url.origin, match[1], '');
+  art.auth = `Bearer ${env('HTML_PUBLISHER_TOKEN')}`;
+  return { base: url.origin, id: match[1], token: '', at: '', art };
+}
+
 async function update() {
   const [rawUrl, filePath] = positional;
-  if (!rawUrl || !filePath) die('usage: update <edit-url> <file.html | dir>');
-  const link = parseLink(rawUrl);
+  if (!rawUrl || !filePath) die('usage: update <edit-or-plain-url> <file.html | dir>');
+  const link = updateLink(rawUrl);
   const { files, warnings } = readInput(filePath);
   await checkDiagrams(files);
-  const { tip, role, readToken, commentToken } = await link.art.info();
-  if (role !== 'write') die(`this is a ${role} link; updating needs the edit link`);
+  let current;
+  try { current = await link.art.info(); }
+  catch (error) {
+    if (!link.token && (error.status === 403 || error.status === 404)) die('this account cannot edit this artifact; use its edit link');
+    throw error;
+  }
+  const { tip, role, readToken, commentToken } = current;
+  if (role !== 'write') die(link.token ? `this is a ${role} link; updating needs the edit link`
+    : 'this account cannot edit this artifact; use its edit link');
   let result;
   try {
     result = await link.art.publish(tip, files, flagValue('--message') ?? `Update ${basename(filePath)}`, {
@@ -291,11 +323,12 @@ async function update() {
     });
   } catch (e) {
     if (e instanceof ConflictError) die(`${e.message}. Nothing was saved.`, 3);
+    if (!link.token && (e.status === 403 || e.status === 404)) die('this account cannot edit this artifact; use its edit link');
     die(e.message);
   }
   // The read link: it opens the newest version, which is the one just saved.
-  const viewerUrl = `${link.base}/v/${link.id}#${readToken}`;
-  const linkVerified = await verifyLink(link.base, link.id, viewerUrl);
+  const viewerUrl = readToken ? `${link.base}/v/${link.id}#${readToken}` : `${link.base}/v/${link.id}`;
+  const linkVerified = readToken ? await verifyLink(link.base, link.id, viewerUrl) : false;
   const commentUrl = commentToken ? `${link.base}/v/${link.id}#${commentToken}` : undefined;
   output({ id: link.id, viewerUrl, commentUrl, checkin: result.tip, linkVerified, warnings: warnings.length, warningMessages: warnings }, viewerUrl);
 }

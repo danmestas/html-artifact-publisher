@@ -158,6 +158,15 @@ saved; `read` the newer version and build on it. An update whose files already m
 tip exits 1 with "nothing changed". Use the URL and history the instance returns; do not
 construct links by hand.
 
+A lost edit link does not require a duplicate artifact.
+`update "$ARTIFACT_PLAIN_URL" /absolute/path/to/page --json` uses the existing
+HTML_PUBLISHER_TOKEN if the server
+grants it write access. HTML_PUBLISHER_URL must be a bare HTTP(S) origin and match the
+artifact's origin exactly; credentials are never forwarded to a linked host or along
+an API/upload redirect. Explicit read/comment links do not fall back to account
+credentials. Owners get a verified read link; a named editor without a read token gets
+a plain sign-in-required address with linkVerified:false, not a new anonymous grant.
+
 The default TTL is 7d (7 days); `--ttl never` keeps the artifact until it is deleted.
 
 `expire <artifact-url> <ttl|never>` changes an existing artifact's deadline only: the

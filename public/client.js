@@ -69,10 +69,10 @@ export async function withBlobs(files, uploadBase, auth, onUpload) {
     const pointer = await pointerFor(path, bytes);
     const url = `${uploadBase}/${pointer.blob.sha256}`;
     const headers = auth ? { Authorization: auth } : {};
-    const known = await fetch(url, { method: 'HEAD', headers, cache: 'no-store' });
+    const known = await fetch(url, { method: 'HEAD', headers, cache: 'no-store', redirect: 'error' });
     if (known.status !== 200) {
       onUpload?.(path);
-      const res = await fetch(url, { method: 'PUT', headers: { ...headers, 'Content-Type': pointer.blob.type }, body: bytes });
+      const res = await fetch(url, { method: 'PUT', headers: { ...headers, 'Content-Type': pointer.blob.type }, body: bytes, redirect: 'error' });
       if (!res.ok) throw new ApiError(res.status, { error: `could not upload ${path}: ${(await res.json().catch(() => ({}))).error ?? `HTTP ${res.status}`}` });
     }
     out[path] = pointer.bytes;
@@ -94,12 +94,13 @@ export async function readFileList(list) {
   return out;
 }
 
+// API routes are not redirect flows: never replay authorization or write bodies.
 async function call(url, { method = 'GET', auth = '', body, raw = false, expectedCommentIdentity } = {}) {
   const headers = {};
   if (auth) headers.Authorization = auth;
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   if (expectedCommentIdentity !== undefined && expectedCommentIdentity !== null) headers['X-Comment-Identity'] = String(expectedCommentIdentity);
-  const res = await fetch(url, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), cache: 'no-store' });
+  const res = await fetch(url, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), cache: 'no-store', redirect: 'error' });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new (res.status === 409 && err.code === 'conflict' ? ConflictError : ApiError)(res.status, err, res.headers);

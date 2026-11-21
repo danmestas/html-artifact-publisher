@@ -105,6 +105,7 @@ inputs should be absolute paths.
 ```bash
 node scripts/publish-html.mjs [publish] [options] <file.html | dir>
 node scripts/publish-html.mjs update <edit-url> <file.html | dir> [--message <text>] [--title <text>] [--notes <file>]
+node scripts/publish-html.mjs update <url>/v/<id> <file.html | dir>   # no edit link: uses HTML_PUBLISHER_TOKEN (creator, editor or instance owner)
 node scripts/publish-html.mjs read <url> [--out <dir>]    # URL may end in @<check-in>
 node scripts/publish-html.mjs history <url>
 node scripts/publish-html.mjs list
@@ -164,6 +165,8 @@ Environment (must be set before running):
 - `HTML_PUBLISHER_URL`   — Worker base URL, e.g. `https://artifacts.example.com`
 - `HTML_PUBLISHER_TOKEN` — API bearer token
 
+`update` may use a plain `/v/<id>` address when the edit link is lost. It needs both variables, a bare HTTP(S) configured origin (no userinfo/path/query/fragment), and an artifact on that exact origin. Queries on the artifact link are ignored. The server must authorize the configured account as creator/editor/instance owner. Read/comment links never fall back to that credential, and account-update API/blob uploads refuse redirects. A returned read capability is verified as usual; a named editor without one gets a plain named-access address and `linkVerified:false`—state that sign-in is required, not that anonymous sharing was granted.
+
 `expire` needs both variables and a read or edit link on `HTML_PUBLISHER_URL`'s
 origin. Use the artifact creator's or instance owner's personal automation
 credential, or the legacy instance bearer. An edit link alone cannot manage
@@ -191,7 +194,7 @@ Expired artifacts cannot be revived.
 4. Return `viewerUrl` to the user. Keep `editUrl` (and `cloneUrl`) to
    yourself for later updates.
 
-   **Always post the link.** Every time you publish *or update* an artifact, give the user its read link: `viewerUrl` from the CLI output, on its own line, with the full `#…` token. It opens the newest version, and the CLI has already checked that it opens (`linkVerified: true`). Never post the edit link or clone URL in its place, and never build a link by hand. If `linkVerified` is false, say the link didn't open instead of presenting it as working.
+   **Always post the link.** Every time you publish *or update* an artifact, give the user its read link: `viewerUrl` from the CLI output, on its own line, with the full `#…` token. It opens the newest version, and the CLI has already checked that it opens (`linkVerified: true`). Never post the edit link or clone URL in its place, and never build a link by hand. If `linkVerified` is false, do not present it as a verified anonymous link. A plain address from an account-backed editor update requires sign-in with access; otherwise report that verification failed.
 
 5. To revise the artifact, run `update <editUrl> <file|dir> --message "<what changed>"`.
    This adds a new version at the same URL; do not publish a new artifact for

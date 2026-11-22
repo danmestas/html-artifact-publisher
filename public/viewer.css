@@ -137,7 +137,7 @@ input[type=text], input[type=email], input[type=datetime-local], textarea {
 .tag.latest { color: var(--muted); }
 
 .comment-group { display: inline-flex; align-items: center; gap: 2px; flex: none; }
-#commentsBtn, #discussionsBtn { display: inline-flex; align-items: center; gap: 5px; width: auto; min-width: 34px; padding: 0 6px; color: var(--ink-2); }
+#commentsBtn, #discussionsBtn { display: inline-flex; align-items: center; justify-content: center; gap: 5px; width: auto; min-width: 34px; padding: 0 6px; color: var(--ink-2); }
 #commentsBtn:hover, #discussionsBtn:hover, #discussionsBtn[aria-expanded="true"] { background-color: transparent; color: var(--ink); }
 /* The placement toggle is a switch, so on must read as on: a filled, accented control. */
 #commentsBtn[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-ink); box-shadow: inset 0 0 0 1px var(--accent-edge); }

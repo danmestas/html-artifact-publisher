@@ -1,5 +1,6 @@
 ---
 name: publish-html-page
+description: Publish or update a self-contained HTML page as a shareable artifact link, with version history. Use after writing an HTML report, explainer or page to share, or to revise one already published.
 version: 1.0.0
 triggers:
   - publish html artifact

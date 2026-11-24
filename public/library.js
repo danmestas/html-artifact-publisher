@@ -2,6 +2,7 @@ import { encodeFiles, readFileList, withBlobs } from './client.js';
 import { isBlob } from './blobs.js';
 import { iconSvg, resolveIcon } from './icons.js';
 import { safeReturnTo } from './auth-return.js';
+import { PAGE_SIZES, readPaging, readLayout, pageRange, pageNumbers, pageForSize, validJump, listContext, resetPage, restoreListPage } from './library-paging.js';
 import {
   snippetParts, snippetPath, matchReason, termsNote, statusNote, coverageNote,
   readSort, readSortState, sortAfterQuery, urlSort, expiryLabel, expirySoon,
@@ -56,13 +57,18 @@ let accountEpoch = 0;   // Invalidates completions from an earlier identity, eve
 let preferences = {};
 try { preferences = JSON.parse(localStorage.getItem('artifact-library-preferences') || '{}') || {}; } catch { /* Optional per-browser preferences. */ }
 let layout = preferences.layout === 'grid' ? 'grid' : 'list';
-// The URL is the whole list state: view, search, filters, sort, and how many rows are shown (n).
+let confirmedPage = null;
+let lastListPage = null;
+let pageFocus = null;
+// Numbered List pages and accumulated Grid batches have separate URL state.
 function readState() {
   const p = new URLSearchParams(location.search);
   const n = Number.parseInt(p.get('n') || '', 10);
   const view = Object.hasOwn(VIEWS, p.get('view')) ? p.get('view') : 'all';
+  if (LIBRARY_VIEWS.includes(view)) layout = readLayout(p, preferences.layout);
   const batch = view === 'activity' ? EVENT_BATCH : BATCH;
   return {
+    ...readPaging(p),
     view, q: (p.get('q') || '').slice(0, 300), ownerId: view === 'admin' ? p.get('ownerId') || '' : '',
     status: view === 'admin' && ['all', 'active', 'archived'].includes(p.get('status')) ? p.get('status') : 'all',
     expiry: view === 'admin' && p.get('expiry') === 'soon' ? 'soon' : 'all',
@@ -187,6 +193,7 @@ async function api(path, { method = 'GET', body } = {}) {
       message('login-feedback', 'Sign in again to confirm this security change. Nothing was changed. Retry the change after signing in.');
     }
     if (response.status === 401 && user) {
+      rememberLibraryNavigation();
       user = null;
       adoptAccount(null);
       closeDialog();
@@ -204,6 +211,7 @@ async function api(path, { method = 'GET', body } = {}) {
 // Where to go after signing in: the library page sign-in interrupted, if any.
 // A page opened at /login?returnTo=… carries its own destination instead.
 function rememberLoginReturn() {
+  if (user) rememberLibraryNavigation();
   try { if (location.pathname !== '/login' && location.search) sessionStorage.setItem('artifact-login-return', location.search); } catch { /* optional */ }
 }
 function takeLoginReturn() {
@@ -229,6 +237,17 @@ function resetAccountCaches() {
   recentLoaded = false;
   nextCursor = null;
   shownCount = 0;
+  confirmedPage = null;
+  lastListPage = null;
+  pageFocus = null;
+  restoreFocus = null;
+  restoreScroll = null;
+  renderPageControls();
+  renderStatusCounts(null);
+  setOptions($('owner-filter'), [], 'Every owner');
+  $('result-status').textContent = '';
+  $('shown').textContent = '';
+  $('pagination').hidden = true;
   renderedView = null;
   ++loadSequence;
   $('content').replaceChildren();
@@ -414,6 +433,7 @@ function finishSignin(data) {
   if (destinationIsArtifact(destination)) { location.replace(destination); return; }
   history.replaceState(null, '', destination);
   state = readState();
+  syncSortChosen();
   return showApp();
 }
 // A link is only ever consumed by this explicit action; a GET never signs in.
@@ -501,26 +521,35 @@ $('logout').addEventListener('click', async () => {
   finally { $('logout').disabled = false; }
 });
 
-function writeUrl(replace = false) {
+const numberedList = () => state.view === 'admin' || (LIBRARY_VIEWS.includes(state.view) && layout === 'list');
+function stateUrl(value = state) {
   const p = new URLSearchParams();
-  if (state.view !== 'all') p.set('view', state.view);
-  if (state.q) p.set('q', state.q);
-  if (state.view === 'admin') {
-    if (state.ownerId) p.set('ownerId', state.ownerId);
-    if (state.status !== 'all') p.set('status', state.status);
-    if (state.expiry === 'soon') p.set('expiry', state.expiry);
+  if (value.view !== 'all') p.set('view', value.view);
+  if (value.q) p.set('q', value.q);
+  if (value.view === 'admin') {
+    if (value.ownerId) p.set('ownerId', value.ownerId);
+    if (value.status !== 'all') p.set('status', value.status);
+    if (value.expiry === 'soon') p.set('expiry', value.expiry);
   }
-  if (state.view === 'activity' && state.kind !== 'all') p.set('kind', state.kind);
-  if (state.n > (state.view === 'activity' ? EVENT_BATCH : BATCH)) p.set('n', String(state.n));
+  if (value.view === 'activity' && value.kind !== 'all') p.set('kind', value.kind);
+  if (LIBRARY_VIEWS.includes(value.view)) p.set('layout', layout);
+  if (value.view === 'admin' || (LIBRARY_VIEWS.includes(value.view) && layout === 'list')) {
+    p.set('page', String(value.page));
+    p.set('pageSize', String(value.pageSize));
+  } else if (value.n > (value.view === 'activity' ? EVENT_BATCH : BATCH)) p.set('n', String(value.n));
   // What the URL must record. Relevance is the default under a query and recent
   // is the default without one, so an explicit recent needs writing when a
   // query is present; otherwise Back and reload would flip it to relevance. A
   // recent the reader chose is written even without a query, so a reload keeps
   // the choice and the next query treats it as chosen.
-  const sortable = LIBRARY_VIEWS.includes(state.view) || state.view === 'admin';
-  const sort = sortable ? urlSort(state.sort, state.q, sortChosen) : null;
+  const sortable = LIBRARY_VIEWS.includes(value.view) || value.view === 'admin';
+  const sort = sortable ? urlSort(value.sort, value.q, sortChosen) : null;
   if (sort) p.set('sort', sort);
-  history[replace ? 'replaceState' : 'pushState'](null, '', '/' + (p.size ? '?' + p : ''));
+  return '/' + (p.size ? '?' + p : '');
+}
+function writeUrl(replace = false, previousFocus = libraryFocus(), previousScroll = window.scrollY) {
+  if (!replace) history.replaceState({ ...history.state, libraryFocus: previousFocus, libraryScroll: previousScroll }, '', location.href);
+  history[replace ? 'replaceState' : 'pushState'](replace ? history.state : null, '', stateUrl());
   refreshViewerLinks();
 }
 function closeNavigation() {
@@ -533,7 +562,13 @@ $('nav-toggle').addEventListener('click', () => {
   const expanded = document.querySelector('.sidebar').classList.toggle('expanded');
   $('nav-toggle').setAttribute('aria-expanded', String(expanded));
 });
-function resetPagination() { state.n = state.view === 'activity' ? EVENT_BATCH : BATCH; nextCursor = null; shownCount = 0; }
+function resetPagination() {
+  state = resetPage(state);
+  state.n = state.view === 'activity' ? EVENT_BATCH : BATCH;
+  nextCursor = null; shownCount = 0;
+  lastListPage = null;
+  pageFocus = null;
+}
 // A new view, scope, filter or Back/Forward restates the sort from its URL, so
 // a choice made in one view is neither carried into nor misread in another.
 function syncSortChosen() { sortChosen = currentSortState().chosen; }
@@ -542,7 +577,7 @@ function navigate(view) {
   clearTimeout(searchTimer);
   const sortable = LIBRARY_VIEWS.includes(view) || view === 'admin';
   const sort = !sortable && state.sort === 'expiry' ? 'recent' : state.sort;
-  state = { view, q: '', ownerId: '', status: 'all', expiry: 'all', kind: 'all', n: BATCH, sort: sortAfterQuery(sort, 'q', '', sortChosen) };
+  state = { view, q: '', ownerId: '', status: 'all', expiry: 'all', kind: 'all', n: BATCH, page: 1, pageSize: state.pageSize, sort: sortAfterQuery(sort, 'q', '', sortChosen) };
   resetPagination();
   writeUrl();
   syncSortChosen();
@@ -568,11 +603,17 @@ document.querySelectorAll('[data-view]').forEach(b => {
   if (b.hasAttribute('data-scope')) b.addEventListener('click', () => setScope(b.dataset.view));
   else b.addEventListener('click', () => navigate(b.dataset.view));
 });
-window.addEventListener('popstate', () => {
+window.addEventListener('popstate', e => {
   closeDialog();
+  clearTimeout(searchTimer);
+  rememberConfirmedPosition();
+  const previousPaged = numberedList();
   state = readState();
   syncSortChosen();
-  if (user) loadPage();
+  pageFocus = e.state?.libraryFocus || { pager: 'top', control: 'current' };
+  restoreScroll = Number.isFinite(e.state?.libraryScroll) && e.state.libraryScroll >= 0 ? e.state.libraryScroll : null;
+  const pageNavigation = previousPaged && numberedList() && confirmedPage?.context === listContext(state);
+  if (user) loadPage({ pageNavigation, historyNavigation: true });
 });
 // The Filters control is progressive disclosure: owner/status/expiry/sort live
 // in one labeled popover instead of a permanent row of competing controls.
@@ -608,9 +649,9 @@ document.addEventListener('scroll',e=>{if(filtersOpen()&&!$('filter-popover').co
 if ($('filter-toggle')) $('filter-toggle').addEventListener('click', () => { if (filtersOpen()) closeFilters(); else openFilters(); });
 if ($('popover-close')) $('popover-close').addEventListener('click', () => { closeFilters(); filterFocus().focus(); });
 if ($('popover-done')) $('popover-done').addEventListener('click', () => { closeFilters(); filterFocus().focus(); });
-function search() {
+function updateQuery(query) {
   const previous = state.q;
-  state.q = $('search').value;
+  state.q = query;
   // Typing a query where there was none keeps a sort the reader chose;
   // clearing the query returns the relevance default to recent.
   if (LIBRARY_VIEWS.includes(state.view) || state.view === 'admin') {
@@ -619,6 +660,9 @@ function search() {
     if (state.sort !== previousSort) sortChosen = false;
   }
   resetPagination();
+}
+function search() {
+  updateQuery($('search').value);
   writeUrl(true);
   loadPage();
 }
@@ -761,11 +805,121 @@ $('search-index-start')?.addEventListener('click', async () => {
 });
 
 document.querySelectorAll('[data-layout]').forEach(b => b.addEventListener('click', () => {
+  if (layout === b.dataset.layout) return;
+  clearTimeout(searchTimer);
+  if ($('search').value !== state.q) updateQuery($('search').value);
+  if (layout === 'list') lastListPage = { context: listContext(state), page: state.page, pageSize: state.pageSize };
   layout = b.dataset.layout;
+  if (layout === 'list') Object.assign(state, restoreListPage(state, lastListPage));
   preferences.layout = layout;
   savePreferences();
+  writeUrl();
   loadPage();
 }));
+
+function focusPageControl(focus) {
+  if (!focus) return;
+  let target;
+  if (['top', 'bottom'].includes(focus.pager)) {
+    const pager = $(`list-pagination-${focus.pager}`);
+    const control = ['current', 'size', 'jump'].includes(focus.control) ? focus.control : 'current';
+    target = pager?.querySelector(`[data-page-control="${control}"]`);
+    if (!target || !target.getClientRects().length) target = pager?.querySelector('.page-summary');
+    if (!target || !target.getClientRects().length) target = pager?.querySelector('.page-range');
+  } else if (focus.key) {
+    target = [...document.querySelectorAll('[data-library-focus]')].find(n => n.dataset.libraryFocus === focus.key);
+    const actions = { star: '.row-star, .star-button', manage: '.artifact-menu', details: '.artifact-details-button', sharing: '.sharing-summary' };
+    if (Object.hasOwn(actions, focus.action)) target = target?.closest('tr, article')?.querySelector(actions[focus.action]) || target;
+  } else if (focus.id) target = $(focus.id);
+  if (target && !target.closest('[hidden]')) target.focus({ preventScroll: true });
+}
+function libraryFocus(target = document.activeElement) {
+  const pager = target?.closest?.('[data-pager-position]');
+  if (pager) return { pager: pager.dataset.pagerPosition, control: target.dataset.pageControl || 'current' };
+  if (target?.dataset?.libraryFocus) return { key: target.dataset.libraryFocus };
+  const title = target?.closest?.('tr, article')?.querySelector('[data-library-focus]');
+  if (title) {
+    const action = target.matches('.row-star, .star-button') ? 'star' : target.matches('.artifact-menu') ? 'manage' : target.matches('.artifact-details-button') ? 'details' : target.matches('.sharing-summary') ? 'sharing' : null;
+    return { key: title.dataset.libraryFocus, action };
+  }
+  return target?.id ? { id: target.id } : null;
+}
+function rememberConfirmedPosition() {
+  if (confirmedPage && numberedList() && $('content').getAttribute('aria-busy') !== 'true' && confirmedPage.context === listContext(state) && confirmedPage.state.page === state.page && confirmedPage.state.pageSize === state.pageSize) {
+    confirmedPage.scroll = window.scrollY;
+  }
+}
+function goToPage(page, pageSize = state.pageSize, focus = { pager: 'top', control: 'current' }) {
+  if (!user || !numberedList() || $('content').getAttribute('aria-busy') === 'true') return;
+  if ($('search').value !== state.q) { clearTimeout(searchTimer); search(); return; }
+  clearTimeout(searchTimer);
+  rememberConfirmedPosition();
+  const previousFocus = libraryFocus();
+  const previousScroll = window.scrollY;
+  state = { ...state, page, pageSize };
+  pageFocus = focus;
+  loadPage({ pageNavigation: true, previousFocus, previousScroll });
+}
+function renderPageControls(loading = false) {
+  const confirmed = confirmedPage && numberedList() && confirmedPage.context === listContext(state) ? confirmedPage : null;
+  for (const position of ['top', 'bottom']) {
+    const nav = $(`list-pagination-${position}`);
+    nav.hidden = !confirmed;
+    nav.replaceChildren();
+    if (!confirmed) continue;
+    const { range, state: pageState } = confirmed;
+    const page = range.page;
+    const rangeText = range.total ? `${range.first}–${range.last} of ${range.total}` : '0 results';
+    const rangeLine = node('span', { className: 'page-range tiny', tabIndex: -1, textContent: loading ? 'Loading…' : rangeText });
+    const summary = node('span', { className: 'page-summary', tabIndex: -1, textContent: loading ? 'Loading…' : `Page ${page} of ${range.pages}` });
+    const links = node('div', { className: 'page-links' });
+    const link = (label, text, destination, className = '', disabled = false) => {
+      const anchor = node('a', { href: stateUrl({ ...pageState, page: destination }), className: `page-link ${className}`, textContent: text, ariaLabel: label });
+      if (loading || disabled) { anchor.setAttribute('aria-disabled', 'true'); anchor.tabIndex = -1; }
+      anchor.addEventListener('click', e => {
+        if (loading || disabled) { e.preventDefault(); return; }
+        if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+        e.preventDefault();
+        if (destination === page) return;
+        goToPage(destination, pageState.pageSize, { pager: position, control: 'current' });
+      });
+      return anchor;
+    };
+    links.append(link('First page', '«', 1, 'page-edge', page === 1), link('Previous page', '‹', Math.max(1, page - 1), '', page === 1));
+    const numbers = node('span', { className: 'page-numbers' });
+    for (const number of pageNumbers(page, range.pages)) {
+      if (number === 'ellipsis') numbers.append(node('span', { className: 'page-ellipsis', textContent: '…', ariaHidden: 'true' }));
+      else {
+        const anchor = link(`Page ${number}`, String(number), number);
+        if (number === page) { anchor.setAttribute('aria-current', 'page'); anchor.dataset.pageControl = 'current'; }
+        numbers.append(anchor);
+      }
+    }
+    links.append(numbers, summary, link('Next page', '›', Math.min(range.pages, page + 1), '', page === range.pages), link('Last page', '»', range.pages, 'page-edge', page === range.pages));
+    const size = node('select', { ariaLabel: 'Artifacts per page', disabled: loading });
+    size.dataset.pageControl = 'size';
+    for (const count of PAGE_SIZES) size.append(node('option', { value: String(count), textContent: String(count) }));
+    size.value = String(pageState.pageSize);
+    size.addEventListener('change', () => goToPage(pageForSize(page, pageState.pageSize, Number(size.value)), Number(size.value), { pager: position, control: 'size' }));
+    const sizeLabel = node('label', { className: 'page-size' }, 'Per page', size);
+    const jump = node('input', { type: 'number', min: '1', max: String(range.pages), step: '1', inputMode: 'numeric', value: String(page), required: true, ariaLabel: 'Jump to page', disabled: loading });
+    jump.dataset.pageControl = 'jump';
+    const jumpLabel = node('label', { className: 'page-jump-label' }, 'Jump to', jump);
+    const go = node('button', { type: 'submit', textContent: 'Go', ariaLabel: 'Go to page', disabled: loading });
+    const form = node('form', { className: 'page-jump' }, jumpLabel, go);
+    jump.addEventListener('input', () => jump.setCustomValidity(''));
+    form.addEventListener('submit', e => {
+      e.preventDefault();
+      const destination = validJump(jump.value, range.pages);
+      if (destination === null) { jump.setCustomValidity(`Enter a whole page number from 1 to ${range.pages}.`); jump.reportValidity(); return; }
+      jump.setCustomValidity('');
+      if (destination !== page) goToPage(destination, pageState.pageSize, { pager: position, control: 'jump' });
+    });
+    if (position === 'top') nav.append(rangeLine, ...(range.pages > 1 ? [form] : []));
+    else nav.append(rangeLine, ...(range.pages > 1 ? [links] : []), node('div', { className: 'page-options' }, sizeLabel, ...(range.pages > 1 ? [form] : [])));
+    nav.setAttribute('aria-busy', String(loading));
+  }
+}
 // "Show more" appends the next batch to the list already on the page.
 $('more').addEventListener('click', async () => {
   if (!nextCursor || !user) return;
@@ -865,6 +1019,7 @@ function renderRecent() {
     const link = node('a', { className: 'nav-button', href: viewerUrl(item), title: item.title || 'Untitled artifact' },
       node('span', { className: 'nav-icon', ariaHidden: 'true' }), node('span', { textContent: item.title || 'Untitled artifact' }));
     link.firstChild.innerHTML = iconSvg(resolveIcon(item.icon, item.title));
+    link.dataset.libraryFocus = `recent:${item.id}`;
     link.addEventListener('click', rememberLibraryNavigation);
     return link;
   }));
@@ -923,7 +1078,7 @@ function setOptions(select, entries, first) {
     ...entries.map(p => node('option', { value: p.id, textContent: p.name ? `${p.name} (${p.email})` : p.email })));
   select.value = [...select.options].some(o => o.value === selected) ? selected : (select.options[0]?.value || '');
 }
-async function loadPage() {
+async function loadPage(options = {}) {
   if (!user) return;
   if (ADMIN_VIEWS.includes(state.view) && user.role !== 'owner') {
     state = { ...state, view: 'all', ownerId: '', status: 'all', expiry: 'all', kind: 'all', sort: state.sort === 'expiry' ? 'recent' : state.sort };
@@ -934,6 +1089,11 @@ async function loadPage() {
   const view = state.view;
   const library = LIBRARY_VIEWS.includes(view);
   const inventory = view === 'admin';
+  const paged = numberedList();
+  const requestedState = { ...state };
+  const previousConfirmed = confirmedPage;
+  const keepConfirmed = options.pageNavigation && paged && previousConfirmed?.context === listContext(state);
+  let pageLoadSucceeded = false;
   $('page-title').textContent = VIEWS[view][0];
   $('page-description').textContent = VIEWS[view][1];
   document.title = `${VIEWS[view][0]} · Artifacts`;
@@ -1000,7 +1160,9 @@ async function loadPage() {
   $('page-action').onclick = action ? action[1] : null;
   $('page-action').textContent = action?.[0] || '';
   $('pagination').hidden = true;
-  $('result-status').textContent = 'Loading…';
+  $('result-status').classList.toggle('sr-only', paged);
+  renderPageControls(true);
+  $('result-status').textContent = paged ? `Loading page ${state.page}…` : 'Loading…';
   message('page-error');
   $('content').setAttribute('aria-busy', 'true');
   // A refresh of the same view keeps the useful list on screen; only a view
@@ -1018,20 +1180,28 @@ async function loadPage() {
         setOptions($('owner-filter'), users.filter(u => u.status !== 'invited').map(u => (u.status === 'disabled' ? { ...u, name: `${u.name || u.email} (suspended)` } : u)), 'Every owner');
         $('owner-filter').value = state.ownerId;
       }
-      // A linked or returned-to URL says how many rows were shown: load that many, in requests of up to 100.
-      // The top-level coverage counts describe the whole authorized set before
-      // any q, so they are kept from the first page only.
-      const items = []; let total = 0; let counts = null; let cursor = ''; let coverage;
+      const items = []; let total = 0; let counts = null; let cursor = ''; let coverage; let range;
       do {
-        const p = new URLSearchParams({ q: state.q, limit: String(Math.min(100, state.n - items.length)), sort: state.sort });
-        if (cursor) p.set('cursor', cursor);
-        if (inventory) { p.set('status', state.status); if (state.ownerId) p.set('ownerId', state.ownerId); if (state.expiry === 'soon') p.set('expiry', 'soon'); } else p.set('view', view);
+        const p = new URLSearchParams({ q: requestedState.q, sort: requestedState.sort });
+        if (paged) { p.set('page', String(requestedState.page)); p.set('pageSize', String(requestedState.pageSize)); }
+        else {
+          p.set('limit', String(Math.min(100, requestedState.n - items.length)));
+          if (cursor) p.set('cursor', cursor);
+        }
+        if (inventory) { p.set('status', requestedState.status); if (requestedState.ownerId) p.set('ownerId', requestedState.ownerId); if (requestedState.expiry === 'soon') p.set('expiry', 'soon'); } else p.set('view', view);
         const data = await api(`${inventory ? '/api/admin/artifacts' : '/api/library'}?${p}`);
         if (seq !== loadSequence) return;
         items.push(...data.artifacts); total = data.total; counts = data.counts ?? counts;
         coverage = coverage ?? data.searchCoverage;
         cursor = data.nextCursor;
-      } while (cursor && items.length < state.n);
+        if (paged) {
+          if (!Number.isSafeInteger(total) || total < 0 || !Number.isSafeInteger(data.page) || data.page < 1 || !PAGE_SIZES.includes(data.pageSize)) throw new Error('The page response was incomplete. Try again.');
+          range = pageRange(data.page, data.pageSize, total);
+          if (range.page !== data.page || items.length !== range.last - range.first + (total ? 1 : 0)) throw new Error('The page response was incomplete. Try again.');
+          state.page = data.page; state.pageSize = data.pageSize;
+          break;
+        }
+      } while (cursor && items.length < requestedState.n);
       renderArtifacts(items, inventory);
       renderActiveFilters();
       // Coverage describes how well a search can answer, so it belongs beside
@@ -1045,9 +1215,20 @@ async function loadPage() {
         renderRecent();
         loadRecent();
       }
-      nextCursor = cursor; shownCount = items.length; state.n = Math.max(BATCH, items.length);
-      moreStatus(shownCount, total, 'artifact');
-      $('result-status').textContent = `${total} artifact${total === 1 ? '' : 's'} · ${state.sort === 'expiry' ? 'Expires soonest · never last' : state.sort === 'name' ? 'Name A–Z' : state.sort === 'relevance' ? 'Best match first' : 'Recently updated first'}`;
+      nextCursor = paged ? null : cursor;
+      shownCount = items.length;
+      const ordering = state.sort === 'expiry' ? 'Expires soonest · never last' : state.sort === 'name' ? 'Name A–Z' : state.sort === 'relevance' ? 'Best match first' : 'Recently updated first';
+      $('result-status').textContent = paged ? (total ? `${range.first}–${range.last} of ${total} artifacts · Page ${range.page} of ${range.pages} · ${ordering}` : `0 results · ${ordering}`) : `${total} artifact${total === 1 ? '' : 's'} · ${ordering}`;
+      if (paged) {
+        confirmedPage = { context: listContext(state), state: { ...state }, range, resultStatus: $('result-status').textContent, layout, sortChosen, url: stateUrl(), scroll: window.scrollY };
+        lastListPage = { context: listContext(state), page: state.page, pageSize: state.pageSize };
+        writeUrl(!options.pageNavigation || options.historyNavigation, options.previousFocus, options.previousScroll);
+        renderPageControls();
+      } else {
+        state.n = Math.max(BATCH, items.length);
+        moreStatus(shownCount, total, 'artifact');
+      }
+      pageLoadSucceeded = true;
     } else if (view === 'publications') {
       const data = await api('/api/publications');
       if (seq !== loadSequence) return;
@@ -1081,20 +1262,53 @@ async function loadPage() {
   } catch (err) {
     if (seq !== loadSequence) return;
     $('content').classList.remove('is-refreshing');
-    $('content').replaceChildren(button('Try again', loadPage));
-    $('result-status').textContent = 'Could not load this page.';
-    // Counts from a failed or superseded load say nothing about this view.
-    renderCoverage(null);
-    message('page-error', err.message);
+    const transient = !err.status || err.status >= 500 || err.status === 408 || err.status === 429;
+    if (keepConfirmed && transient) {
+      state = { ...previousConfirmed.state };
+      layout = previousConfirmed.layout;
+      sortChosen = previousConfirmed.sortChosen;
+      confirmedPage = previousConfirmed;
+      if (options.historyNavigation) {
+        history.replaceState(history.state, '', previousConfirmed.url);
+        refreshViewerLinks();
+        restoreScroll = previousConfirmed.scroll;
+      }
+      $('result-status').textContent = previousConfirmed.resultStatus;
+      renderPageControls();
+      message('page-error', `Could not load page ${requestedState.page}. ${err.message}`);
+      const retryFocus = pageFocus;
+      const retry = button(`Retry page ${requestedState.page}`, () => goToPage(requestedState.page, requestedState.pageSize, retryFocus));
+      retry.id = 'page-retry';
+      $('page-error').append(retry);
+      retry.focus({ preventScroll: true });
+    } else {
+      confirmedPage = null;
+      renderPageControls();
+      $('content').replaceChildren(button('Try again', () => loadPage()));
+      $('result-status').textContent = 'Could not load this page.';
+      renderCoverage(null);
+      if (inventory) renderStatusCounts(null);
+      message('page-error', err.message);
+    }
+    pageFocus = null;
   } finally {
     if (seq === loadSequence) {
       renderedView = view;
       $('content').setAttribute('aria-busy', 'false');
       $('content').classList.remove('is-refreshing');
-      if (restoreScroll !== null) {
+      const directPageNavigation = pageLoadSucceeded && options.pageNavigation && !options.historyNavigation;
+      if (directPageNavigation || restoreScroll !== null || restoreFocus || (pageLoadSucceeded && pageFocus)) {
         const top = restoreScroll;
-        restoreScroll = null;
-        requestAnimationFrame(() => window.scrollTo(0, top));
+        const focus = directPageNavigation ? { pager: 'top', control: pageFocus?.control === 'jump' ? 'jump' : 'current' } : pageFocus || restoreFocus;
+        restoreScroll = null; restoreFocus = null; pageFocus = null;
+        requestAnimationFrame(() => {
+          if (seq !== loadSequence) return;
+          if (directPageNavigation) {
+            const pager = $('list-pagination-top');
+            window.scrollTo({ top: Math.max(0, window.scrollY + pager.getBoundingClientRect().top - 12), behavior: 'instant' });
+          } else if (top !== null) window.scrollTo({ top, behavior: 'instant' });
+          focusPageControl(focus);
+        });
       }
     }
   }
@@ -1117,12 +1331,14 @@ function refreshViewerLinks() {
   }
 }
 let restoreScroll = null;
+let restoreFocus = null;
 let renderedView = null;   // which view the content currently shows, for honest refresh
-function rememberLibraryNavigation() {
+function rememberLibraryNavigation(event) {
   if (!user) return;
+  const target = event?.target?.closest?.('a') || document.activeElement;
   try {
     sessionStorage.setItem('artifact-library-navigation', JSON.stringify({
-      userId: user.id, url: location.pathname + location.search, scrollY: window.scrollY,
+      userId: user.id, url: location.pathname + location.search, scrollY: window.scrollY, focus: libraryFocus(target),
     }));
   } catch { /* Browsing context is an optional per-tab convenience. */ }
 }
@@ -1131,11 +1347,26 @@ function restoreLibraryNavigation() {
     const saved = JSON.parse(sessionStorage.getItem('artifact-library-navigation') || 'null');
     if (saved?.userId !== user.id || saved.url !== location.pathname + location.search) return;
     if (Number.isFinite(saved.scrollY) && saved.scrollY >= 0) restoreScroll = saved.scrollY;
+    if (saved.focus && typeof saved.focus === 'object') restoreFocus = saved.focus;
   } catch { /* The URL still restores filters when storage is unavailable. */ }
 }
+window.addEventListener('pagehide', rememberLibraryNavigation);
+let historyPositionFrame = 0;
+function rememberHistoryPosition() {
+  if (historyPositionFrame || !user || $('app').hidden || $('content').getAttribute('aria-busy') === 'true') return;
+  const epoch = accountEpoch;
+  historyPositionFrame = requestAnimationFrame(() => {
+    historyPositionFrame = 0;
+    if (epoch !== accountEpoch || !user || $('app').hidden || $('content').getAttribute('aria-busy') === 'true') return;
+    rememberConfirmedPosition();
+    history.replaceState({ ...history.state, libraryFocus: libraryFocus(), libraryScroll: window.scrollY }, '', location.href);
+  });
+}
+window.addEventListener('scroll', rememberHistoryPosition, { passive: true });
+document.addEventListener('focusin', rememberHistoryPosition);
 document.addEventListener('click', e => {
   const anchor = e.target.closest('a');
-  if (anchor?.origin === location.origin && anchor.pathname.startsWith('/v/')) rememberLibraryNavigation();
+  if (anchor?.origin === location.origin && anchor.pathname.startsWith('/v/')) rememberLibraryNavigation(e);
 }, true);
 const mine = item => (item.ownerId || 'instance-owner') === user?.id;
 // Only what the access badge does not already say: when, and whose if not yours.
@@ -1254,6 +1485,7 @@ function artifactTable(items) {
 function artifactTableRow(item) {
   const titleText = item.title || 'Untitled artifact';
   const title = node('a', { className: 'artifact-title', href: viewerUrl(item), ariaLabel: titleText });
+  title.dataset.libraryFocus = `artifact:${item.id}`;
   const icon = node('span', { className: 'artifact-icon', ariaHidden: 'true' });
   icon.innerHTML = iconSvg(resolveIcon(item.icon, item.title));
   title.append(node('span', { className: 'table-title-text' }, icon, titleText));
@@ -1357,6 +1589,7 @@ function artifactEntries(items, inventory, grid) {
   const chip = (text, kind) => node('span', { className: `chip ${kind}`, textContent: text });
   for (const item of items) {
     const title = node('a', { className: 'artifact-title', href: viewerUrl(item), title: item.title, textContent: item.title || 'Untitled artifact' });
+    title.dataset.libraryFocus = `artifact:${item.id}`;
     const icon = node('span', { className: 'artifact-icon', ariaHidden: 'true' });
     icon.innerHTML = iconSvg(resolveIcon(item.icon, item.title));
     title.prepend(icon);
@@ -2039,6 +2272,7 @@ async function main() {
       if (destinationIsArtifact(destination)) { location.replace(destination); return; }
       history.replaceState(null, '', destination);
       state = readState();
+      syncSortChosen();
       return showApp();
     }
     if (!user) { rememberLoginReturn(); return showLogin(); }

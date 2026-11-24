@@ -10,12 +10,9 @@ export async function adminWorkspaceQA({base,output,owner,api}) {
   let failure;
   const ready=()=>wait('#content[aria-busy="false"]');
   const rowIds=()=>evaluate('[...document.querySelectorAll(".artifact-title")].map(e=>new URL(e.href).pathname.split("/").at(-1))');
-  const more=()=>{
-    // Scroll the actual main pane before taking click coordinates; an implicit
-    // CDP scroll-and-click can otherwise activate the row previously here.
-    evaluate('document.getElementById("more").scrollIntoView({block:"center",behavior:"instant"})');
-    run('wait','--fn','(()=>{const r=document.getElementById("more").getBoundingClientRect();return r.top>=0&&r.bottom<=innerHeight})()');
-    click('#more');
+  const nextPage=()=>{
+    run('focus','#list-pagination-bottom [aria-label="Next page"]');
+    run('press','Enter');
   };
   try {
     run('cookies','set','artifact_session',owner.cookie.split('=')[1],'--url',base,'--httpOnly','--sameSite','Lax');
@@ -31,7 +28,7 @@ export async function adminWorkspaceQA({base,output,owner,api}) {
       assert.equal(response.status,201,'create local admin workflow fixture');
       fixtures.push(response.json.id);
     }
-    run('open',`${base}/?view=admin&q=${encodeURIComponent(prefix)}`);ready();
+    run('open',`${base}/?view=admin&q=${encodeURIComponent(prefix)}&page=1&pageSize=10`);ready();
     // Inventory filters are progressive disclosure behind one labeled control.
     assert.equal(evaluate('document.getElementById("filter-toggle").hidden'),false,'inventory offers a labeled Filters control');
     click('#filter-toggle');wait('#filter-popover:not([hidden])');
@@ -44,22 +41,22 @@ export async function adminWorkspaceQA({base,output,owner,api}) {
     assert.match(evaluate('document.getElementById("filter-chips").textContent'),/Expires soonest/,'the active sort is a removable chip');
     assert.match(evaluate('document.getElementById("filter-chips").textContent'),/Search: Admin workflow fixture/,'the active search is a removable chip');
     assert.equal(evaluate('document.getElementById("filter-count").textContent'),'2','the Filters control counts every active filter');
-    assert.deepEqual(rowIds(),fixtures.slice(0,12),'finite deadlines are earliest first');
+    assert.deepEqual(rowIds(),fixtures.slice(0,10),'finite deadlines are earliest first');
     run('press','Escape');run('wait','--fn','document.getElementById("filter-popover").hidden');
-    more();await runAsync('wait','--fn','document.querySelectorAll(".artifact-title").length===16');
-    assert.deepEqual(rowIds(),fixtures,'pagination keeps finite deadlines ordered and never last');
+    nextPage();await runAsync('wait','--fn','document.querySelectorAll(".artifact-title").length===6');
+    assert.deepEqual(rowIds(),fixtures.slice(10),'page two replaces earlier deadlines; never is last');
     run('reload');ready();
     assert.equal(evaluate('document.getElementById("sort").value'),'expiry','refresh restores expiration ordering');
-    assert.deepEqual(rowIds(),fixtures,'refresh preserves the expanded expiry list');
+    assert.deepEqual(rowIds(),fixtures.slice(10),'refresh preserves the current expiry page');
     click('.artifact-title');wait('#bar:not([hidden])');click('#backLibrary');ready();
-    assert.deepEqual(rowIds(),fixtures,'viewer return preserves expiry ordering and expanded count');
+    assert.deepEqual(rowIds(),fixtures.slice(10),'viewer return preserves expiry ordering and page');
     click('#filter-toggle');wait('#filter-popover:not([hidden])');
     run('select','#expiry-filter','soon');ready();
     assert.equal(evaluate('new URL(location.href).searchParams.get("expiry")'),'soon');
-    assert.equal(evaluate('document.querySelectorAll(".artifact-title").length'),12,'changing expiry filter resets pagination');
+    assert.deepEqual(rowIds(),fixtures.slice(0,10),'changing expiry filter starts on the first page');
     run('press','Escape');run('wait','--fn','document.getElementById("filter-popover").hidden');
-    more();await runAsync('wait','--fn','document.querySelectorAll(".artifact-title").length===14');
-    assert.deepEqual(rowIds(),fixtures.slice(0,14),'seven-day filter excludes distant and never deadlines');
+    nextPage();await runAsync('wait','--fn','document.querySelectorAll(".artifact-title").length===4');
+    assert.deepEqual(rowIds(),fixtures.slice(10,14),'seven-day filter excludes distant and never deadlines');
     for(const width of [320,390,768,1280])for(const theme of ['light','dark']) {
       run('set','viewport',String(width),'1000');
       evaluate(`document.documentElement.dataset.theme=${JSON.stringify(theme)};window.scrollTo({top:0,behavior:'instant'})`);
@@ -70,7 +67,7 @@ export async function adminWorkspaceQA({base,output,owner,api}) {
       run('screenshot',join(output,`inventory-expiry-${theme}-${width}.png`));
     }
     run('set','viewport','1280','1000');
-    run('fill','#search','No matching admin fixture');run('press','Enter');ready();
+    run('fill','#search','zxqabsentpagerneedle');run('press','Enter');ready();
     assert.equal(evaluate('document.querySelectorAll(".artifact-title").length'),0);
     assert.ok(evaluate('document.getElementById("content").textContent.includes("No matching artifacts")'));
     assert.equal(evaluate('document.getElementById("clear-filters").hidden'),false,'empty search has an explicit recovery control');
@@ -156,7 +153,7 @@ export async function adminWorkspaceQA({base,output,owner,api}) {
     assert.equal(evaluate('document.querySelector(".event-filter [aria-pressed=true]").textContent'),'Artifacts','a linked Activity URL restores its kind');
     const firstEvents=evaluate('document.querySelectorAll(".event").length');
     assert.equal(firstEvents,25,'Activity starts with a bounded batch');
-    more();await runAsync('wait','--fn',`document.querySelectorAll('.event').length>${firstEvents}`);
+    run('focus','#more');run('press','Enter');await runAsync('wait','--fn',`document.querySelectorAll('.event').length>${firstEvents}`);
     const expandedEvents=evaluate('document.querySelectorAll(".event").length');
     const text=evaluate('document.getElementById("content").textContent');
     assert.match(text,/published /,'publish entries name their action and artifact');

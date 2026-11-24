@@ -1,5 +1,5 @@
 // Shared by browser and Worker: a sign-in return is navigation, never access.
-const LIBRARY_KEYS = new Set(['view', 'q', 'sort', 'ownerId', 'status', 'expiry', 'kind', 'n']);
+const LIBRARY_KEYS = new Set(['view', 'q', 'sort', 'ownerId', 'status', 'expiry', 'kind', 'n', 'page', 'pageSize', 'layout']);
 
 /**
  * A discussion reference from `?thread=`: a ticket uuid, 40 or 64 lowercase

@@ -269,6 +269,9 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
     assert.ok(recent.every(r=>r.href.startsWith('/v/')),'Recent links point at real artifacts');
     await run('open',base+'/?sort=name');await wait('.artifact-title');
     assert.equal(await evaluate('document.getElementById("sort").value'),'name');
+    // Grid alone keeps cursor batches and its accumulated count on viewer return.
+    if (!await evaluate('!!document.querySelector(".artifact-grid")')) await click('[data-layout="grid"]');
+    await wait('.artifact-grid .artifact-title');
     const sortedTitles=await evaluate('[...document.querySelectorAll(".artifact-title")].map(e=>e.textContent.replace(/^★/,"").toLowerCase())');
     assert.deepEqual(sortedTitles,[...sortedTitles].sort());
     assert.equal(await evaluate('document.querySelectorAll(".artifact-title").length'),12,'the first batch is 12');

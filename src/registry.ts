@@ -741,7 +741,7 @@ export class Registry extends DurableObject<Env> {
   async star(id: string, userId: string, starred: boolean): Promise<void> {
     this.ctx.storage.sql.exec(starred ? 'INSERT OR IGNORE INTO stars VALUES (?,?)' : 'DELETE FROM stars WHERE artifact_id=? AND user_id=?',id,userId);
   }
-  async library(user: Account | null, opts: { admin: boolean; view: string; q: string; ownerId: string; status: string; cursor: string; limit: number; sort?: 'recent' | 'name' | 'expiry' | 'relevance'; expiry?: 'all' | 'soon'; artifactId?:string; artifactPermission?:'read' | 'comment' | 'write'; includeSharingSummary?:boolean }) {
+  async library(user: Account | null, opts: { admin: boolean; view: string; q: string; ownerId: string; status: string; cursor: string; limit: number; page?: number; sort?: 'recent' | 'name' | 'expiry' | 'relevance'; expiry?: 'all' | 'soon'; artifactId?:string; artifactPermission?:'read' | 'comment' | 'write'; includeSharingSummary?:boolean }) {
     const principalId = user?.id ?? '';
     const instance = !user && !opts.artifactId;
     const clauses = [`${LIVE.replaceAll('expires_at','a.expires_at')}`];
@@ -786,6 +786,7 @@ export class Registry extends DurableObject<Env> {
       count(CASE WHEN si.status='unsupported' THEN 1 END) AS unsupported
       ${joins.replace(searchJoins,'')} WHERE ${coverageClauses.join(' AND ')}`,...args.slice(terms.length)).one();
     const total = this.ctx.storage.sql.exec<{ n: number }>(`SELECT count(*) AS n ${joins} WHERE ${clauses.join(' AND ')}`,...args).one().n;
+    const page = opts.page === undefined ? undefined : Math.min(opts.page,Math.max(1,Math.ceil(total / opts.limit)));
     // SQLite NOCASE folds ASCII only, not locale-specific Unicode ordering.
     // Keep the same collation and ID tie-breaker in the seek and ORDER BY.
     const byName = opts.sort === 'name';
@@ -810,8 +811,8 @@ export class Registry extends DurableObject<Env> {
         clauses.push('(a.updated_at < ? OR (a.updated_at=? AND a.id < ?))'); args.push(time,time,id);
       }
     }
-    const rows = this.ctx.storage.sql.exec<Row & { ownerName: string; starred: number; permission: 'read' | 'write'; shared: number; search_version: number | null; search_status: SearchStatus | null; search_score: number; matched: string }>(`SELECT a.*,si.version AS search_version,si.status AS search_status,(${score}) AS search_score,${terms.length ? `json_array(${matched.map(m => `CASE WHEN ${m} THEN 1 ELSE 0 END`).join(',')})` : "'[]'"} AS matched,u.name AS ownerName,s.user_id IS NOT NULL AS starred, g.permission, EXISTS(SELECT 1 FROM grants x WHERE x.artifact_id=a.id) AS shared ${joins} WHERE ${clauses.join(' AND ')} ORDER BY ${byName ? 'a.title COLLATE NOCASE ASC,a.id ASC' : byExpiry ? '(a.expires_at IS NULL) ASC,a.expires_at ASC,a.id ASC' : byRelevance ? 'search_score DESC,a.updated_at DESC,a.id DESC' : 'a.updated_at DESC,a.id DESC'} LIMIT ?`,...args,opts.limit+1).toArray();
-    const more = rows.length > opts.limit; rows.splice(opts.limit);
+    const rows = this.ctx.storage.sql.exec<Row & { ownerName: string; starred: number; permission: 'read' | 'write'; shared: number; search_version: number | null; search_status: SearchStatus | null; search_score: number; matched: string }>(`SELECT a.*,si.version AS search_version,si.status AS search_status,(${score}) AS search_score,${terms.length ? `json_array(${matched.map(m => `CASE WHEN ${m} THEN 1 ELSE 0 END`).join(',')})` : "'[]'"} AS matched,u.name AS ownerName,s.user_id IS NOT NULL AS starred, g.permission, EXISTS(SELECT 1 FROM grants x WHERE x.artifact_id=a.id) AS shared ${joins} WHERE ${clauses.join(' AND ')} ORDER BY ${byName ? 'a.title COLLATE NOCASE ASC,a.id ASC' : byExpiry ? '(a.expires_at IS NULL) ASC,a.expires_at ASC,a.id ASC' : byRelevance ? 'search_score DESC,a.updated_at DESC,a.id DESC' : 'a.updated_at DESC,a.id DESC'} LIMIT ?${page === undefined ? '' : ' OFFSET ?'}`,...args,page === undefined ? opts.limit+1 : opts.limit,...(page === undefined ? [] : [(page-1)*opts.limit])).toArray();
+    const more = page === undefined && rows.length > opts.limit; rows.splice(opts.limit);
     const last = rows.at(-1);
     const summaries = new Map<string, { activeCount:number; pendingCount:number; people:string[] }>();
     const manageableIds = opts.includeSharingSummary && user
@@ -850,7 +851,7 @@ export class Registry extends DurableObject<Env> {
       };
     });
     const nextCursor = more && last ? JSON.stringify(byName ? ['name',last.title,last.id] : byExpiry ? ['expiry',last.expires_at,last.id] : byRelevance ? ['relevance',last.search_score,last.updated_at,last.id] : [last.updated_at,last.id]) : null;
-    return { artifacts,total,searchCoverage,...(counts ? {counts} : {}),nextCursor };
+    return { artifacts,total,searchCoverage,...(counts ? {counts} : {}),nextCursor,...(page === undefined ? {} : {page,pageSize:opts.limit}) };
   }
   async audit(userId: string, action: string, id: string | null = null, title: string | null = null, target: string | null = null, details: Record<string, unknown> | null = null): Promise<void> {
     this.ctx.storage.sql.exec('INSERT INTO activity (id,actor_id,action,artifact_id,artifact_title,created_at,target,details) VALUES (?,?,?,?,?,?,?,?)',genId(),userId,action,id,title,now(),target,details ? JSON.stringify(details) : null);

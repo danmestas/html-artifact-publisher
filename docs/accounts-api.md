@@ -37,8 +37,8 @@ Changing `OWNER_EMAIL` preserves the owner ID and artifact ownership but revokes
 
 | Route | Query | Access |
 | --- | --- | --- |
-| `GET /api/library` | `view=all\|mine\|shared\|starred\|archived`, `q`, `sort=relevance\|recent\|name\|expiry`, `cursor`, `limit` | Account's authorized library |
-| `GET /api/admin/artifacts` | `q`, `ownerId`, `status=all\|active\|archived`, `sort=relevance\|recent\|name\|expiry`, `expiry=all\|soon`, `cursor`, `limit` | Instance owner only |
+| `GET /api/library` | `view=all\|mine\|shared\|starred\|archived`, `q`, `sort=relevance\|recent\|name\|expiry`, `cursor`, `limit` **or** `page`, `pageSize` | Account's authorized library |
+| `GET /api/admin/artifacts` | `q`, `ownerId`, `status=all\|active\|archived`, `sort=relevance\|recent\|name\|expiry`, `expiry=all\|soon`, `cursor`, `limit` **or** `page`, `pageSize` | Instance owner only |
 | `GET /api/search` | Same search/filter/cursor fields; optional `scope=inventory`, `artifactId` | Personal credentials: authorized library; legacy instance bearer: inventory; artifact Token: required exact-artifact scope |
 | `GET /api/admin/search-index` | —; returns `{status,processed,remaining,failed}` | Instance-owner account or existing instance automation bearer |
 | `POST /api/admin/search-index` | Exactly `{}`; returns `202` with the same progress fields | Same; members and artifact capabilities are denied |
@@ -46,6 +46,10 @@ Changing `OWNER_EMAIL` preserves the owner ID and artifact ownership but revokes
 See [Content search](search-api.md) for remote-agent CLI/HTTPS examples, credential boundaries, snippets, coverage and resumable backfill.
 
 Results contain `{artifacts,total,nextCursor,searchCoverage}`. Inventory also returns `counts:{all,active,archived}` under the same search, owner and expiration filters. Counts are computed before pagination; status counts are available for the status tabs. `limit` defaults to 25 and is bounded to 1–100. Treat `nextCursor` as opaque and reuse it only with the same query and ordering.
+
+For a direct page of the library List or owner Inventory, send `page` (a positive, 1-based integer) and optionally `pageSize` (`10`, `25`, `50` or `100`; default `25`). For example, `GET /api/library?q=return&sort=name&page=8&pageSize=25` with 187 authorized matches returns matches 176–187. The response includes the effective `page`, `pageSize`, exact filtered `total`, and `nextCursor: null`. If records disappear, a request past the end returns the new last page; an empty result returns `artifacts: []`, `total: 0`, `page: 1`. Invalid page inputs or mixing page and cursor/limit parameters are rejected. Each request uses current permissions and data, not a persistent snapshot.
+
+Grid still uses cursor batches. The remote `/api/search` endpoint and other feeds do not support numbered paging.
 
 Each artifact includes `id`, `title`, `ownerId`, `ownerName`, `updatedAt`, `createdAt`, `expiresAt`, `viewerUrl`, `permission`, `canManage`, `archived`, `starred`, `visibility` and `accessLabel`.
 

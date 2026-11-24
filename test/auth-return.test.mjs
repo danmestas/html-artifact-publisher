@@ -44,6 +44,15 @@ test('library destinations preserve supported filters but remove credentials and
   assert.equal(signinUrl('/'), '/login');
 });
 
+test('numbered library and inventory state survives sign-in without retaining capabilities', () => {
+  for (const destination of ['/?view=mine&q=river&sort=name&layout=list&page=8&pageSize=25', '/?view=admin&ownerId=someone&status=active&expiry=soon&sort=expiry&page=4&pageSize=50', '/?view=all&layout=grid&n=36']) {
+    assert.equal(safeReturnTo(destination), destination);
+    const login = new URL(signinUrl(destination), 'https://example.test');
+    assert.equal(login.searchParams.get('returnTo'), destination);
+    assert.equal(safeReturnTo(destination + '&token=secret'), destination);
+  }
+});
+
 test('chosen library expiry ordering survives the sign-in round trip', () => {
   for (const view of ['all', 'mine', 'shared', 'starred', 'archived']) {
     const destination = `/?view=${view}&q=river&sort=expiry&n=24`;

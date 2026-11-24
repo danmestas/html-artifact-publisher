@@ -110,6 +110,16 @@ const limitOf = (url: URL) => Math.min(100,Math.max(1,Number.parseInt(url.search
 
 async function libraryResults(req: Request, env: Env, user: Account | null, admin: boolean, scope: { artifactId?:string; artifactPermission?:'read' | 'comment' | 'write'; credentialKey?:string } = {}): Promise<Response> {
   const url = new URL(req.url);
+  let pagination: { page:number; pageSize:number } | undefined;
+  if (url.searchParams.has('page') || url.searchParams.has('pageSize')) {
+    if (!['/api/library','/api/admin/artifacts'].includes(url.pathname)) return error('Numbered pages are limited to library and inventory');
+    if (url.searchParams.getAll('page').length !== 1 || url.searchParams.getAll('pageSize').length > 1
+      || url.searchParams.has('cursor') || url.searchParams.has('limit')) return error('Invalid pagination');
+    const page = url.searchParams.get('page') ?? '', pageSize = url.searchParams.get('pageSize') ?? '25';
+    if (!/^[1-9]\d*$/.test(page) || !Number.isSafeInteger(Number(page))
+      || !['10','25','50','100'].includes(pageSize)) return error('Invalid pagination');
+    pagination = { page:Number(page), pageSize:Number(pageSize) };
+  }
   const view = url.searchParams.get('view') ?? 'all', status = url.searchParams.get('status') ?? 'all';
   if (!['all','mine','shared','starred','archived'].includes(view) || !['all','active','archived'].includes(status)) return error('Invalid filter');
   let cursor = url.searchParams.get('cursor') ?? '';
@@ -123,7 +133,7 @@ async function libraryResults(req: Request, env: Env, user: Account | null, admi
   if (!admin && expiry !== 'all') return error('Invalid expiry');
   if (sort === 'relevance' && !q) return error('Relevance requires a search');
   const ownerId = (url.searchParams.get('ownerId') ?? '').slice(0,64);
-  const cursorKind = accountLibrary ? 'library' : q ? 'search' : '';
+  const cursorKind = pagination ? '' : accountLibrary ? 'library' : q ? 'search' : '';
   const queryKey = cursorKind ? await sha256hex(JSON.stringify([searchTerms(q),sort,admin,view,status,expiry,ownerId,user?.id ?? scope.credentialKey ?? 'instance',scope.artifactId ?? '',...(accountLibrary ? [url.pathname] : [])])) : '';
   if (cursor && cursorKind) {
     try {
@@ -146,7 +156,7 @@ async function libraryResults(req: Request, env: Env, user: Account | null, admi
     } catch { return error('Invalid cursor'); }
   }
   const includeSharingSummary = accountLibrary && !req.headers.has('Authorization') && !!sessionToken(req);
-  const result = await registry(env).library(user,{admin,view,status,cursor,sort,expiry,q,ownerId,limit:limitOf(url),...scope,includeSharingSummary});
+  const result = await registry(env).library(user,{admin,view,status,cursor,sort,expiry,q,ownerId,limit:pagination?.pageSize ?? limitOf(url),...(pagination ? {page:pagination.page} : {}),...scope,includeSharingSummary});
   const artifacts = result.artifacts.map(e => {
     const document = {id:e.id,slug:e.slug,title:e.title,tip:e.tip,icon:e.icon,searchIndex:e.searchIndex,...(e.search ? {search:e.search} : {}),
       createdAt:isoOrNull(e.createdAt),updatedAt:isoOrNull(e.updatedAt),expiresAt:isoOrNull(e.expiresAt),viewerUrl:`${url.origin}/v/${e.slug ?? e.id}`};

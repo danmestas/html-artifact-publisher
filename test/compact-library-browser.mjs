@@ -19,8 +19,27 @@ test('library search compares dates and named shares in compact accessible rows'
   };
   const evaluate = async code => JSON.parse(await run('--json','eval',code)).data.result;
   const waitFor = code => run('wait','--fn',code);
+  let libraryTab;
+  const foreground = async () => {
+    if (libraryTab && await evaluate('document.hidden')) await run('--pin-tab','tab',libraryTab);
+    await waitFor(`!document.hidden && !document.documentElement.hasAttribute('data-checking-account')`);
+  };
+  const dismiss = async opener => {
+    await foreground();
+    // Observe focus at close, after the app's handler. A later browser visibility
+    // change legitimately hides the account UI and takes focus off the button.
+    await evaluate(`(() => {
+      window.__dialogRestored = null;
+      document.getElementById('dialog').addEventListener('close', () => {
+        window.__dialogRestored = document.activeElement.matches(${JSON.stringify(opener)});
+      }, {once:true}); return true;
+    })()`);
+    await run('press','Escape');
+    await waitFor('window.__dialogRestored !== null');
+    assert.equal(await evaluate('window.__dialogRestored'),true,`closing the dialog restores focus to ${opener}`);
+  };
   const click = async selector => {
-    await run('wait',selector);
+    await foreground(); await run('wait',selector);
     // Verify pointer hit testing at the live, scrolled position, then exercise
     // native keyboard activation and focus restoration without saved coordinates.
     const reachable = await evaluate(`(() => {
@@ -38,7 +57,8 @@ test('library search compares dates and named shares in compact accessible rows'
     const tabs = JSON.parse(await run('--json','tab','list')).data.tabs;
     const tab = tabs.find(t => t.url.startsWith(base+'/?'));
     assert.ok(tab,'isolated library tab exists');
-    await run('--pin-tab','tab',tab.tabId);
+    libraryTab = tab.tabId;
+    await run('--pin-tab','tab',libraryTab);
     await run('wait','.artifact-title');
   };
   const port = await freePort();
@@ -95,10 +115,10 @@ test('library search compares dates and named shares in compact accessible rows'
     assert.equal(await evaluate(`document.querySelector('#dialog .search-path').textContent`),'index.html');
     assert.match(await evaluate(`document.querySelector('#dialog').innerText`),/return label/);
     assert.match(await evaluate(`document.querySelector('#dialog').innerText`),/UTC|GMT|Local|America\/|Europe\/|\d{2}:\d{2}/i);
-    await run('press','Escape');await waitFor(`document.activeElement.matches('.artifact-details-button')`);
+    await dismiss('.artifact-details-button');
     await click('#content tbody tr:first-child .sharing-summary');await run('wait','#dialog[open] .grant');
     assert.match(await evaluate(`document.querySelector('#dialog').textContent`),/Lane Rivera/,'roster opens on explicit request');
-    await run('press','Escape');await waitFor(`document.activeElement.matches('.sharing-summary')`);
+    await dismiss('.sharing-summary');
     const expHeader = `document.querySelectorAll('#content th')`;
     await evaluate(`[...${expHeader}].find(th=>/expires/i.test(th.textContent)).querySelector('button').click(); true`);
     await waitFor(`document.querySelector('#content th[aria-sort="ascending"]')?.textContent.toLowerCase().includes('expir') && document.getElementById('sort').value==='expiry' && document.getElementById('content').getAttribute('aria-busy')==='false'`);

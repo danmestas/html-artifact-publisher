@@ -1090,6 +1090,9 @@ async function loadPage(options = {}) {
   const library = LIBRARY_VIEWS.includes(view);
   const inventory = view === 'admin';
   const paged = numberedList();
+  const searchFilled = !!state.q.trim();
+  const canRankMatches = searchFilled && (library || inventory);
+  if (!canRankMatches && state.sort === 'relevance') state.sort = 'recent';
   const requestedState = { ...state };
   const previousConfirmed = confirmedPage;
   const keepConfirmed = options.pageNavigation && paged && previousConfirmed?.context === listContext(state);
@@ -1112,7 +1115,6 @@ async function loadPage(options = {}) {
   $('filter-sort-slot').hidden = !inventory;
   const searchLabel = view === 'people' ? 'Search people' : view === 'activity' ? 'Search activity' : 'Search artifacts';
   $('search-label').textContent = searchLabel;
-  const searchFilled = !!state.q;
   // The library's search stays a plain, labeled field; people/activity keep a
   // visible label once a search is in play.
   $('search-label').className = library && !searchFilled ? 'sr-only' : 'search-label';
@@ -1136,9 +1138,8 @@ async function loadPage(options = {}) {
   // Best match is only meaningful while a query is present, and only in the
   // library and inventory. Other views keep their own ordering.
   const relevance = $('sort').querySelector('[value="relevance"]');
-  relevance.hidden = !searchFilled || (!library && !inventory);
+  relevance.hidden = !canRankMatches;
   relevance.disabled = relevance.hidden;
-  if (relevance.hidden && state.sort === 'relevance') state.sort = 'recent';
   if (!inventory) closeFilters();
   $('expiry-filter').value = state.expiry;
   renderActiveFilters();

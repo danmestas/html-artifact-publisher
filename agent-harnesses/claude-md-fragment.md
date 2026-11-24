@@ -4,9 +4,11 @@ When asked to publish, share, or upload an HTML file, use the publisher script.
 
 **Required env vars:** `HTML_PUBLISHER_URL` (Worker base URL) and `HTML_PUBLISHER_TOKEN` (bearer token). If either is missing, say so and stop.
 
+**Choose the lifespan before you create.** Pass `--ttl` on every publish: `24h` for transient work such as a draft, a short-lived proposal or a one-off signoff from one person, and `never` for anything meant to circulate onward, be referenced as team reference, go to a customer or remain durable. An omitted `--ttl` defaults to `7d` for compatibility, not as a recommendation. Reaching a deadline deletes content and history permanently; clearing it with `expire` keeps the artifact. See `skills/publish-html-page/SKILL.md` for the full policy.
+
 **Publish:**
 ```bash
-node scripts/publish-html.mjs --json --title "<title>" [--ttl 7d] [--slug <slug>] <file.html | dir>
+node scripts/publish-html.mjs --json --title "<title>" --ttl <24h|never> [--slug <slug>] <file.html | dir>
 ```
 
 Capture `viewerUrl`, `editUrl` and `cloneUrl` from the JSON output. Return `viewerUrl` (`/v/<id>#<readToken>`) to the user; keep `editUrl` (`/v/<id>#<writeToken>`) to yourself for later updates. The `#fragment` is the access token — never strip it.
@@ -28,4 +30,4 @@ Needs the edit link (a read link fails). Exit code 3 = version conflict (someone
 - Keep `editUrl` (can update and delete) and `cloneUrl` (`https://editor:<writeToken>@<host>/r/<id>`, for `fossil clone`/`push`) private; never print them into PRs, issues, commits, channels, or logs.
 - Keep pages self-contained: the viewer blocks all network requests, so external URLs will not load.
 
-**TTL options:** `1h`, `6h`, `24h`, `7d`, `30d`, `never` (default `7d`). Max payload: 10 MB. Images, video, audio, fonts, PDFs and other binary files, and any file over 256 KB, are stored in R2 instead of Fossil (the CLI uploads them automatically, up to 100 MB each); smaller text files must compress under about 1.99 MB.
+**Lifespan options:** `1h`, `6h`, `24h`, `7d`, `30d`, `never`; choose one and pass it on every create. An omitted `--ttl` defaults to `7d` for compatibility. Max payload: 10 MB. Images, video, audio, fonts, PDFs and other binary files, and any file over 256 KB, are stored in R2 instead of Fossil (the CLI uploads them automatically, up to 100 MB each); smaller text files must compress under about 1.99 MB.

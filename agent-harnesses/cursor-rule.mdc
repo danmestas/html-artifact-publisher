@@ -15,12 +15,16 @@ When the user asks to publish, share, or upload an HTML file, use the publisher 
 
 If either is missing, tell the user what to export and stop.
 
+## Choose the lifespan first
+
+Decide the artifact's lifespan before you create it, and pass `--ttl` on every publish: `24h` for transient work such as a draft, a short-lived proposal or a one-off signoff from one person, and `never` for anything meant to circulate onward, be referenced as team reference, go to a customer or remain durable. An omitted `--ttl` defaults to `7d` for compatibility, not as a recommendation. Reaching a deadline deletes content and history permanently; clearing it with `expire` keeps the artifact. See `skills/publish-html-page/SKILL.md` for the full policy.
+
 ## Steps
 
 1. Confirm the file starts with `<!doctype html` or `<html`, and is self-contained (the viewer blocks all network requests). Images, video, audio, fonts, PDFs and other binary files, and any file over 256 KB, are stored in R2 instead of Fossil (the CLI uploads them automatically, up to 100 MB each); smaller text files must compress under about 1.99 MB.
 2. Run (a directory publishes a multi-file page):
    ```bash
-   node scripts/publish-html.mjs --json --title "<title>" <file.html | dir>
+   node scripts/publish-html.mjs --json --title "<title>" --ttl <24h|never> <file.html | dir>
    ```
 3. Capture `viewerUrl` (`/v/<id>#<readToken>`), `editUrl` (`/v/<id>#<writeToken>`) and `cloneUrl` (`https://editor:<writeToken>@<host>/r/<id>`, for `fossil clone`/`push`) from the JSON output.
 4. Return `viewerUrl` to the user. Keep `editUrl` and `cloneUrl` to yourself for later updates.
@@ -47,9 +51,9 @@ It needs the edit link (a read link fails). Exit code 3 means a version conflict
 - If upload fails, leave the file untouched and report the raw error.
 - **Keep `editUrl` and `cloneUrl` private.** They can update and delete the artifact. Never print them into public places (PRs, issues, commits, channels, logs).
 
-## TTL options
+## Lifespan options
 
-`--ttl 1h | 6h | 24h | 7d | 30d | never` (default: `7d`)
+`--ttl 1h | 6h | 24h | 7d | 30d | never`; choose one before every create. It defaults to `7d` only when omitted, for compatibility.
 
 ## Delete
 

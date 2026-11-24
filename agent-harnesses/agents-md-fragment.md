@@ -9,12 +9,16 @@ When the user asks you to publish, share, or upload an HTML file or explainer, u
 
 Both must be set before running the script. If either is missing, tell the user what to set and stop.
 
+### Choose the lifespan first
+
+Decide the artifact's lifespan before you create it and pass `--ttl` on every publish: `24h` for transient work such as a draft, a short-lived proposal or a one-off signoff from one person, and `never` for anything meant to circulate onward, be referenced as team reference, go to a customer or remain durable. An omitted `--ttl` defaults to `7d` for compatibility, not as a recommendation. Reaching a deadline deletes content and history permanently; clearing it with `expire` keeps the artifact. See `skills/publish-html-page/SKILL.md` for the full policy.
+
 ### Procedure
 
 1. Confirm the HTML file starts with `<!doctype html` or `<html`. Reject anything that does not. Images, video, audio, fonts, PDFs and other binary files, and any file over 256 KB, are stored in R2 instead of Fossil (the CLI uploads them automatically, up to 100 MB each); smaller text files must compress under about 1.99 MB. Keep it self-contained: the viewer blocks all network requests, so external URLs will not load.
 2. Run the publisher in machine-readable mode (a directory publishes a multi-file page):
    ```bash
-   node scripts/publish-html.mjs --json --title "<descriptive title>" [options] <file.html | dir>
+   node scripts/publish-html.mjs --json --title "<descriptive title>" --ttl <24h|never> [options] <file.html | dir>
    ```
 3. Capture `viewerUrl`, `editUrl` and `cloneUrl` from the JSON output (`{id, viewerUrl, editUrl, cloneUrl, checkin, expiresAt, warnings, warningMessages}`). `viewerUrl` (`/v/<id>#<readToken>`) is the full read link including the `#fragment` token; `editUrl` is `/v/<id>#<writeToken>`; `cloneUrl` is `https://editor:<writeToken>@<host>/r/<id>` for `fossil clone`/`push`.
 4. Return `viewerUrl` to the user. Keep `editUrl` and `cloneUrl` to yourself for later updates.
@@ -39,7 +43,7 @@ It needs the edit link; a read link fails. It prints `{id, viewerUrl, checkin, l
 | Flag | Effect | Default |
 |------|--------|---------|
 | `--title <text>` | Display title | filename |
-| `--ttl <duration>` | Expiry: `1h`, `6h`, `24h`, `7d`, `30d`, `never` | `7d` |
+| `--ttl <duration>` | Lifespan: `1h`, `6h`, `24h`, `7d`, `30d`, `never`; choose one on every create | `7d` when omitted (compatibility) |
 | `--slug <slug>` | Vanity URL slug `[a-z0-9-]{1,64}` | — |
 | `--message <text>` | Check-in comment | `Publish <name>` / `Update <name>` |
 | `--delete-local` | Delete local HTML after confirmed upload | off |

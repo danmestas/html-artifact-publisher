@@ -471,6 +471,78 @@ test('the CLI runs from an unrelated working directory through its own checkout 
   assert.match(run.stdout, /Usage:/);
 });
 
+// The publisher skill carries the canonical policy; the harness templates and
+// llms.txt point at it and stay brief. Each surface only has to name an
+// explicit lifespan with both intents, not repeat the full wording.
+test('the publisher skill is the canonical, complete lifespan policy', () => {
+  const skill = read('skills/publish-html-page/SKILL.md').replace(/\s+/g, ' ');
+  assert.match(skill, /before you create/i, 'decides before creating');
+  assert.match(skill, /--ttl[^.]{0,30}every publish/i, 'passes --ttl on every publish');
+  assert.match(skill, /--ttl 24h/i, 'transient work uses 24h');
+  assert.match(skill, /--ttl never/i, 'shared or durable work uses never');
+  assert.match(skill, /review link is not planned sharing/i, 'a single review recipient is not sharing');
+  assert.match(skill, /never silently guess[^.]{0,80}lifetime/i, 'refuses to guess a finite lifetime');
+  assert.match(skill, /7d default[^.]{0,80}compatibility/i, 'labels the omitted-flag default as compatibility');
+  assert.match(skill, /expiresAt[^.]{0,120}time zone/i, 'temporary links report a deadline with its time zone');
+  assert.match(skill, /Reaching that deadline deletes[^.]{0,80}permanently/i, 'reaching expiry deletes permanently');
+  assert.match(skill, /Clearing the deadline[^.]{0,40}keeps the artifact/i, 'clearing a deadline preserves the artifact');
+  assert.match(skill, /expire[^.]{0,60}never/i, 'promotion clears the deadline with expire');
+  assert.match(skill, /same artifact/i, 'promotion verifies the same artifact, not a duplicate');
+  assert.doesNotMatch(skill, /update[^.]{0,40}(--ttl|time to live)/i, 'update takes no lifespan flag');
+});
+
+test('every agent-facing surface names both lifespan intents', () => {
+  const surfaces = {
+    'public/llms.txt': read('public/llms.txt'),
+    'agent-harnesses/system-prompt-fragment.md': read('agent-harnesses/system-prompt-fragment.md'),
+    'agent-harnesses/claude-md-fragment.md': read('agent-harnesses/claude-md-fragment.md'),
+    'agent-harnesses/agents-md-fragment.md': read('agent-harnesses/agents-md-fragment.md'),
+    'agent-harnesses/cursor-rule.mdc': read('agent-harnesses/cursor-rule.mdc'),
+    'agent-harnesses/windsurf-rule.md': read('agent-harnesses/windsurf-rule.md'),
+    'generated install prompt': installPrompt('https://artifacts.example.test'),
+  };
+  for (const [name, text] of Object.entries(surfaces)) {
+    assert.match(text, /\b24h\b/, `${name}: transient work uses 24h`);
+    assert.match(text, /\bnever\b/, `${name}: shared or durable work uses never`);
+    assert.match(text, /--ttl/, `${name}: names the flag`);
+    assert.doesNotMatch(text, /clearance is permanent/i, `${name}: does not call clearing permanent`);
+  }
+});
+
+test('executable create examples always name --ttl, and update never does', () => {
+  const files = [
+    'skills/publish-html-page/SKILL.md',
+    'public/llms.txt',
+    'agent-harnesses/system-prompt-fragment.md',
+    'agent-harnesses/claude-md-fragment.md',
+    'agent-harnesses/agents-md-fragment.md',
+    'agent-harnesses/cursor-rule.mdc',
+    'agent-harnesses/windsurf-rule.md',
+  ];
+  for (const path of files) {
+    const text = read(path);
+    const creates = [...text.matchAll(/^.*publish-html\.mjs["']?(?: --json)? (?!update\b|read\b|history\b|list\b|search\b|delete\b|expire\b|watch\b|new-comment-link\b)[^\n]*$/gm)]
+      .map(m => m[0])
+      .filter(line => /publish-html\.mjs[^\n]*(<file\.html|<absolute|page\.html|report\.html|\$FILE|\/absolute)/.test(line))
+      .filter(line => !/^\s*#/.test(line))
+      .filter(line => !/\[publish\]|\[--json\]/.test(line));
+    assert.ok(creates.length > 0, `${path}: has a create example`);
+    for (const line of creates) assert.match(line, /--ttl/, `${path}: create example names --ttl: ${line.trim()}`);
+  }
+  const publishing = read('skills/publish-html-page/SKILL.md');
+  assert.doesNotMatch(publishing, /publish-html\.mjs update[^\n]*--ttl/, 'update never takes --ttl');
+});
+
+test('CLI help treats the 7d default as compatibility, not an agent recommendation', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const cli = new URL('../scripts/publish-html.mjs', import.meta.url).pathname;
+  const run = spawnSync(process.execPath, [cli, '--help'], { encoding: 'utf8' });
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(run.stdout, /--ttl[^\n]*never/i);
+  assert.match(run.stdout, /(default: 7d|7d)[\s\S]{0,60}compatib/i, 'help labels 7d as compatibility');
+  assert.match(run.stdout, /pass --ttl[\s\S]{0,80}(every|each)[\s\S]{0,40}(publish|create)/i, 'help tells agents to pass it explicitly');
+});
+
 test('env example quotes every placeholder and carries the instance origin', async () => {
   const origin = 'https://artifacts.example.test';
   const example = envExample(origin);

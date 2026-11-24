@@ -133,8 +133,25 @@ Run the CLI by absolute path from the checkout (`$HOME/tools/html-artifact-publi
 below). Pass absolute paths for input files; the CLI resolves its own assets relative
 to that checkout, not to the current directory.
 
+Choose the artifact's lifespan before you create it, and name `--ttl` on every
+publish. Use `--ttl 24h` for transient work — a scratch draft, a short-lived
+proposal, a one-off signoff from one person, where a single review recipient is
+not planned sharing — or an explicit duration the user asked for. Use `--ttl
+never` for anything meant to circulate onward, serve as team reference, go to a
+customer or remain durable, even if it is reviewed first. Match any other real
+temporary window deliberately; never silently guess a finite lifetime for
+something meant to be shared. The 7d default applies only when `--ttl` is
+omitted, for compatibility; it is not a recommended choice.
+
+For a temporary link, report the verified `expiresAt` with its time zone. While
+the artifact still has a deadline, reaching it deletes the content and history
+permanently — cleanup is not reversible. Clearing the deadline with `expire …
+never` instead preserves the artifact, its link and its history. To promote a
+temporary artifact to sharing, clear the deadline that way and verify a null
+`expiresAt` on the same artifact (same id and link), with no duplicate created.
+
 ```bash
-node "$HOME/tools/html-artifact-publisher/scripts/publish-html.mjs" /absolute/path/page.html --title "Report"
+node "$HOME/tools/html-artifact-publisher/scripts/publish-html.mjs" /absolute/path/page.html --title "Report" --ttl never
 node "$HOME/tools/html-artifact-publisher/scripts/publish-html.mjs" update "$EDIT_URL" /absolute/path/page.html --message "Revise report"
 node "$HOME/tools/html-artifact-publisher/scripts/publish-html.mjs" read "$READ_OR_EDIT_URL" --out "$OUT_DIR"
 node "$HOME/tools/html-artifact-publisher/scripts/publish-html.mjs" history "$URL"
@@ -167,7 +184,8 @@ an API/upload redirect. Explicit read/comment links do not fall back to account
 credentials. Owners get a verified read link; a named editor without a read token gets
 a plain sign-in-required address with linkVerified:false, not a new anonymous grant.
 
-The default TTL is 7d (7 days); `--ttl never` keeps the artifact until it is deleted.
+An omitted `--ttl` falls back to the default of 7d (7 days) for compatibility;
+name `--ttl` on every create. `--ttl never` keeps the artifact until it is deleted.
 
 `expire <artifact-url> <ttl|never>` changes an existing artifact's deadline only: the
 read link, content and history stay the same. It needs `HTML_PUBLISHER_URL` set to a
@@ -175,8 +193,8 @@ bare origin (no path, query or fragment) and a read or edit link on that origin,
 the creator's or instance owner's account-backed automation credential (or the legacy
 instance bearer); an edit link alone cannot change expiration. JSON output includes
 `viewerUrl`, `expiresAt`, `linkVerified` and `expirationPending` (true means the deadline
-was accepted but its library projection is still retrying). For shared review pages and
-durable reports, publish with `--ttl never`.
+was accepted but its library projection is still retrying). `never` clears the deadline
+and keeps the artifact; reaching an unexpired deadline deletes content and history permanently.
 
 ## Search remotely
 

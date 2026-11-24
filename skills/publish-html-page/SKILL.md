@@ -31,13 +31,39 @@ remote font files and external API requests. Ordinary navigation links are not
 resource loads; use `target="_blank"` to open them outside the viewer. To revise
 an artifact you already published, update it instead of publishing a new one.
 
-For shared review pages and durable reports, explicitly pass `--ttl never`.
-The general CLI default remains seven days.
-
 House fonts (Instrument Sans, IBM Plex Sans, IBM Plex Mono and IBM Plex Serif)
 need only be named in inline CSS: the viewer fetches its local font files and
 embeds them. No request to Google is needed or allowed. Bundle other fonts as
 relative `.woff2` files with `@font-face`; see **artifact-design**, Typography.
+
+## Choose the lifespan before you create
+
+Decide the artifact's lifespan explicitly before you create it, and pass `--ttl`
+on every publish. The CLI's 7d default (seven days) exists only for older callers
+that omit the flag; it is compatibility, not a recommended agent choice, and an
+omitted `--ttl` is not a decision you made.
+
+- **Transient work — a scratch draft, a short-lived proposal, a one-off signoff
+  from one person — use `--ttl 24h`** (or an explicit duration the user asked
+  for). A single person receiving a review link is not planned sharing.
+- **Work meant to be shared onward — onward circulation, team reference,
+  customer handoff, or anything that should still exist later — use
+  `--ttl never`**, even if it is reviewed first.
+- **Any other genuine temporary window — match the TTL to that window on
+  purpose.** Never silently guess a finite lifetime for something that is meant
+  to be shared.
+
+For a temporary link, report the verified deadline from `expiresAt` with its
+time zone. Reaching that deadline deletes the content and its history
+permanently, and that cleanup cannot be undone or restored. Clearing the
+deadline, by contrast, keeps the artifact: it does not delete anything.
+
+If a temporary artifact later needs to be shared, promote it instead of
+publishing again. Clear the deadline with the existing `expire` command
+(`expire "$ARTIFACT_URL" never`), which needs the artifact creator's or instance
+owner's automation credential. Verify the result has a null `expiresAt` on the
+**same artifact** (same id and link) and that no duplicate was created. Do not
+silently rewrite a deadline as a retroactive edit.
 
 ## Checkout and working directory
 
@@ -81,10 +107,10 @@ directory:
 
 ```bash
 # Absolute CLI path; artifact inputs are absolute too.
-node "$CHECKOUT/scripts/publish-html.mjs" /absolute/path/page.html --title "Report"
+node "$CHECKOUT/scripts/publish-html.mjs" /absolute/path/page.html --title "Report" --ttl never
 
 # Or change into the checkout and still pass absolute artifact paths.
-cd "$CHECKOUT" && node scripts/publish-html.mjs /absolute/path/page.html --title "Report"
+cd "$CHECKOUT" && node scripts/publish-html.mjs /absolute/path/page.html --title "Report" --ttl never
 ```
 
 Do not copy only the skill folder and drop the checkout: the scripts import
@@ -116,7 +142,7 @@ node scripts/publish-html.mjs expire <artifact-url> <ttl|never>
 
   --title <text>     Human-readable title (default: filename)
   --icon <name>      Trusted topic icon (see the accepted names below)
-  --ttl <duration>   1h | 6h | 24h | 7d | 30d | never  (default: 7d)
+  --ttl <duration>   1h | 6h | 24h | 7d | 30d | never  (default when omitted: 7d, compatibility; pass it every time)
   --slug <slug>      Optional vanity slug
   --message <text>   Check-in comment (default: "Publish <name>" / "Update <name>")
   --notes <file>     Ship the file as NOTES.md beside index.html; update without it keeps the old one
@@ -144,7 +170,8 @@ for private artifacts; page content and access tokens stay protected.
 Examples (keep the edit URL private):
 
 ```bash
-node scripts/publish-html.mjs report.html --title "Freight Audit" --icon chart
+node scripts/publish-html.mjs report.html --title "Freight Audit" --icon chart --ttl never
+node scripts/publish-html.mjs draft.html --title "Draft proposal" --ttl 24h
 node scripts/publish-html.mjs update "$EDIT_URL" report.html --message "Revise audit"
 node scripts/publish-html.mjs update "$EDIT_URL" report.html --icon notes --message "Change icon"
 ```
@@ -184,8 +211,10 @@ Expired artifacts cannot be revived.
    publishing: fragments are rejected with the filename, never auto-wrapped. To include
    images, video, fonts or other files, publish a directory and reference them
    by relative path. Images, video, audio, fonts, PDFs and other binary files, and any file over 256 KB, are stored in R2 instead of Fossil (the CLI uploads them automatically, up to 100 MB each); smaller text files must compress under about 1.99 MB.
-2. Run the script with `--title` matching the artifact's purpose and `--ttl never`
-   for a shared review page or durable report.
+2. Choose the lifespan first (see **Choose the lifespan before you create**),
+   then run the script with `--title` matching the artifact's purpose and an
+   explicit `--ttl`: `--ttl 24h` for transient work, `--ttl never` for anything
+   meant to circulate, be referenced later, or be handed off.
    If the page has Pikchr diagrams (`<pre class="pikchr">`), the script renders them
    first and refuses to publish on a Pikchr error (exit 1, with the diagram's line).
    Fix the diagram and rerun.

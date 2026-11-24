@@ -43,3 +43,12 @@ test('library destinations preserve supported filters but remove credentials and
   assert.equal(safeReturnTo('/?view=all&token=secret&returnTo=https://evil.example#private-access'), '/?view=all');
   assert.equal(signinUrl('/'), '/login');
 });
+
+test('chosen library expiry ordering survives the sign-in round trip', () => {
+  for (const view of ['all', 'mine', 'shared', 'starred', 'archived']) {
+    const destination = `/?view=${view}&q=river&sort=expiry&n=24`;
+    assert.equal(safeReturnTo(destination), destination);
+    const login = new URL(signinUrl(destination), 'https://example.test');
+    assert.equal(safeReturnTo(login.searchParams.get('returnTo')), destination);
+  }
+});

@@ -109,20 +109,42 @@ export function coverageNote(coverage) {
   return `Content search covers ${complete} of ${total} artifacts${notes ? `; ${notes}` : ''}.`;
 }
 
+function calendarDays(date, current) {
+  // Calendar days must not change length when this browser crosses daylight saving.
+  const day = d => Date.UTC(d.getFullYear(), d.getMonth(), d.getDate());
+  return Math.round((day(date) - day(current)) / 86400000);
+}
+export function expirySoon(value, now = Date.now()) {
+  if (!value) return false;
+  const date = new Date(value);
+  return !Number.isNaN(date.getTime()) && calendarDays(date, new Date(now)) <= 7;
+}
+export function expiryLabel(value, now = Date.now()) {
+  if (!value) return 'Never';
+  const date = new Date(value), current = new Date(now);
+  if (Number.isNaN(date.getTime())) return 'Unknown date';
+  if (date.getTime() <= now) return 'Expired';
+  const days = calendarDays(date, current);
+  if (days === 0) return 'Today';
+  if (days === 1) return 'Tomorrow';
+  if (days <= 7) return `In ${days} days`;
+  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
 const SORTS = new Set(['relevance', 'recent', 'name', 'expiry']);
 const URL_SORTS = new Set(['relevance', 'recent', 'name', 'expiry']);
 // A query with no explicit sort reads as relevance, which is what the server
-// defaults to under a non-empty q. Expiry belongs to the admin inventory.
-export function readSort(params, inventory = false) {
-  return readSortState(params, inventory).sort;
+// defaults to under a non-empty q. Only library and inventory callers opt into expiry.
+export function readSort(params, allowExpiry = false) {
+  return readSortState(params, allowExpiry).sort;
 }
 
 // The sort and whether it came from the URL rather than from the default for
 // the current query. The two must stay distinct: a default recent under a fresh
 // query becomes relevance, while a recent the reader chose stands.
-export function readSortState(params, inventory = false) {
+export function readSortState(params, allowExpiry = false) {
   const requested = params.get('sort');
-  if (requested && URL_SORTS.has(requested) && (requested !== 'expiry' || inventory)) {
+  if (requested && URL_SORTS.has(requested) && (requested !== 'expiry' || allowExpiry)) {
     return { sort: requested, chosen: true };
   }
   return { sort: params.get('q')?.trim() ? 'relevance' : 'recent', chosen: false };
@@ -131,8 +153,8 @@ export function readSortState(params, inventory = false) {
 const hasQuery = q => String(q || '').trim() !== '';
 // Whether the URL carries a sort the reader actually chose, as opposed to the
 // default inferred from q. Only a chosen sort is preserved across query edits.
-export function readSortChoice(params, inventory = false) {
-  return readSortState(params, inventory).chosen;
+export function readSortChoice(params, allowExpiry = false) {
+  return readSortState(params, allowExpiry).chosen;
 }
 // Moving between a query and no query picks the default that fits, but never
 // overrides a sort the reader chose. `chosen` says whether the current sort

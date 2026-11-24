@@ -228,15 +228,14 @@ test('expiry sort orders finite deadlines first then never, with stable ties and
     const afterNull = (await call(owner.cookie, `/api/admin/artifacts?sort=expiry&cursor=${encodeURIComponent(nullCursor)}`)).json;
     assert.deepEqual(afterNull.artifacts.map(a => a.id), [never.id]);
 
-    // Invalid values are refused, and members keep their old sort contract.
     for (const bad of ['sort=expiry&cursor=' + encodeURIComponent('["name","x","id"]'),
       'sort=expiry&cursor=' + encodeURIComponent('["expiry","soon","id"]'),
       'sort=expiry&cursor=' + encodeURIComponent('["expiry",null,"bad id"]'),
       'sort=expiry&cursor=' + encodeURIComponent('null'), 'sort=invalid', 'expiry=soonish']) {
       assert.equal((await call(owner.cookie, `/api/admin/artifacts?${bad}`)).status, 400, bad);
     }
-    assert.equal((await call(member.cookie, '/api/library?sort=expiry')).status, 400, 'non-admins cannot sort by expiry');
-    assert.equal((await call(member.cookie, '/api/library?expiry=soon')).status, 400, 'nor filter by it');
+    assert.equal((await call(member.cookie, '/api/library?sort=expiry')).status, 200, 'members can sort their library by expiry');
+    assert.equal((await call(member.cookie, '/api/library?expiry=soon')).status, 400, 'expiry filtering remains inventory-only');
   });
 });
 

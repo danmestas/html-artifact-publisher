@@ -15,7 +15,7 @@ export async function expirationQA({base,api,run,evaluate,wait,click,output,arti
   await run('cookies','set','artifact_session',artifact.cookie.split('=')[1],'--url',base,'--httpOnly','--sameSite','Lax');
   await run('set','viewport','390','844');
   await run('open',base+'/?view=mine');await wait('.artifact-title');
-  const item=async ()=>await evaluate(`[...document.querySelectorAll('.artifact-title')].find(e=>new URL(e.href).pathname===${JSON.stringify('/v/'+artifact.id)}).closest('article').querySelector('.artifact-menu').click()`);
+  const item=async ()=>await evaluate(`[...document.querySelectorAll('.artifact-title')].find(e=>new URL(e.href).pathname===${JSON.stringify('/v/'+artifact.id)}).closest('article,tr').querySelector('.artifact-menu').click()`);
   const expiresAt=async()=>(await api(`/api/artifacts/${artifact.id}`,{cookie:artifact.cookie})).json.expiresAt;
   await item();await run('find','role','button','click','--name','Expiration');await wait('#expiration-mode');
   assert.equal(await evaluate('document.getElementById("expiration-mode").value'),'never','an artifact that does not expire starts at Never expires');
@@ -145,7 +145,7 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
     for(const width of [1440,390,320]) for(const theme of ['light','dark']) {
       await run('set','viewport',String(width),'1000');
       await evaluate(`document.documentElement.dataset.theme=${JSON.stringify(theme)}`);
-      await click('#content article:first-child .artifact-menu');
+      await click('#content :is(article,tr):first-child .artifact-menu');
       await run('find','role','button','click','--name','Delete artifact…');await wait('#delete-confirm');
       assert.equal(await evaluate('document.activeElement.textContent'),'Cancel','deletion starts with the safe Cancel action focused');
       const unfocused=await evaluate('getComputedStyle(document.getElementById("delete-confirm")).borderColor');
@@ -209,7 +209,7 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
         const result=await evaluate(`(()=>{
           const root=document.documentElement;
           const nav=document.getElementById('navigation');
-          const allRows=[...document.querySelectorAll('.artifact-row,.artifact-summary')];
+          const allRows=[...document.querySelectorAll('.library-row,.artifact-row,.artifact-summary')];
           const rows=allRows.filter(e=>!e.textContent.includes('A very long artifact title')).slice(0,4).map(e=>e.getBoundingClientRect().height);
           const targets=[...document.querySelectorAll('.artifact-title')].map(e=>e.getBoundingClientRect().height);
           const sample=document.querySelector('.artifact-meta,.muted');
@@ -256,7 +256,7 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
     await run('press','Meta+k');
     assert.equal(await evaluate('document.activeElement.id'),'search','Cmd/Ctrl+K focuses search');
     // It must not disturb an open dialog that may hold a one-time credential.
-    await click('#content article:first-child .artifact-menu');await wait('#dialog[open]');
+    await click('#content :is(article,tr):first-child .artifact-menu');await wait('#dialog[open]');
     await evaluate('document.getElementById("search").blur()');
     await run('press','Meta+k');
     assert.equal(await evaluate('document.getElementById("dialog").open'),true,'Cmd/Ctrl+K leaves modal editing alone');
@@ -282,7 +282,7 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
     assert.equal(new Set(shown).size,24,'show more adds no duplicates');
     const shownUrl=await evaluate('location.pathname+location.search');
     assert.match(shownUrl,/[?&]n=24(&|$)/,'the URL records how many are shown');
-    await click('#content article:first-child .artifact-title');await wait('#bar:not([hidden])');await click('#backLibrary');await wait('.artifact-title');await run('wait','[aria-busy="false"]');
+    await click('#content :is(article,tr):first-child .artifact-title');await wait('#bar:not([hidden])');await click('#backLibrary');await wait('.artifact-title');await run('wait','[aria-busy="false"]');
     assert.equal(await evaluate('location.pathname+location.search'),shownUrl,'Library returns with the same batches shown');
     await run('wait','--fn','document.querySelectorAll(".artifact-title").length===24');
     assert.deepEqual(await evaluate('[...document.querySelectorAll(".artifact-title")].map(e=>new URL(e.href).pathname)'),shown);
@@ -321,7 +321,7 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
     assert.equal(await evaluate('!!document.querySelector(".artifact-title img")'),false);
     const href=await evaluate('[...document.querySelectorAll(".artifact-title")].find(e=>e.textContent.includes("Browser upload")).getAttribute("href")');
     const id=new URL(href,base).pathname.split('/').at(-1);
-    const item=async ()=>await evaluate(`[...document.querySelectorAll('.artifact-title')].find(e=>new URL(e.href).pathname===${JSON.stringify('/v/'+id)}).closest('article').querySelector('.artifact-menu').click()`);
+    const item=async ()=>await evaluate(`[...document.querySelectorAll('.artifact-title')].find(e=>new URL(e.href).pathname===${JSON.stringify('/v/'+id)}).closest('article,tr').querySelector('.artifact-menu').click()`);
     await item(); await wait('#dialog[open]');
     await run('find','role','button','click','--name','Rename'); await wait('#rename-title');
     await run('fill','#rename-title','Browser renamed'); await click('#dialog-body button[type=submit]'); await run('wait','--fn','!document.getElementById("dialog").open'); await run('wait','[aria-busy="false"]');
@@ -412,7 +412,7 @@ export async function browserQA({base,loginUrl,output,api,owner,browserOwner,mem
       const dialog=document.getElementById('dialog');
       const closed=new Promise(resolve=>dialog.addEventListener('close',resolve,{once:true}));
       dialog.close();
-      [...document.querySelectorAll('.artifact-title')].find(e=>new URL(e.href).pathname===${JSON.stringify('/v/'+id)}).closest('article').querySelector('.artifact-menu').click();
+      [...document.querySelectorAll('.artifact-title')].find(e=>new URL(e.href).pathname===${JSON.stringify('/v/'+id)}).closest('article,tr').querySelector('.artifact-menu').click();
       await closed;
       return dialog.open&&[...dialog.querySelectorAll('button')].some(e=>e.textContent==='Delete artifact…');
     })()`),true,'a queued close event preserves a newly reopened management dialog');

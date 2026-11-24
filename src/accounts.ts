@@ -116,17 +116,19 @@ async function libraryResults(req: Request, env: Env, user: Account | null, admi
   const q = (url.searchParams.get('q') ?? '').slice(0,300).trim();
   if (searchTerms(q).length > 12) return error('Search supports at most 12 terms');
   const sort = url.searchParams.get('sort') ?? (q ? 'relevance' : 'recent');
-  if (sort !== 'recent' && sort !== 'name' && sort !== 'relevance' && !(admin && sort === 'expiry')) return error('Invalid sort');
+  const accountLibrary = url.pathname === '/api/library' && !!user;
+  if (sort !== 'recent' && sort !== 'name' && sort !== 'relevance' && !((admin || accountLibrary) && sort === 'expiry')) return error('Invalid sort');
   const expiry = url.searchParams.get('expiry') ?? 'all';
   if (expiry !== 'all' && expiry !== 'soon') return error('Invalid expiry');
   if (!admin && expiry !== 'all') return error('Invalid expiry');
   if (sort === 'relevance' && !q) return error('Relevance requires a search');
   const ownerId = (url.searchParams.get('ownerId') ?? '').slice(0,64);
-  const queryKey = q ? await sha256hex(JSON.stringify([searchTerms(q),sort,admin,view,status,expiry,ownerId,user?.id ?? scope.credentialKey ?? 'instance',scope.artifactId ?? ''])) : '';
-  if (cursor && q) {
+  const cursorKind = accountLibrary ? 'library' : q ? 'search' : '';
+  const queryKey = cursorKind ? await sha256hex(JSON.stringify([searchTerms(q),sort,admin,view,status,expiry,ownerId,user?.id ?? scope.credentialKey ?? 'instance',scope.artifactId ?? '',...(accountLibrary ? [url.pathname] : [])])) : '';
+  if (cursor && cursorKind) {
     try {
       const wrapped = JSON.parse(cursor);
-      if (!Array.isArray(wrapped) || wrapped.length !== 3 || wrapped[0] !== 'search' || wrapped[1] !== queryKey || typeof wrapped[2] !== 'string') return error('Invalid cursor');
+      if (!Array.isArray(wrapped) || wrapped.length !== 3 || wrapped[0] !== cursorKind || wrapped[1] !== queryKey || typeof wrapped[2] !== 'string') return error('Invalid cursor');
       cursor = wrapped[2];
     } catch { return error('Invalid cursor'); }
   }
@@ -143,13 +145,14 @@ async function libraryResults(req: Request, env: Env, user: Account | null, admi
         || typeof v.at(-1) !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(v.at(-1))) return error('Invalid cursor');
     } catch { return error('Invalid cursor'); }
   }
-  const result = await registry(env).library(user,{admin,view,status,cursor,sort,expiry,q,ownerId,limit:limitOf(url),...scope});
+  const includeSharingSummary = accountLibrary && !req.headers.has('Authorization') && !!sessionToken(req);
+  const result = await registry(env).library(user,{admin,view,status,cursor,sort,expiry,q,ownerId,limit:limitOf(url),...scope,includeSharingSummary});
   const artifacts = result.artifacts.map(e => {
     const document = {id:e.id,slug:e.slug,title:e.title,tip:e.tip,icon:e.icon,searchIndex:e.searchIndex,...(e.search ? {search:e.search} : {}),
       createdAt:isoOrNull(e.createdAt),updatedAt:isoOrNull(e.updatedAt),expiresAt:isoOrNull(e.expiresAt),viewerUrl:`${url.origin}/v/${e.slug ?? e.id}`};
     return scope.artifactPermission ? {...document,permission:scope.artifactPermission,canManage:false} : {...e,...document};
   });
-  return json({...result,artifacts,nextCursor:result.nextCursor && q ? JSON.stringify(['search',queryKey,result.nextCursor]) : result.nextCursor});
+  return json({...result,artifacts,nextCursor:result.nextCursor && cursorKind ? JSON.stringify([cursorKind,queryKey,result.nextCursor]) : result.nextCursor});
 }
 
 /** Account routes; null leaves the existing artifact/sync API in charge. */

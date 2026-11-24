@@ -88,15 +88,16 @@ jobs:
       - name: End-to-end tests
         run: npm test
 
-      - name: Viewer browser and PDF security regressions
+      - name: Library, viewer and PDF browser regressions
         env:
           RENDERED_COPY_BROWSER_QA: '1'
+          LIBRARY_TABLE_BROWSER_QA: '1'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y poppler-utils
           export AGENT_BROWSER_EXECUTABLE_PATH="$(command -v google-chrome)"
           test -n "$AGENT_BROWSER_EXECUTABLE_PATH"
-          npm exec --yes --package=agent-browser@0.39.4 -- node --test --test-concurrency=1 test/rendered-copy-browser.mjs test/rendered-copy-scope-browser.mjs test/viewer-toolbar-browser.mjs
+          npm exec --yes --package=agent-browser@0.39.4 -- node --test --test-concurrency=1 test/rendered-copy-browser.mjs test/rendered-copy-scope-browser.mjs test/viewer-toolbar-browser.mjs test/compact-library-browser.mjs
 
       - name: Keep the tested build for deploy
         uses: actions/upload-artifact@v4

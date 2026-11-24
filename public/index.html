@@ -102,7 +102,7 @@
         </div>
         <button id="archived-link" class="archive-link" type="button" data-view="archived" data-scope aria-pressed="false" hidden>Archived</button>
         <span class="spacer" aria-hidden="true"></span>
-        <div id="sort-slot" class="sort-slot"><label id="sort-field" class="inline-field"><span id="sort-label" class="sr-only">Sort artifacts</span><select id="sort" aria-label="Sort artifacts"><option value="recent">Recently updated</option><option value="name">Name A–Z</option><option value="relevance" hidden>Best match</option><option value="expiry" hidden>Expires soonest</option></select></label></div>
+        <div id="sort-slot" class="sort-slot"><label id="sort-field" class="inline-field"><span id="sort-label" class="sr-only">Sort artifacts</span><select id="sort" aria-label="Sort artifacts"><option value="recent">Recently updated</option><option value="name">Name A–Z</option><option value="relevance" hidden>Best match</option><option value="expiry">Expires soonest</option></select></label></div>
         <button id="filter-toggle" class="filter-button" type="button" aria-expanded="false" aria-controls="filter-popover" hidden><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 6h16M7 12h10M10 18h4"/></svg></span>Filters<span id="filter-count" class="filter-count"></span></button>
         <div id="filter-popover" class="filter-popover" role="group" aria-label="Filter inventory" hidden>
           <div class="popover-head"><h2>Filter inventory</h2><button id="popover-close" class="icon-button" type="button" aria-label="Close filters">×</button></div>
@@ -118,7 +118,7 @@
           <div id="filter-sort-slot" class="field"><span id="filter-sort-label" class="field-label">Sort</span></div>
           <div class="popover-footer"><button type="button" class="linkish" id="popover-clear">Clear</button><button type="button" class="primary" id="popover-done">Done</button></div>
         </div>
-        <div id="layout-switch" class="segmented" role="group" aria-label="Library layout"><button type="button" data-layout="grid" aria-pressed="true">Grid</button><button type="button" data-layout="list" aria-pressed="false">List</button></div>
+        <div id="layout-switch" class="segmented" role="group" aria-label="Library layout"><button type="button" data-layout="grid" aria-pressed="false">Grid</button><button type="button" data-layout="list" aria-pressed="true">List</button></div>
       </form>
       <div id="active-filters" class="active-filters"><div id="filter-chips" class="filter-chips"></div><button id="clear-filters" class="filter-clear" type="button" hidden>Clear filters</button></div>
       <p id="result-status" class="tiny" role="status" aria-live="polite"></p>

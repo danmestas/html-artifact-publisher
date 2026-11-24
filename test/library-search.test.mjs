@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   snippetParts, snippetPath, matchReason, termsNote, statusNote, coverageNote,
-  readSort, readSortState, readSortChoice, sortAfterQuery, urlSort,
+  readSort, readSortState, readSortChoice, sortAfterQuery, urlSort, expiryLabel, expirySoon,
 } from '../public/library-search.js';
 
 test('a body excerpt is split into literal text and matching words without interpreting markup', () => {
@@ -102,6 +102,37 @@ test('a partly searched index is never described as nothing searched, and its co
   }
 });
 
+test('near-term expiration uses local calendar days, not an unexplained date', () => {
+  const now = new Date(2026, 10, 24, 12, 0, 0).getTime();
+  const at = (day, hour = 13) => new Date(2026, 10, day, hour).toISOString();
+  assert.equal(expiryLabel(null, now), 'Never');
+  assert.equal(expiryLabel('invalid', now), 'Unknown date');
+  assert.equal(expiryLabel(at(24, 11), now), 'Expired');
+  assert.equal(expiryLabel(at(24), now), 'Today');
+  assert.equal(expiryLabel(at(25, 1), now), 'Tomorrow', 'a deadline less than 24 hours away may still be tomorrow');
+  assert.equal(expiryLabel(at(27), now), 'In 3 days');
+  assert.equal(expiryLabel(at(30), now), 'In 6 days');
+  const later = new Date(2026, 11, 15, 13);
+  assert.equal(expiryLabel(later.toISOString(), now), later.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }));
+  for (const [month, day] of [[2, 7], [9, 31]]) {
+    const start = new Date(2026, month, day, 12);
+    const end = new Date(2026, month, day + 2, 12);
+    assert.equal(expiryLabel(end.toISOString(), start.getTime()), 'In 2 days', 'calendar labels survive daylight-saving changes');
+  }
+});
+
+test('urgency is limited to valid near deadlines, never the Never label', () => {
+  const now = new Date(2026, 10, 24, 12).getTime();
+  const at = day => new Date(2026, 10, day, 23).toISOString();
+  assert.equal(expirySoon(null, now), false);
+  assert.equal(expirySoon('invalid', now), false);
+  assert.equal(expirySoon(at(23), now), true, 'a stale expired row still needs attention');
+  assert.equal(expirySoon(at(24), now), true);
+  assert.equal(expirySoon(at(25), now), true);
+  assert.equal(expirySoon(at(31), now), true, 'seven local calendar days includes the whole seventh day');
+  assert.equal(expirySoon(at(32), now), false);
+});
+
 test('the sort choice keeps an explicit recent or name across query edits', () => {
   // Regression: an explicit recent in the URL is honored under a query.
   assert.equal(readSort(new URLSearchParams('q=a&sort=recent')), 'recent');
@@ -110,13 +141,15 @@ test('the sort choice keeps an explicit recent or name across query edits', () =
   assert.equal(readSort(new URLSearchParams('')), 'recent');
   assert.equal(readSort(new URLSearchParams('sort=name')), 'name');
   assert.equal(readSort(new URLSearchParams('sort=expiry'), true), 'expiry');
-  assert.equal(readSort(new URLSearchParams('sort=expiry')), 'recent', 'expiry belongs to the admin inventory');
+  assert.equal(readSort(new URLSearchParams('sort=expiry')), 'recent', 'expiry requires a library or inventory caller to opt in');
   // Only a sort named in the URL is the reader's choice.
   assert.equal(readSortChoice(new URLSearchParams('sort=name')), true);
   assert.equal(readSortChoice(new URLSearchParams('q=a')), false);
   assert.equal(readSortChoice(new URLSearchParams('sort=bogus')), false);
   // Typing a query where none was: a chosen recent/name is kept; an unchosen
   // default becomes relevance, which is what a fresh query means.
+  assert.equal(sortAfterQuery('expiry', '', 'capybara', true), 'expiry');
+  assert.equal(sortAfterQuery('expiry', 'capybara', '', true), 'expiry');
   assert.equal(sortAfterQuery('recent', '', 'capybara', true), 'recent');
   assert.equal(sortAfterQuery('name', '', 'capybara', true), 'name');
   assert.equal(sortAfterQuery('recent', '', 'capybara', false), 'relevance');
@@ -140,7 +173,7 @@ test('a default recent is distinguishable from a recent the reader chose', () =>
   assert.deepEqual(readSortState(new URLSearchParams('sort=name')), { sort: 'name', chosen: true });
   assert.deepEqual(readSortState(new URLSearchParams('sort=expiry'), true), { sort: 'expiry', chosen: true });
   assert.deepEqual(readSortState(new URLSearchParams('sort=expiry')), { sort: 'recent', chosen: false },
-    'expiry outside the inventory is not a usable choice');
+    'expiry without a library or inventory opt-in is not a usable choice');
   // First query from a default recent: relevance. First query after the reader
   // picked recent: their choice stands.
   const fresh = readSortState(new URLSearchParams(''));

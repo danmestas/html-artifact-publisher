@@ -741,7 +741,7 @@ export class Registry extends DurableObject<Env> {
   async star(id: string, userId: string, starred: boolean): Promise<void> {
     this.ctx.storage.sql.exec(starred ? 'INSERT OR IGNORE INTO stars VALUES (?,?)' : 'DELETE FROM stars WHERE artifact_id=? AND user_id=?',id,userId);
   }
-  async library(user: Account | null, opts: { admin: boolean; view: string; q: string; ownerId: string; status: string; cursor: string; limit: number; sort?: 'recent' | 'name' | 'expiry' | 'relevance'; expiry?: 'all' | 'soon'; artifactId?:string; artifactPermission?:'read' | 'comment' | 'write' }) {
+  async library(user: Account | null, opts: { admin: boolean; view: string; q: string; ownerId: string; status: string; cursor: string; limit: number; sort?: 'recent' | 'name' | 'expiry' | 'relevance'; expiry?: 'all' | 'soon'; artifactId?:string; artifactPermission?:'read' | 'comment' | 'write'; includeSharingSummary?:boolean }) {
     const principalId = user?.id ?? '';
     const instance = !user && !opts.artifactId;
     const clauses = [`${LIVE.replaceAll('expires_at','a.expires_at')}`];
@@ -813,6 +813,26 @@ export class Registry extends DurableObject<Env> {
     const rows = this.ctx.storage.sql.exec<Row & { ownerName: string; starred: number; permission: 'read' | 'write'; shared: number; search_version: number | null; search_status: SearchStatus | null; search_score: number; matched: string }>(`SELECT a.*,si.version AS search_version,si.status AS search_status,(${score}) AS search_score,${terms.length ? `json_array(${matched.map(m => `CASE WHEN ${m} THEN 1 ELSE 0 END`).join(',')})` : "'[]'"} AS matched,u.name AS ownerName,s.user_id IS NOT NULL AS starred, g.permission, EXISTS(SELECT 1 FROM grants x WHERE x.artifact_id=a.id) AS shared ${joins} WHERE ${clauses.join(' AND ')} ORDER BY ${byName ? 'a.title COLLATE NOCASE ASC,a.id ASC' : byExpiry ? '(a.expires_at IS NULL) ASC,a.expires_at ASC,a.id ASC' : byRelevance ? 'search_score DESC,a.updated_at DESC,a.id DESC' : 'a.updated_at DESC,a.id DESC'} LIMIT ?`,...args,opts.limit+1).toArray();
     const more = rows.length > opts.limit; rows.splice(opts.limit);
     const last = rows.at(-1);
+    const summaries = new Map<string, { activeCount:number; pendingCount:number; people:string[] }>();
+    const manageableIds = opts.includeSharingSummary && user
+      ? rows.filter(r => user.role === 'owner' || (r.owner_id ?? 'instance-owner') === principalId).map(r => r.id) : [];
+    if (manageableIds.length) {
+      const summariesPage = this.ctx.storage.sql.exec<{ id:string; activeCount:number; pendingCount:number; people:string }>(`WITH recipients AS (
+        SELECT g.artifact_id AS id,u.status,u.id AS user_id,
+          CASE WHEN trim(u.name)='' OR instr(u.name,'@')>0 OR instr(u.name,':')>0
+            OR u.name GLOB '*.[A-Za-z][A-Za-z]*' OR instr(u.name,'/')>0
+            OR trim(u.name)=u.id THEN 'Unnamed person' ELSE trim(u.name) END AS name
+        FROM grants g JOIN accounts u ON u.id=g.user_id WHERE g.artifact_id IN (${manageableIds.map(() => '?').join(',')})
+      ), ranked AS (
+        SELECT id,name,row_number() OVER (PARTITION BY id ORDER BY name COLLATE NOCASE,user_id) AS position FROM recipients WHERE status='active'
+      ), previews AS (
+        SELECT id,json_group_array(name ORDER BY position) AS people FROM ranked WHERE position<=3 GROUP BY id
+      ) SELECT r.id,count(CASE WHEN r.status='active' THEN 1 END) AS activeCount,
+        count(CASE WHEN r.status='invited' THEN 1 END) AS pendingCount,COALESCE(p.people,'[]') AS people
+        FROM recipients r LEFT JOIN previews p ON p.id=r.id GROUP BY r.id`,...manageableIds).toArray();
+      for (const id of manageableIds) summaries.set(id,{activeCount:0,pendingCount:0,people:[]});
+      for (const row of summariesPage) summaries.set(row.id,{activeCount:row.activeCount,pendingCount:row.pendingCount,people:JSON.parse(row.people) as string[]});
+    }
     const artifacts = rows.map(r => {
       const flags = JSON.parse(r.matched) as number[];
       const matchedTerms = terms.filter((_,i) => flags[i]);
@@ -822,6 +842,7 @@ export class Registry extends DurableObject<Env> {
       const canManage = user?.role === 'owner' || own;
       return {
         ...toEntry(r), searchIndex:{status:r.search_status ?? 'pending',version:r.search_version},
+        ...(summaries.has(r.id) ? {sharingSummary:summaries.get(r.id)!} : {}),
         ...(opts.q ? {search:{matchedTerms,totalTerms:terms.length,partial:matchedTerms.length < terms.length,snippet:searchSnippet(chunks,terms)}} : {}),
         ownerName:r.ownerName ?? 'Instance owner',
         accessLabel:instance ? 'Instance access' : own ? (r.shared ? 'Shared by you' : 'Private') : (user?.role === 'owner' || r.permission === 'write' ? 'Can edit' : 'Can view'),

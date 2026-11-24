@@ -17,8 +17,10 @@ If either is missing, tell the user what to configure and stop.
 
 ## How to publish
 
+Choose the artifact's lifespan before you create it, and pass `--ttl` on every publish: `24h` for transient work such as a draft, a short-lived proposal or a one-off signoff from one person, and `never` for anything meant to circulate onward, be referenced as team reference, go to a customer or remain durable. An omitted `--ttl` defaults to `7d` for compatibility, not as a recommendation. Reaching a deadline deletes content and history permanently; clearing it with `expire` keeps the artifact. See `skills/publish-html-page/SKILL.md` for the full policy.
+
 ```bash
-node scripts/publish-html.mjs --json --title "<descriptive title>" <file.html | dir>
+node scripts/publish-html.mjs --json --title "<descriptive title>" --ttl <24h|never> <file.html | dir>
 ```
 
 A single file is stored as `index.html`; a directory publishes a multi-file page. The script uploads the files and prints JSON: `{id, viewerUrl, editUrl, cloneUrl, checkin, expiresAt, warnings, warningMessages}`. `viewerUrl` (`https://<host>/v/<id>#<readToken>`) is the complete read link; tokens are 64 hex characters, and `…@<check-in>` after the token selects a version.
@@ -42,7 +44,7 @@ It needs the edit link (a read link fails) and prints `{id, viewerUrl, checkin, 
 ## Options
 
 - `--title <text>` — display title (default: filename)
-- `--ttl 1h|6h|24h|7d|30d|never` — time to live (default: `7d`)
+- `--ttl 1h|6h|24h|7d|30d|never` — lifespan, chosen before every create (default when omitted: `7d`, compatibility only)
 - `--slug <slug>` — vanity URL slug using `[a-z0-9-]`, up to 64 characters
 - `--message <text>` — check-in comment
 - `--delete-local` — delete the local HTML file after a confirmed successful upload
@@ -68,4 +70,4 @@ node scripts/publish-html.mjs delete "<editUrl>"
 
 ## Size and TTL limits
 
-Maximum payload: 10 MB per request. Images, video, audio, fonts, PDFs and other binary files, and any file over 256 KB, are stored in R2 instead of Fossil (the CLI uploads them automatically, up to 100 MB each); smaller text files must compress under about 1.99 MB. Default TTL: 7 days. Maximum TTL: 30 days. Pass `--ttl never` for no expiry.
+Maximum payload: 10 MB per request. Images, video, audio, fonts, PDFs and other binary files, and any file over 256 KB, are stored in R2 instead of Fossil (the CLI uploads them automatically, up to 100 MB each); smaller text files must compress under about 1.99 MB. Maximum TTL: 30 days. The 7-day default applies only when `--ttl` is omitted. Pass `--ttl never` for no expiry; `update` takes no lifespan flag.

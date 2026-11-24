@@ -13,13 +13,17 @@ HTML_PUBLISHER_TOKEN=<your-bearer-token>
 
 If either variable is absent, tell the user what to set and stop. Do not attempt to guess or hard-code values.
 
+## Choose the lifespan first
+
+Decide the artifact's lifespan before you create it, and pass `--ttl` on every publish: `24h` for transient work such as a draft, a short-lived proposal or a one-off signoff from one person, and `never` for anything meant to circulate onward, be referenced as team reference, go to a customer or remain durable. An omitted `--ttl` defaults to `7d` for compatibility, not as a recommendation. Reaching a deadline deletes content and history permanently; clearing it with `expire` keeps the artifact. See `skills/publish-html-page/SKILL.md` for the full policy.
+
 ## Steps
 
 1. Confirm the HTML file starts with `<!doctype html` or `<html`. If it does not, explain that the publisher only accepts standalone HTML documents. Keep it self-contained: the viewer blocks all network requests, so external URLs will not load. Images, video, audio, fonts, PDFs and other binary files, and any file over 256 KB, are stored in R2 instead of Fossil (the CLI uploads them automatically, up to 100 MB each); smaller text files must compress under about 1.99 MB.
 
 2. Run the publisher script in machine-readable mode:
    ```bash
-   node scripts/publish-html.mjs --json --title "<descriptive title>" <file.html | dir>
+   node scripts/publish-html.mjs --json --title "<descriptive title>" --ttl <24h|never> <file.html | dir>
    ```
    A directory publishes a multi-file page.
 
@@ -48,7 +52,7 @@ It needs the edit link; a read link fails. Exit code 3 means a version conflict 
 | Flag | Description | Default |
 |------|-------------|---------|
 | `--title <text>` | Human-readable title | filename |
-| `--ttl <duration>` | `1h`, `6h`, `24h`, `7d`, `30d`, `never` | `7d` |
+| `--ttl <duration>` | `1h`, `6h`, `24h`, `7d`, `30d`, `never`; choose one on every create | `7d` when omitted (compatibility) |
 | `--slug <slug>` | Vanity slug `[a-z0-9-]{1,64}` | — |
 | `--message <text>` | Check-in comment | `Publish <name>` / `Update <name>` |
 | `--delete-local` | Delete local file after confirmed upload | off |

@@ -34,7 +34,8 @@ Publish options:
   --title <text>     Title for the artifact (default: filename)
   --icon <name>      Generic icon (publish and update; omitted updates preserve it).
                      ${ICON_NAMES.join(', ')}
-  --ttl <duration>   Time-to-live: 1h, 6h, 24h, 7d, 30d, never (default: 7d)
+  --ttl <duration>   Lifespan: 1h, 6h, 24h, 7d, 30d, never.
+                     Pass --ttl on every publish; omitted default: 7d (compatibility)
   --slug <slug>      Optional vanity slug
   --message <text>   Check-in comment (default: "Publish <name>" / "Update <name>")
   --notes <file>     Store <file> as NOTES.md next to index.html (publish and update);

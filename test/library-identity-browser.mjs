@@ -42,7 +42,7 @@ export async function libraryIdentityQA({base,api,owner,member}) {
           };return true;
         })()`);
         run('click','#verify-button');run('wait','#content[aria-busy="false"]');run('wait','--fn','window.__identityHeld===true');
-        assert.equal(evaluate('!!document.querySelector(".artifact-list")'),true,'a fresh workspace defaults to quiet rows');
+        assert.equal(evaluate('!!document.querySelector("#content table tbody")'),true,'a fresh workspace defaults to quiet rows');
         assert.deepEqual(evaluate('window.__heldIdentityTitles'),[titleA],'held response really contains A private data');
         run('click','#account-menu-button');run('click','#logout');run('wait','#login:not([hidden])');
         assert.equal(evaluate('location.pathname'),'/login');

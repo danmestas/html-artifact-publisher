@@ -92,11 +92,13 @@ test('real browser: content search shows honest excerpts, sort state and owner i
     // A body-only hit renders an excerpt whose marks are the query words.
     assert.equal(await evaluate('document.querySelector(".artifact-title").textContent.includes("River report")'), true);
     assert.equal(await evaluate('document.querySelector(".search-excerpt mark")?.textContent'), 'capybara');
-    assert.equal(await evaluate('document.querySelector(".search-path").textContent'), 'index.html');
+    await run('click', '.artifact-details-button'); await wait('#dialog[open] .search-path');
+    assert.equal(await evaluate('document.querySelector("#dialog .search-path").textContent'), 'index.html');
     // Page source in the artifact body stays inert text inside the excerpt.
     assert.equal(await evaluate('!!document.querySelector(".search-excerpt img, .search-excerpt script")'), false, 'no element parsed out of page source');
     assert.ok((await evaluate('document.querySelector(".search-excerpt").textContent')).includes('<img src=x onerror=alert(1)>'));
-    assert.match(await evaluate('document.querySelector(".search-facts").textContent'), /Matched in page content/);
+    assert.match(await evaluate('document.querySelector("#dialog .search-facts").textContent'), /Matched in page content/);
+    await run('press', 'Escape');
 
     // The relevance sort is visible only with a query, and the URL records an
     // explicit recent so a reload cannot flip it back to relevance.
@@ -218,13 +220,13 @@ test('real browser: content search shows honest excerpts, sort state and owner i
     // the new identity renders anything.
     await run('open', `${app.base}/?q=capybara`);
     await wait('.artifact-title');
-    await evaluate(`(()=>{ window.__preSwitchRows = document.querySelectorAll('#content article').length; return true; })()`);
+    await evaluate(`(()=>{ window.__preSwitchRows = document.querySelectorAll('#content .artifact-title').length; return true; })()`);
     const stale = await evaluate('window.__preSwitchRows');
     assert.ok(stale > 0, 'the owner had rendered rows before switching');
     await run('cookies', 'clear');
     await run('open', `${app.base}/?q=capybara`);
     await wait('#login:not([hidden])');
-    assert.equal(await evaluate('document.querySelectorAll("#content article").length'), 0, 'signing out clears result rows');
+    assert.equal(await evaluate('document.querySelectorAll("#content .artifact-title").length'), 0, 'signing out clears result rows');
     assert.equal(await evaluate('document.getElementById("search-coverage").hidden'), true, 'signing out clears coverage');
     assert.equal(await evaluate('document.getElementById("search-index-panel").hidden'), true, 'signing out hides the index panel');
   } finally {

@@ -37,7 +37,7 @@ Changing `OWNER_EMAIL` preserves the owner ID and artifact ownership but revokes
 
 | Route | Query | Access |
 | --- | --- | --- |
-| `GET /api/library` | `view=all\|mine\|shared\|starred\|archived`, `q`, `sort=relevance\|recent\|name`, `cursor`, `limit` | Account's authorized library |
+| `GET /api/library` | `view=all\|mine\|shared\|starred\|archived`, `q`, `sort=relevance\|recent\|name\|expiry`, `cursor`, `limit` | Account's authorized library |
 | `GET /api/admin/artifacts` | `q`, `ownerId`, `status=all\|active\|archived`, `sort=relevance\|recent\|name\|expiry`, `expiry=all\|soon`, `cursor`, `limit` | Instance owner only |
 | `GET /api/search` | Same search/filter/cursor fields; optional `scope=inventory`, `artifactId` | Personal credentials: authorized library; legacy instance bearer: inventory; artifact Token: required exact-artifact scope |
 | `GET /api/admin/search-index` | —; returns `{status,processed,remaining,failed}` | Instance-owner account or existing instance automation bearer |
@@ -49,9 +49,11 @@ Results contain `{artifacts,total,nextCursor,searchCoverage}`. Inventory also re
 
 Each artifact includes `id`, `title`, `ownerId`, `ownerName`, `updatedAt`, `createdAt`, `expiresAt`, `viewerUrl`, `permission`, `canManage`, `archived`, `starred`, `visibility` and `accessLabel`.
 
+The browser library list can also return `sharingSummary:{activeCount,pendingCount,people}` on rows the signed-in account can manage. `people` has at most three display labels for active named grants; the counts distinguish active grants from invitations. Suspended accounts are not counted as active. These are named grants only, not a list of everyone who can use a capability link. Other viewers receive their own access label and no summary, names or counts. The remote search API and inventory do not expose these summaries.
+
 - Recent order is updated time descending with a stable ID tie-breaker.
 - Name order uses SQLite's ASCII NOCASE ordering, not locale-specific Unicode collation.
-- Expiry order puts finite deadlines first, earliest first with ID ties; never expires comes last. This ordering is admin-only.
+- Expiry order puts finite deadlines first, earliest first with ID ties; never expires comes last. It is available on the account library and on owner inventory. On the separate remote `/api/search` endpoint it remains inventory-only.
 - `expiry=soon` selects live deadlines within the next seven days, inclusive, combined with owner, search and status filters.
 - With a non-empty `q`, the default is relevance. Current titles and server-extracted current HTML are searched; complete term matches precede explicitly labelled partial matches. Returned excerpts are plain text with UTF-16 match ranges, never HTML. Historical versions, script execution, private discussion/profile fields and PDF/OCR are outside scope.
 - `searchCoverage` counts complete/partial/pending/error/unsupported artifacts in the authorized view before `q`. It does not count inaccessible artifacts. A stale known-version body is not used; its current title can still match while projection is pending. Existing artifacts require explicit owner-controlled backfill; a query does not start one.

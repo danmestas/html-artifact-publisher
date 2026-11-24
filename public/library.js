@@ -4,7 +4,7 @@ import { iconSvg, resolveIcon } from './icons.js';
 import { safeReturnTo } from './auth-return.js';
 import {
   snippetParts, snippetPath, matchReason, termsNote, statusNote, coverageNote,
-  readSort, readSortState, sortAfterQuery, urlSort,
+  readSort, readSortState, sortAfterQuery, urlSort, expiryLabel, expirySoon,
 } from './library-search.js';
 
 const $ = id => document.getElementById(id);
@@ -69,7 +69,7 @@ function readState() {
     kind: view === 'activity' && Object.hasOwn(KIND_LABELS, p.get('kind')) ? p.get('kind') : 'all',
     n: Number.isSafeInteger(n) && n > batch ? Math.min(n, 480) : batch,
     // Relevance is a library/inventory ordering; every other view keeps its own.
-    sort: LIBRARY_VIEWS.includes(view) || view === 'admin' ? readSort(p, view === 'admin') : 'recent',
+    sort: LIBRARY_VIEWS.includes(view) || view === 'admin' ? readSort(p, true) : 'recent',
   };
 }
 // The sort and whether the reader chose it, for the current URL and view.
@@ -78,7 +78,7 @@ function readState() {
 function currentSortState() {
   const view = state.view;
   const sortable = LIBRARY_VIEWS.includes(view) || view === 'admin';
-  const deck = readSortState(new URLSearchParams(location.search), view === 'admin');
+  const deck = readSortState(new URLSearchParams(location.search), sortable);
   return sortable ? deck : { sort: 'recent', chosen: false };
 }
 let state = readState();
@@ -218,6 +218,8 @@ function takeLoginReturn() {
 // list or activity. Recent artifacts are never written to storage.
 function resetAccountCaches() {
   ++accountEpoch;
+  clearTimeout(toastTimer);
+  message('toast');
   closeDialog();
   clearPreviews();
   people = [];
@@ -238,6 +240,49 @@ function resetAccountCaches() {
   hideSearchIndexPanel();
   renderRecent();
 }
+// Messages are hints only. On tab return or an auth change, trust the server's
+// cookie identity, never an identity sent by another tab. Keep old private rows
+// and open dialogs out of view until the newest check has settled.
+let identityCheck = 0;
+let signinChannel;
+function shieldLibrary() {
+  if (user && !$('app').hidden) document.documentElement.setAttribute('data-checking-account', '');
+}
+async function checkLibraryIdentity({ shield = false } = {}) {
+  if (!user || $('app').hidden) return;
+  const check = ++identityCheck, epoch = accountEpoch;
+  // A normal focus event can be the first half of a button click. Revalidate
+  // silently there; an actual auth hint or a hidden/restored tab is shielded.
+  if (shield) shieldLibrary();
+  try {
+    const response = await fetch('/api/session', { credentials: 'same-origin', cache: 'no-store', signal: AbortSignal.timeout(10000) });
+    if (!response.ok) throw new Error('Account check failed');
+    const { user: next } = await response.json();
+    if (check !== identityCheck || epoch !== accountEpoch) return;
+    if (next?.id === user?.id && next?.role === user?.role) return;
+    user = next; adoptAccount(user); closeAccountMenu();
+    if (user) await showApp();
+    else { rememberLoginReturn(); loginState = 'form'; showLogin(); }
+  } catch {
+    if (check !== identityCheck || epoch !== accountEpoch) return;
+    user = null; adoptAccount(null); rememberLoginReturn(); loginState = 'form'; showLogin();
+    message('login-feedback', 'Could not verify the current account. Reload to try again.', 'error');
+  } finally {
+    if (check === identityCheck) document.documentElement.removeAttribute('data-checking-account');
+  }
+}
+try {
+  signinChannel = new BroadcastChannel('artifact-signin');
+  signinChannel.onmessage = ({data}) => {
+    if (data?.type === 'signed-in' || data?.type === 'signed-out') void checkLibraryIdentity({shield:true});
+  };
+} catch { /* Focus and restored tabs still recheck when broadcasts are unavailable. */ }
+window.addEventListener('focus', () => { void checkLibraryIdentity(); });
+window.addEventListener('pagehide', shieldLibrary);
+window.addEventListener('pageshow', e => { if (e.persisted) void checkLibraryIdentity(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) shieldLibrary(); else void checkLibraryIdentity();
+});
 function adoptAccount(nextUser) {
   const id = nextUser ? nextUser.id : null;
   const role = nextUser ? nextUser.role : null;
@@ -268,6 +313,7 @@ function showLogin() {
   closeAccountMenu();
   $('boot').hidden = true;
   $('app').hidden = true;
+  document.documentElement.removeAttribute('data-checking-account');
   $('login').hidden = false;
   loginReturnIsArtifact = destinationIsArtifact(loginDestination());
   const step = loginToken ? 'verify' : loginState;
@@ -356,7 +402,7 @@ function finishSignin(data) {
   const destination = server === '/' ? safeReturnTo('/' + takeLoginReturn()) : server;
   // Another page (a viewer waiting for this sign-in) may listen for this hint.
   // It carries nothing but "check your cookie again"; no token, no destination.
-  try { new BroadcastChannel('artifact-signin').postMessage({ type: 'signed-in' }); } catch { /* optional */ }
+  signinChannel?.postMessage({ type: 'signed-in' });
   // A refused security change is retried by the reader, never by this code:
   // the sign-in only earns a fresh session. The destination is the same either
   // way, so a library tab returns to its view and an artifact tab opens the
@@ -444,6 +490,7 @@ $('logout').addEventListener('click', async () => {
   $('logout').disabled = true;
   try {
     await api('/api/auth/logout', { method: 'POST' });
+    signinChannel?.postMessage({ type: 'signed-out' });
     user = null;
     adoptAccount(null);
     closeDialog();
@@ -491,8 +538,10 @@ function resetPagination() { state.n = state.view === 'activity' ? EVENT_BATCH :
 // a choice made in one view is neither carried into nor misread in another.
 function syncSortChosen() { sortChosen = currentSortState().chosen; }
 function navigate(view) {
+  closeDialog();
   clearTimeout(searchTimer);
-  const sort = view !== 'admin' && state.sort === 'expiry' ? 'recent' : state.sort;
+  const sortable = LIBRARY_VIEWS.includes(view) || view === 'admin';
+  const sort = !sortable && state.sort === 'expiry' ? 'recent' : state.sort;
   state = { view, q: '', ownerId: '', status: 'all', expiry: 'all', kind: 'all', n: BATCH, sort: sortAfterQuery(sort, 'q', '', sortChosen) };
   resetPagination();
   writeUrl();
@@ -504,10 +553,10 @@ function navigate(view) {
 // All/Mine/Shared and Archived switch which library slice is shown. They are
 // filters on the current list: keep the search query and sort, reset pagination.
 function setScope(view) {
+  closeDialog();
   clearTimeout(searchTimer);
   state.view = view;
   state.ownerId = ''; state.status = 'all'; state.expiry = 'all'; state.kind = 'all';
-  if (view !== 'admin' && state.sort === 'expiry') state.sort = 'recent';
   resetPagination();
   writeUrl();
   syncSortChosen();
@@ -520,6 +569,7 @@ document.querySelectorAll('[data-view]').forEach(b => {
   else b.addEventListener('click', () => navigate(b.dataset.view));
 });
 window.addEventListener('popstate', () => {
+  closeDialog();
   state = readState();
   syncSortChosen();
   if (user) loadPage();
@@ -574,12 +624,7 @@ function search() {
 }
 $('search').addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(search, 250); });
 $('filters').addEventListener('submit', e => { e.preventDefault(); clearTimeout(searchTimer); search(); });
-$('sort').addEventListener('change', () => {
-  state.sort = $('sort').value;
-  // The reader just picked one; keep it across later query edits.
-  sortChosen = true;
-  resetPagination(); writeUrl(); loadPage();
-});
+$('sort').addEventListener('change', () => chooseSort($('sort').value));
 $('owner-filter').addEventListener('change', () => {
   state.ownerId = $('owner-filter').value;
   resetPagination(); writeUrl(); loadPage();
@@ -592,11 +637,12 @@ function clearFilters() {
   clearTimeout(searchTimer);
   const previous = state.q;
   state.q = ''; state.ownerId = ''; state.status = 'all'; state.expiry = 'all'; state.kind = 'all';
-  // Expiry ordering is presented as a removable filter; clearing must remove it.
-  if (state.sort === 'expiry') state.sort = 'recent';
+  // Inventory exposes expiry ordering as a removable filter, unlike the library.
+  if (state.view === 'admin' && state.sort === 'expiry') { state.sort = 'recent'; sortChosen = false; }
   if (LIBRARY_VIEWS.includes(state.view) || state.view === 'admin') {
+    const previousSort = state.sort;
     state.sort = sortAfterQuery(state.sort, previous, '', sortChosen);
-    sortChosen = false;
+    if (state.sort !== previousSort) sortChosen = false;
   }
   resetPagination(); writeUrl(); loadPage();
 }
@@ -725,7 +771,7 @@ $('more').addEventListener('click', async () => {
   if (!nextCursor || !user) return;
   const seq = loadSequence;
   const view = state.view;
-  const first = $('content').querySelectorAll('[role="listitem"]').length;
+  const first = $('content').querySelectorAll('[role="listitem"], .library-row').length;
   $('more').disabled = true;
   try {
     if (view === 'activity') {
@@ -751,7 +797,7 @@ $('more').addEventListener('click', async () => {
       state.n = shownCount; writeUrl(true);
       moreStatus(shownCount, data.total, 'artifact');
     }
-    $('content').querySelectorAll('[role="listitem"]')[first]?.querySelector('a, button')?.focus({ preventScroll: true });
+    $('content').querySelectorAll('[role="listitem"], .library-row')[first]?.querySelector('a, button')?.focus({ preventScroll: true });
   } catch (err) { notify(err.message); }
   finally { $('more').disabled = false; }
 });
@@ -802,8 +848,9 @@ function removeFilter(key) {
   if (key === 'sort') { state.sort = 'recent'; $('sort').value = 'recent'; sortChosen = false; }
   if (key === 'kind') state.kind = 'all';
   if (key === 'q' && (LIBRARY_VIEWS.includes(state.view) || state.view === 'admin')) {
+    const previousSort = state.sort;
     state.sort = sortAfterQuery(state.sort, previous, state.q, sortChosen);
-    if (!state.q) sortChosen = false;
+    if (state.sort !== previousSort) sortChosen = false;
   }
   resetPagination(); writeUrl(); loadPage();
 }
@@ -924,8 +971,8 @@ async function loadPage() {
   $('owner-filter').hidden = !inventory;
   $('status-filter').hidden = !inventory;
   $('expiry-filter').hidden = !inventory;
-  $('sort').querySelector('[value="expiry"]').hidden = !inventory;
-  $('sort').querySelector('[value="expiry"]').disabled = !inventory;
+  $('sort').querySelector('[value="expiry"]').hidden = !library && !inventory;
+  $('sort').querySelector('[value="expiry"]').disabled = !library && !inventory;
   // Best match is only meaningful while a query is present, and only in the
   // library and inventory. Other views keep their own ordering.
   const relevance = $('sort').querySelector('[value="relevance"]');
@@ -1147,6 +1194,8 @@ window.addEventListener('pagehide', clearPreviews);
 window.addEventListener('pageshow', e => { if (e.persisted) loadPreviews(); });
 function renderArtifacts(items, inventory, append = false) {
   if (append) {
+    const rows = $('content').querySelector('.artifact-table tbody');
+    if (rows && !inventory) { rows.append(...items.map(artifactTableRow)); return; }
     const list = $('content').querySelector('.artifact-grid, .artifact-list');
     if (list) { list.append(...artifactEntries(items, inventory, list.classList.contains('artifact-grid'))); loadPreviews(); return; }
   }
@@ -1167,11 +1216,108 @@ function renderArtifacts(items, inventory, append = false) {
     return;
   }
   const grid = !inventory && layout === 'grid';
+  if (!inventory && !grid) {
+    $('content').replaceChildren(artifactTable(items));
+    return;
+  }
   const list = node('div', { className: grid ? 'artifact-grid' : 'artifact-list', role: 'list' }, ...artifactEntries(items, inventory, grid));
   const headings = node('div', { className: `inventory-head${inventory ? ' inventory' : ''}`, ariaHidden: 'true' },
     ...(inventory ? ['Artifact', 'Owner', 'Visibility', 'Status', 'Updated', 'Expires', ''] : ['Artifact', 'Owner', 'Updated', '', '']).map(textContent => node('span', { textContent })));
   $('content').replaceChildren(...(grid ? [list] : [headings, list]));
   loadPreviews();
+}
+function chooseSort(sort) {
+  state.sort = sort;
+  sortChosen = true;
+  resetPagination(); writeUrl(); loadPage();
+}
+function artifactTable(items) {
+  const head = node('tr');
+  for (const [label, sort] of [['Artifact', 'name'], ['Updated', 'recent'], ['Expires', 'expiry'], ['Shared to', null], ['Actions', null]]) {
+    const th = node('th');
+    th.setAttribute('scope', 'col');
+    if (sort) {
+      const active = state.sort === sort;
+      const control = button(label, () => chooseSort(sort), 'table-sort');
+      const indicator = node('span', { className: 'sort-indicator', ariaHidden: 'true', textContent: active ? (sort === 'recent' ? '↓' : '↑') : '↕' });
+      control.append(indicator);
+      control.setAttribute('aria-label', `${label}: sort by ${sort === 'name' ? 'name A to Z' : sort === 'recent' ? 'most recently updated' : 'expiration, soonest first, never last'}`);
+      th.append(control);
+      if (active) th.setAttribute('aria-sort', sort === 'recent' ? 'descending' : 'ascending');
+    } else th.append(node('span', { className: label === 'Actions' ? 'sr-only' : '', textContent: label }));
+    head.append(th);
+  }
+  const table = node('table', { className: 'artifact-table' }, node('thead', {}, head), node('tbody', {}, ...items.map(artifactTableRow)));
+  table.setAttribute('aria-label', 'Artifacts');
+  return node('div', { className: 'artifact-table-wrap' }, table);
+}
+function artifactTableRow(item) {
+  const titleText = item.title || 'Untitled artifact';
+  const title = node('a', { className: 'artifact-title', href: viewerUrl(item), ariaLabel: titleText });
+  const icon = node('span', { className: 'artifact-icon', ariaHidden: 'true' });
+  icon.innerHTML = iconSvg(resolveIcon(item.icon, item.title));
+  title.append(node('span', { className: 'table-title-text' }, icon, titleText));
+  const excerpt = compactSearchDetail(item);
+  if (excerpt) {
+    excerpt.id = `search-evidence-${encodeURIComponent(item.id)}`;
+    title.setAttribute('aria-describedby', excerpt.id);
+    title.append(excerpt);
+  }
+  const detail = button('Details', () => openArtifactDetails(item), 'artifact-details-button');
+  detail.setAttribute('aria-label', `Search and date details for ${item.title || 'artifact'}`);
+  const summary = node('div', { className: 'table-artifact' }, node('div', { className: 'table-title-line' }, title, detail));
+  const cell = (label, className, ...children) => node('td', { className }, node('span', { className: 'mobile-cell-label', textContent: label }), ...children);
+  const updated = node('time', { dateTime: item.updatedAt, textContent: relativeDate(item.updatedAt), title: `${dateTimeText(item.updatedAt)} (${timeZoneName()})` });
+  const expiry = item.expiresAt ? node('time', { className: expirySoon(item.expiresAt) ? 'is-near-deadline' : '', dateTime: item.expiresAt, textContent: expiryLabel(item.expiresAt), title: `${dateTimeText(item.expiresAt)} (${timeZoneName()})` }) : node('span', { textContent: 'Never' });
+  const menu = button('⋯', () => openManage(item), 'icon-button artifact-menu');
+  menu.setAttribute('aria-label', `${item.canManage ? 'Manage' : 'Details for'} ${item.title || 'artifact'}`);
+  return node('tr', { className: `library-row${item.archived ? ' is-archived' : ''}` },
+    node('td', { className: 'table-artifact-cell' }, summary), cell('Updated', 'table-updated', updated), cell('Expires', 'table-expires', expiry),
+    cell('Shared to', 'table-sharing', sharingSummary(item)),
+    node('td', { className: 'table-actions' }, node('div', { className: 'table-action-buttons' }, starButton(item, 'row-star'), menu)));
+}
+function compactSearchDetail(item) {
+  if (!item.search) return null;
+  const detail = node('div', { className: 'compact-search' });
+  const parts = snippetParts(item.search.snippet);
+  if (parts.length) {
+    const excerpt = node('p', { className: 'search-excerpt' });
+    for (const part of parts) excerpt.append(part.match ? node('mark', { textContent: part.text }) : document.createTextNode(part.text));
+    detail.append(excerpt);
+  }
+  const notes = [termsNote(item.search), statusNote(item.searchIndex)].filter(Boolean);
+  if (notes.length) detail.append(node('p', { className: 'search-facts tiny', textContent: notes.join(' · ') }));
+  return detail;
+}
+function sharingSummary(item) {
+  if (!item.canManage || !item.sharingSummary) return node('span', { className: 'own-access', textContent: item.permission === 'write' ? 'Can edit' : 'Can view' });
+  const { activeCount, pendingCount, people } = item.sharingSummary;
+  const names = people.slice(0, Math.min(3, activeCount));
+  const summary = button('', () => openSharing(item), 'sharing-summary');
+  summary.setAttribute('aria-label', `Manage access for ${item.title || 'artifact'}: ${activeCount} active${names.length ? ` (${names.join(', ')})` : ''}${pendingCount ? `, ${pendingCount} pending` : ''}`);
+  const stack = node('span', { className: 'sharing-avatars', ariaHidden: 'true' });
+  for (const name of names) stack.append(node('span', { className: 'sharing-avatar', textContent: initials(name) }));
+  const remaining = Math.max(0, activeCount - names.length);
+  if (remaining) stack.append(node('span', { className: 'sharing-more', textContent: `+${remaining}` }));
+  summary.append(stack);
+  if (!activeCount) summary.append(node('span', { textContent: pendingCount ? 'No active grants' : 'No named grants' }));
+  if (pendingCount) summary.append(node('span', { className: 'sharing-pending', textContent: `${pendingCount} pending` }));
+  return summary;
+}
+function exactDateText(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return 'Unknown date';
+  return `${dateTimeText(value)} (${timeZoneName()}) · ${date.toISOString()}`;
+}
+function openArtifactDetails(item) {
+  const details = node('dl', { className: 'details-grid' });
+  for (const [label, value] of [['Owner', mine(item) ? 'You' : item.ownerName || 'Instance owner'],
+    ['Updated', exactDateText(item.updatedAt)], ['Created', exactDateText(item.createdAt)],
+    ['Expires', item.expiresAt ? exactDateText(item.expiresAt) : 'Never expires']]) {
+    details.append(node('dt', { textContent: label }), node('dd', { textContent: value }));
+  }
+  const search = searchDetailFor(item, true);
+  openDialog(`Details for ${item.title || 'artifact'}`, details, ...(search ? [search] : []));
 }
 function expirationSummary(item, prefix = true) {
   if (!item.expiresAt) return 'Never expires';
@@ -1180,7 +1326,7 @@ function expirationSummary(item, prefix = true) {
 }
 // A search hit's excerpt, reason, and any index caveat, rendered only from
 // text nodes. Nothing from the page source is ever interpreted as HTML.
-function searchDetailFor(item) {
+function searchDetailFor(item, full = false) {
   const search = item.search && typeof item.search === 'object' ? item.search : null;
   // Index state is only news beside a search result; the plain shelf says
   // nothing about it.
@@ -1191,16 +1337,18 @@ function searchDetailFor(item) {
   const status = statusNote(index);
   const parts = search.snippet ? snippetParts(search.snippet) : [];
   if (!parts.length && !reason && !terms && !status) return null;
-  const detail = node('div', { className: 'search-detail' });
+  const detail = node('div', { className: `search-detail${full ? ' full-search-detail' : ''}` });
   if (parts.length) {
     const excerpt = node('p', { className: 'search-excerpt' });
     for (const part of parts) {
       excerpt.append(part.match ? node('mark', { textContent: part.text }) : document.createTextNode(part.text));
     }
-    detail.append(excerpt, node('p', { className: 'search-path tiny', textContent: snippetPath(search.snippet) }));
+    const path = full && typeof search.snippet.path === 'string' && search.snippet.path ? search.snippet.path : snippetPath(search.snippet);
+    detail.append(excerpt, node('p', { className: 'search-path tiny', textContent: path }));
   }
   const notes = [reason, terms, status].filter(Boolean);
   if (notes.length) detail.append(node('p', { className: 'search-facts tiny', textContent: notes.join(' · ') }));
+  if (full && Array.isArray(search.matchedTerms)) detail.append(node('p', { className: 'search-terms tiny', textContent: `Matched words: ${search.matchedTerms.join(', ') || 'None'}` }));
   return detail;
 }
 function artifactEntries(items, inventory, grid) {
@@ -1723,7 +1871,17 @@ async function openSharing(item) {
       });
       body.append(form, node('p', { className: 'explain', textContent: 'Invited people can be added now. Their access becomes usable when they complete sign-in. Suspended accounts cannot receive new access.' }));
     } else body.append(node('p', { className: 'explain', textContent: 'No other invited or active members are available to add. The instance owner can invite more people.' }));
-  } catch (err) { if (seq === dialogSequence) message('dialog-error', err.message); }
+  } catch (err) {
+    if (seq !== dialogSequence) return;
+    $('dialog-body').replaceChildren();
+    message('dialog-error', err.message);
+    if (err.status === 403 || err.status === 404) {
+      // A transfer or revocation can invalidate a row without changing accounts.
+      // Discard the old summaries now, even if refreshing the list later fails.
+      $('content').replaceChildren(); recentItems = []; renderRecent();
+      void loadPage(); void loadRecent(true);
+    }
+  }
 }
 async function openTransfer(item) {
   const seq = openDialog('Transfer ownership', node('p', { textContent: 'Loading accounts…' }));

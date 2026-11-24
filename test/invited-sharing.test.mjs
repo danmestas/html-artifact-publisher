@@ -99,7 +99,7 @@ if (process.env.INVITED_SHARING_BROWSER_QA === '1') test('real browser: pending 
     await run('wait', '--fn', `document.querySelectorAll('#peopleList .person-row').length === 0`);
     await open(worker.base + '/?view=mine');
     await run('wait', '.artifact-title');
-    await evaluate(`[...document.querySelectorAll('.artifact-title')].find(a => new URL(a.href).pathname === ${JSON.stringify('/v/' + id)}).closest('article').querySelector('.artifact-menu').click()`);
+    await evaluate(`[...document.querySelectorAll('.artifact-title')].find(a => new URL(a.href).pathname === ${JSON.stringify('/v/' + id)}).closest('article,tr').querySelector('.artifact-menu').click()`);
     await run('find', 'role', 'button', 'click', '--name', 'Manage access');
     await run('wait', '#share-person');
     assert.equal(await evaluate(`[...document.getElementById('share-person').options].find(o => o.value === ${JSON.stringify(pending.user.id)}).textContent.includes('Invited')`), true);

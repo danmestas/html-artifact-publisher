@@ -7,7 +7,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {startWorker,freePort} from './helpers/worker.mjs';
 const exec=promisify(execFile);
-async function beforeDocument(url,source,navigate){
+async function beforeDocument(url,startUrl,source,navigate){
   const ws=new WebSocket(url);await new Promise((resolve,reject)=>{ws.onopen=resolve;ws.onerror=()=>reject(new Error('Browser control unavailable'));});
   let n=0;const pending=new Map();
   ws.onmessage=event=>{const d=JSON.parse(event.data);if(pending.has(d.id)){pending.get(d.id)(d);pending.delete(d.id);}};
@@ -16,7 +16,7 @@ async function beforeDocument(url,source,navigate){
     pending.set(id,d=>{clearTimeout(timer);d.error?reject(new Error('Browser control failed: '+method)):resolve(d.result);});
     ws.send(JSON.stringify({id,method,params,...(sessionId?{sessionId}:{})}));
   });
-  const {targetInfos}=await call('Target.getTargets');const target=targetInfos.find(t=>t.type==='page'&&t.url==='about:blank');assert.ok(target);
+  const {targetInfos}=await call('Target.getTargets');const target=targetInfos.find(t=>t.type==='page'&&t.url===startUrl);assert.ok(target);
   const {sessionId}=await call('Target.attachToTarget',{targetId:target.targetId,flatten:true});
   await call('Page.enable',{},sessionId);
   const {identifier}=await call('Page.addScriptToEvaluateOnNewDocument',{source},sessionId);
@@ -37,8 +37,14 @@ test('first account discovery cannot cancel an independently authorized reader c
     const port=await freePort();app=await startWorker(state,{}, {port});
     const response=await fetch(app.base+'/api/artifacts',{method:'POST',headers:{Authorization:'Bearer '+app.owner},body:JSON.stringify({title:'Reader scope fixture',ttlSeconds:null,files:{'index.html':Buffer.from('<!doctype html><html><head><title>Reader scope fixture</title></head><body><h1>READER-SCOPE-MARKER</h1></body></html>').toString('base64')}}),signal:AbortSignal.timeout(20000)});
     assert.equal(response.status,201);const artifact=await response.json();
-    await run('open','about:blank');
-    remove=await beforeDocument((await run('get','cdp-url')).trim(),`(()=>{
+    // Pin the already-loaded fixture tab. Page.navigate acknowledges navigation
+    // before the browser's tab list necessarily reports the new document URL.
+    const startUrl=app.base+'/healthz';
+    await run('open',startUrl);
+    const tabs=JSON.parse(await run('--json','tab','list')).data.tabs;
+    const tab=tabs.find(item=>item.url===startUrl);assert.ok(tab,'local fixture tab is open');
+    await run('--pin-tab','tab',tab.tabId);
+    remove=await beforeDocument((await run('get','cdp-url')).trim(),startUrl,`(()=>{
       const real=window.fetch.bind(window);const sessions=[];window.__initialAccountHandled=false;
       window.__releaseSessions=()=>sessions.splice(0).forEach(release=>release());
       window.fetch=(input,options)=>{
@@ -56,9 +62,8 @@ test('first account discovery cannot cancel an independently authorized reader c
         return real(input,options);
       };
     })()`,artifact.viewerUrl);
-    const tabs=JSON.parse(await run('--json','tab','list')).data.tabs;
-    const tab=tabs.find(item=>item.url.startsWith(app.base+'/v/'+artifact.id));assert.ok(tab);
-    await run('tab',tab.tabId);await run('wait','#frame[src^="blob:"]');
+    await run('wait','#frame[src^="blob:"]');
+    assert.equal(await evaluate('location.pathname'),'/v/'+artifact.id,'the same tab loaded the intended viewer');
     assert.equal(await evaluate('window.__initialAccountHandled'),false,'the capability document loads before account discovery');
     await evaluate('window.__holdCopyInfo=true;true');
     await run('click','#shareBtn');await run('click','#exportTab');await run('click','#saveHtmlBtn');

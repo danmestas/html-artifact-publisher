@@ -94,6 +94,13 @@ test('library search compares dates and named shares in compact accessible rows'
     const useCookie = cookie => run('cookies','set','artifact_session',cookie.slice(cookie.indexOf('=')+1),'--url',app.base,'--httpOnly','--sameSite','Lax');
     await useCookie(owner.cookie);
     await run('set','viewport','1280','800');
+    // Best match needs text. A stale bookmark must request the same fallback
+    // sort shown in the toolbar, including in the owner's Inventory.
+    for (const query of ['sort=relevance', 'view=admin&sort=relevance&q=%20']) {
+      await run('open',`${app.base}/?${query}`);
+      await waitFor(`document.querySelector('#content .artifact-title') || !document.getElementById('page-error').hidden`);
+      assert.ok(await evaluate(`document.getElementById('page-error').hidden && document.getElementById('sort').value==='recent' && document.querySelectorAll('#content .artifact-title').length===25`),`${query}: empty search opens the first recent page`);
+    }
     await go(app.base,'q=return&sort=name');
     assert.equal(await evaluate(`!!document.querySelector('#content table thead')`),true,'List presents a native comparison table');
     assert.match(await evaluate(`document.querySelector('#content thead').textContent`),/Artifact[\s\S]*Updated[\s\S]*Expires[\s\S]*Shared (to|with)/i);
